@@ -1,0 +1,8 @@
+pandas
+python-dotenv
+aiohttp
+fuzzywuzzy
+python-Levenshtein
+matplotlib
+seaborn
+ipykernel
