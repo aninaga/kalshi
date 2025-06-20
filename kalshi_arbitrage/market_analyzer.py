@@ -772,10 +772,14 @@ class MarketAnalyzer:
         sell_fee_multiplier = 1 - sell_fee_rate
         
         # Fast early termination check
-        min_sell_price = sell_orders[0]['price'] * sell_fee_multiplier
-        max_buy_price = buy_orders[-1]['price'] * buy_fee_multiplier
-        
-        if min_sell_price <= max_buy_price:
+        # Use best available prices (highest bid, lowest ask) to see if any
+        # profitable trade is even possible. Previously this check used the
+        # worst ask price which could incorrectly abort when cheaper orders
+        # existed earlier in the book.
+        max_sell_price = sell_orders[0]['price'] * sell_fee_multiplier
+        min_buy_price = buy_orders[0]['price'] * buy_fee_multiplier
+
+        if max_sell_price <= min_buy_price:
             return []  # No profitable opportunities possible
         
         buy_index = 0
