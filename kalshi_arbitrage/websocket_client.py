@@ -560,12 +560,15 @@ class RealTimeDataManager:
     
     def get_connection_stats(self) -> Dict:
         """Get statistics for both connections."""
-        return {
-            'kalshi': self.kalshi_client.get_stats(),
-            'polymarket': self.polymarket_client.get_stats(),
+        stats = {
             'live_markets': len(self.live_prices),
             'data_handlers': {k: len(v) for k, v in self.data_handlers.items()}
         }
+        if self.kalshi_client:
+            stats['kalshi'] = self.kalshi_client.get_stats()
+        if self.polymarket_client:
+            stats['polymarket'] = self.polymarket_client.get_stats()
+        return stats
     
     async def subscribe_to_markets(self, kalshi_tickers: List[str] = None, polymarket_assets: List[str] = None):
         """Subscribe to specific markets on both platforms."""
