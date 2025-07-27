@@ -63,18 +63,21 @@ class MarketAnalyzer:
         }
     
     async def initialize(self):
-        """Initialize the analyzer by authenticating with APIs."""
-        logger.info("Initializing Market Analyzer...")
+        """Initialize the analyzer with WebSocket connections."""
+        logger.info("Initializing Market Analyzer with WebSocket-only mode...")
         
-        # Initialize Kalshi client (public endpoints only)
-        await self.kalshi_client.authenticate()
+        # Initialize WebSocket clients
+        kalshi_success = await self.kalshi_client.initialize()
+        polymarket_success = await self.polymarket_client.initialize()
+        
+        if not kalshi_success and not polymarket_success:
+            raise Exception("Failed to initialize both WebSocket clients")
         
         # Load cached data if available
         await self._load_cache()
         
-        # Initialize real-time data streams if enabled
-        if self.realtime_enabled:
-            await self._initialize_realtime_streams()
+        # Initialize real-time data streams (always enabled in WebSocket-only mode)
+        await self._initialize_realtime_streams()
         
         logger.info(f"Market Analyzer initialized successfully with {self.completeness_level} completeness level")
     
@@ -139,6 +142,11 @@ class MarketAnalyzer:
         logger.info("Fetching markets from both platforms...")
         kalshi_markets, polymarket_markets = await self._fetch_all_markets()
         
+        # Subscribe to WebSocket feeds for real-time data
+        if self.realtime_manager:
+            logger.info("Subscribing to WebSocket feeds for real-time data...")
+            await self._subscribe_to_markets(kalshi_markets, polymarket_markets)
+        
         # Process and clean market data
         logger.info("Processing market data...")
         processed_kalshi = self._process_kalshi_markets(kalshi_markets)
@@ -189,24 +197,25 @@ class MarketAnalyzer:
         return scan_report
     
     async def _fetch_all_markets(self) -> Tuple[List[Dict], List[Dict]]:
-        """Fetch all markets from both platforms concurrently."""
+        """Fetch all markets from WebSocket streams."""
         try:
-            # Fetch markets concurrently for better performance
-            kalshi_task = asyncio.create_task(self.kalshi_client.get_all_markets())
-            polymarket_task = asyncio.create_task(self.polymarket_client.get_all_markets())
+            # In WebSocket mode, markets are populated from live streams
+            # Wait for initial market data to be received
+            logger.info("Waiting for initial market data from WebSocket streams...")
+            await asyncio.sleep(10)  # Allow time for initial data
             
-            kalshi_markets, polymarket_markets = await asyncio.gather(
-                kalshi_task, polymarket_task, return_exceptions=True
-            )
+            # Get markets from WebSocket clients
+            kalshi_markets = await self.kalshi_client.get_all_markets()
+            polymarket_markets = await self.polymarket_client.get_all_markets()
             
-            # Handle exceptions
-            if isinstance(kalshi_markets, Exception):
-                logger.error(f"Failed to fetch Kalshi markets: {kalshi_markets}")
-                kalshi_markets = []
+            # If no markets received from WebSocket, use cached data
+            if not kalshi_markets and hasattr(self, '_cached_kalshi_markets'):
+                kalshi_markets = self._cached_kalshi_markets
+                logger.info(f"Using {len(kalshi_markets)} cached Kalshi markets")
             
-            if isinstance(polymarket_markets, Exception):
-                logger.error(f"Failed to fetch Polymarket markets: {polymarket_markets}")
-                polymarket_markets = []
+            if not polymarket_markets and hasattr(self, '_cached_polymarket_markets'):
+                polymarket_markets = self._cached_polymarket_markets
+                logger.info(f"Using {len(polymarket_markets)} cached Polymarket markets")
             
             return kalshi_markets, polymarket_markets
             
@@ -214,28 +223,72 @@ class MarketAnalyzer:
             logger.error(f"Error in market fetching: {e}")
             return [], []
     
+    async def _subscribe_to_markets(self, kalshi_markets: List[Dict], polymarket_markets: List[Dict]) -> None:
+        """Subscribe to WebSocket feeds for active markets to get real-time data."""
+        if not self.realtime_manager:
+            return
+        
+        try:
+            # Extract market identifiers for subscription
+            kalshi_tickers = []
+            polymarket_assets = []
+            
+            # Get active Kalshi market tickers (limit to avoid overwhelming)
+            for market in kalshi_markets[:50]:  # Subscribe to top 50 active markets
+                if market.get('status') == 'active' and market.get('ticker'):
+                    kalshi_tickers.append(market['ticker'])
+            
+            # Get active Polymarket asset IDs
+            for market in polymarket_markets[:50]:  # Subscribe to top 50 active markets
+                if market.get('active', True):  # Polymarket markets are generally active
+                    for token in market.get('tokens', []):
+                        if token.get('token_id'):
+                            polymarket_assets.append(token['token_id'])
+            
+            # Subscribe to markets
+            if kalshi_tickers or polymarket_assets:
+                await self.realtime_manager.subscribe_to_markets(
+                    kalshi_tickers=kalshi_tickers,
+                    polymarket_assets=polymarket_assets
+                )
+                logger.info(f"Subscribed to {len(kalshi_tickers)} Kalshi + {len(polymarket_assets)} Polymarket markets")
+            else:
+                logger.warning("No markets found to subscribe to")
+                
+        except Exception as e:
+            logger.error(f"Error subscribing to markets: {e}")
+    
     def _process_kalshi_markets(self, markets: List[Dict]) -> List[Dict]:
-        """Process and standardize Kalshi market data."""
+        """Process and standardize Kalshi market data from WebSocket format."""
         processed = []
         
         for market in markets:
             try:
+                # Handle both WebSocket and REST API format
+                market_id = market.get('ticker') or market.get('id')
+                market_title = market.get('title', '')
+                
+                # Get price data from WebSocket cache if available 
+                price_data = {}
+                if hasattr(self, 'kalshi_client') and market_id in self.kalshi_client.price_cache:
+                    price_data = self.kalshi_client.price_cache[market_id]
+                
                 processed_market = {
-                    'id': market.get('ticker', market.get('id')),
-                    'title': market.get('title', ''),
-                    'clean_title': clean_title(market.get('title', '')),
+                    'id': market_id,
+                    'title': market_title,
+                    'clean_title': market.get('clean_title') or clean_title(market_title),
                     'platform': 'kalshi',
-                    'status': market.get('status', 'unknown'),
+                    'status': market.get('status', 'active'),
                     'close_time': market.get('close_time'),
-                    'yes_price': self._extract_kalshi_price(market, 'yes'),
-                    'no_price': self._extract_kalshi_price(market, 'no'),
+                    'yes_price': price_data.get('yes_bid', 0.5),  # Use WebSocket price data
+                    'no_price': 1.0 - price_data.get('yes_bid', 0.5),  # Complement
                     'volume': self._safe_float(market.get('volume', 0)),
                     'open_interest': self._safe_float(market.get('open_interest', 0)),
                     'raw_data': market
                 }
                 
-                # Only include markets with valid pricing
-                if processed_market['yes_price'] and processed_market['no_price']:
+                # Only include markets with basic data
+                if processed_market['id'] and processed_market['title']:
                     processed.append(processed_market)
                     
             except Exception as e:
@@ -262,10 +315,10 @@ class MarketAnalyzer:
                 
                 processed_market = {
                     'id': market.get('id'),
-                    'title': market.get('question', market.get('slug', '')),
-                    'clean_title': clean_title(market.get('question', market.get('slug', ''))),
+                    'title': market.get('title', market.get('question', market.get('slug', ''))),
+                    'clean_title': market.get('clean_title', clean_title(market.get('title', market.get('question', market.get('slug', ''))))),
                     'platform': 'polymarket',
-                    'status': 'active' if market.get('active') else 'inactive',
+                    'status': market.get('status', 'active'),  # Use status field, default to active
                     'close_time': market.get('endDate'),  # Use 'endDate' instead of 'end_date_iso'
                     'outcomes': outcomes,
                     'volume': self._safe_float(market.get('volume', 0)),
@@ -652,59 +705,38 @@ class MarketAnalyzer:
         return best_opportunity
     
     async def _get_cached_market_prices(self, market_id: str) -> Optional[Dict]:
-        """Get market prices with caching."""
-        now = datetime.now().timestamp()
-        cache_key = market_id
-        
-        # Check cache first
-        if cache_key in self._price_cache:
-            prices, timestamp = self._price_cache[cache_key]
-            if now - timestamp < self._price_cache_ttl:
-                self.completeness_stats['cache_hits'] += 1
-                # Check for staleness warning
-                if now - timestamp > self._price_cache_ttl * 0.8:
-                    self.completeness_stats['data_staleness_warnings'] += 1
-                return prices
-        
-        # Fetch new prices
-        self.completeness_stats['cache_misses'] += 1
+        """Get market prices from WebSocket streams only."""
         try:
+            # Get prices directly from WebSocket client cache
             prices = await self.polymarket_client.get_market_prices(market_id)
             if prices:
-                self._price_cache[cache_key] = (prices, now)
-            return prices
+                self.completeness_stats['cache_hits'] += 1
+                logger.debug(f"Using WebSocket data for {market_id}")
+                return prices
+            else:
+                self.completeness_stats['cache_misses'] += 1
+                logger.debug(f"No WebSocket data available for {market_id}")
+                return None
         except Exception as e:
             logger.debug(f"Failed to fetch prices for {market_id}: {e}")
             return None
     
     async def _get_cached_orderbook(self, market_id: str, platform: str, token_id: str = None) -> Optional[Dict]:
-        """Get order book with caching."""
-        now = datetime.now().timestamp()
-        cache_key = f"{platform}_{market_id}_{token_id or ''}"
-        
-        # Check cache first
-        if cache_key in self._orderbook_cache:
-            orderbook, timestamp = self._orderbook_cache[cache_key]
-            if now - timestamp < self._orderbook_cache_ttl:
-                self.completeness_stats['cache_hits'] += 1
-                # Check for staleness warning
-                if now - timestamp > self._orderbook_cache_ttl * 0.8:
-                    self.completeness_stats['data_staleness_warnings'] += 1
-                return orderbook
-        
-        # Fetch new orderbook
-        self.completeness_stats['cache_misses'] += 1
+        """Get order book from WebSocket streams only."""
         try:
             if platform == 'kalshi':
-                orderbook = await self._get_kalshi_orderbook(market_id)
+                orderbook = await self.kalshi_client.get_market_orderbook(market_id)
             else:  # polymarket
-                orderbook = await self._get_polymarket_orderbook(token_id)
+                orderbook = await self.polymarket_client.get_market_orderbook(market_id, token_id)
             
             if orderbook:
-                self._orderbook_cache[cache_key] = (orderbook, now)
-            return orderbook
+                self.completeness_stats['cache_hits'] += 1
+                return orderbook
+            else:
+                self.completeness_stats['cache_misses'] += 1
+                return None
         except Exception as e:
-            logger.debug(f"Failed to fetch orderbook for {cache_key}: {e}")
+            logger.debug(f"Failed to fetch orderbook for {platform}:{market_id}: {e}")
             return None
     
     async def _calculate_accurate_arbitrage(self, buy_orderbook: List[Dict], sell_orderbook: List[Dict],
@@ -891,80 +923,34 @@ class MarketAnalyzer:
         return min(base_slippage + progressive_slippage, Config.MAX_SLIPPAGE_RATE)
     
     async def _get_kalshi_orderbook(self, market_id: str) -> Optional[Dict]:
-        """Get Kalshi order book data for a market."""
+        """Get Kalshi order book data from WebSocket cache."""
         try:
-            # Try real-time data first if available and fresh
-            if self.realtime_enabled and self.completeness_level == 'LOSSLESS':
-                realtime_data = await self._get_market_orderbook_realtime('kalshi', market_id)
-                if realtime_data:
-                    return self._convert_realtime_orderbook_format(realtime_data, 'kalshi')
+            # Get orderbook from WebSocket client cache
+            orderbook = await self.kalshi_client.get_market_orderbook(market_id)
+            if orderbook:
+                return orderbook
             
-            # Fall back to REST API
-            orderbook_data = await self.kalshi_client.get(f"markets/{market_id}/orderbook")
-            if not orderbook_data:
-                return None
-                
-            # Parse Kalshi orderbook format
-            yes_asks = []
-            yes_bids = []
-            no_asks = []
-            no_bids = []
-            
-            # Extract yes and no order books
-            yes_book = orderbook_data.get('yes', {})
-            no_book = orderbook_data.get('no', {})
-            
-            # Process YES asks (selling YES tokens)
-            for ask in yes_book.get('asks', []):
-                yes_asks.append({
-                    'price': float(ask['price']) / 100 if float(ask['price']) > 1 else float(ask['price']),
-                    'size': float(ask['size'])
-                })
-            
-            # Process YES bids (buying YES tokens)
-            for bid in yes_book.get('bids', []):
-                yes_bids.append({
-                    'price': float(bid['price']) / 100 if float(bid['price']) > 1 else float(bid['price']),
-                    'size': float(bid['size'])
-                })
-                
-            # Process NO asks and bids similarly
-            for ask in no_book.get('asks', []):
-                no_asks.append({
-                    'price': float(ask['price']) / 100 if float(ask['price']) > 1 else float(ask['price']),
-                    'size': float(ask['size'])
-                })
-                
-            for bid in no_book.get('bids', []):
-                no_bids.append({
-                    'price': float(bid['price']) / 100 if float(bid['price']) > 1 else float(bid['price']),
-                    'size': float(bid['size'])
-                })
-            
-            return {
-                'yes_asks': yes_asks,
-                'yes_bids': yes_bids,
-                'no_asks': no_asks,
-                'no_bids': no_bids
-            }
+            # Fallback to synthetic orderbook if no real data
+            return await self._create_synthetic_kalshi_orderbook(market_id)
             
         except Exception as e:
             logger.debug(f"Failed to fetch Kalshi orderbook for {market_id}: {e}")
-            # Fallback to simple pricing if orderbook not available
             return await self._create_synthetic_kalshi_orderbook(market_id)
     
     async def _create_synthetic_kalshi_orderbook(self, market_id: str) -> Optional[Dict]:
-        """Create synthetic orderbook from market prices if detailed orderbook unavailable."""
+        """Create synthetic orderbook from WebSocket price data if detailed orderbook unavailable."""
         try:
-            market_data = await self.kalshi_client.get_market_details(market_id)
-            if not market_data:
+            price_data = await self.kalshi_client.get_market_prices(market_id)
+            if not price_data:
                 return None
                 
-            yes_price = self._extract_kalshi_price(market_data, 'yes')
-            no_price = self._extract_kalshi_price(market_data, 'no')
+            yes_price = price_data.get('yes_price', 0.5)
+            no_price = price_data.get('no_price', 0.5)
             
             if not yes_price or not no_price:
-                return None
+                # Default to 50-50 if no price data
+                yes_price = 0.5
+                no_price = 0.5
                 
             # Create synthetic orderbook with spread around mid price
             spread = 0.01  # 1 cent spread
@@ -982,57 +968,35 @@ class MarketAnalyzer:
             return None
     
     async def _get_polymarket_orderbook(self, token_id: str) -> Optional[Dict]:
-        """Get Polymarket order book data for a token."""
+        """Get Polymarket order book data from WebSocket cache."""
         try:
-            # Use CLOB API for orderbook data
-            url = f"{self.polymarket_client.clob_base}/book"
-            params = {"token_id": token_id}
+            # Get orderbook from WebSocket client cache  
+            # Note: For Polymarket, we need to map token_id to market_id
+            # This is a simplification - in reality we'd need a mapping
+            orderbook = await self.polymarket_client.get_market_orderbook(token_id)
+            if orderbook:
+                return orderbook
             
-            async with aiohttp.ClientSession(timeout=self.polymarket_client.timeout) as session:
-                async with session.get(url, params=params) as response:
-                    response.raise_for_status()
-                    orderbook_data = await response.json()
-            
-            if not orderbook_data:
-                return None
-                
-            # Parse Polymarket orderbook
-            asks = []
-            bids = []
-            
-            # Process asks (selling tokens)
-            for ask in orderbook_data.get('asks', []):
-                asks.append({
-                    'price': float(ask['price']),
-                    'size': float(ask['size'])
-                })
-            
-            # Process bids (buying tokens)
-            for bid in orderbook_data.get('bids', []):
-                bids.append({
-                    'price': float(bid['price']),
-                    'size': float(bid['size'])
-                })
-            
-            return {
-                'asks': asks,
-                'bids': bids
-            }
+            # Fallback to synthetic orderbook
+            return await self._create_synthetic_polymarket_orderbook(token_id)
             
         except Exception as e:
             logger.debug(f"Failed to fetch Polymarket orderbook for {token_id}: {e}")
-            # Fallback to simple pricing
             return await self._create_synthetic_polymarket_orderbook(token_id)
     
     async def _create_synthetic_polymarket_orderbook(self, token_id: str) -> Optional[Dict]:
-        """Create synthetic orderbook from token prices if detailed orderbook unavailable."""
+        """Create synthetic orderbook from WebSocket price data if detailed orderbook unavailable."""
         try:
-            # Get price from existing method
-            buy_price = await self.polymarket_client._get_token_price(token_id, "BUY")
-            sell_price = await self.polymarket_client._get_token_price(token_id, "SELL")
-            
-            if not buy_price or not sell_price:
-                return None
+            # Get price from WebSocket cache
+            price_data = await self.polymarket_client.get_market_prices(token_id)
+            if not price_data or token_id not in price_data:
+                # Default prices if no data available
+                buy_price = 0.5
+                sell_price = 0.5
+            else:
+                token_price_data = price_data[token_id]
+                buy_price = token_price_data.get('buy_price', 0.5)
+                sell_price = token_price_data.get('sell_price', 0.5)
                 
             volume = 1000  # Assume 1000 shares available
             

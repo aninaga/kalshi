@@ -171,17 +171,18 @@ class KalshiWebSocketClient(WebSocketManager):
         from cryptography.hazmat.primitives.asymmetric import padding
         
         kalshi_api_key = os.getenv('KALSHI_API_KEY')
-        kalshi_private_key = os.getenv('KALSHI_PRIVATE_KEY')
         
-        if not kalshi_api_key or not kalshi_private_key:
+        if not kalshi_api_key:
             return {}
         
         try:
-            # Load private key
-            private_key = serialization.load_pem_private_key(
-                kalshi_private_key.encode('utf-8'),
-                password=None
-            )
+            # Load private key from file
+            key_path = '/Users/anirudh/Desktop/kalshi/kalshi_private_key.pem'
+            with open(key_path, 'rb') as key_file:
+                private_key = serialization.load_pem_private_key(
+                    key_file.read(),
+                    password=None
+                )
             
             # Create timestamp
             timestamp = str(int(time.time() * 1000))
@@ -261,38 +262,40 @@ class KalshiWebSocketClient(WebSocketManager):
             logger.debug(f"Received response for command {data['id']}: {command_info}")
             return None
         
-        # Handle streaming updates
-        if 'msg' in data:
-            msg_type = data['msg']
+        # Handle streaming updates - Kalshi format has 'type' field
+        if 'type' in data:
+            msg_type = data['type']
+            msg_data = data.get('msg', {})
             
             if msg_type == 'orderbook_delta':
                 return StreamMessage(
                     platform='kalshi',
                     channel='orderbook',
-                    market_id=data.get('market_ticker', ''),
+                    market_id=msg_data.get('market_ticker', ''),
                     data={
-                        'yes_bids': data.get('yes', {}).get('bid', []),
-                        'yes_asks': data.get('yes', {}).get('ask', []),
-                        'no_bids': data.get('no', {}).get('bid', []),
-                        'no_asks': data.get('no', {}).get('ask', []),
-                        'sequence': data.get('seq', None)
+                        'yes_bids': msg_data.get('yes', {}).get('bid', []),
+                        'yes_asks': msg_data.get('yes', {}).get('ask', []),
+                        'no_bids': msg_data.get('no', {}).get('bid', []),
+                        'no_asks': msg_data.get('no', {}).get('ask', []),
+                        'sequence': msg_data.get('seq', None)
                     },
                     timestamp=time.time(),
-                    sequence=data.get('seq')
+                    sequence=msg_data.get('seq')
                 )
             
             elif msg_type == 'ticker_v2':
                 return StreamMessage(
                     platform='kalshi',
                     channel='ticker',
-                    market_id=data.get('market_ticker', ''),
+                    market_id=msg_data.get('market_ticker', ''),
                     data={
-                        'yes_bid': data.get('yes_bid'),
-                        'yes_ask': data.get('yes_ask'),
-                        'no_bid': data.get('no_bid'),
-                        'no_ask': data.get('no_ask'),
-                        'last_price': data.get('last_price'),
-                        'volume': data.get('volume')
+                        'yes_bid': msg_data.get('yes_bid'),
+                        'yes_ask': msg_data.get('yes_ask'),
+                        'no_bid': msg_data.get('no_bid'),
+                        'no_ask': msg_data.get('no_ask'),
+                        'last_price': msg_data.get('last_price'),
+                        'volume': msg_data.get('volume'),
+                        'market_ticker': msg_data.get('market_ticker')
                     },
                     timestamp=time.time()
                 )
@@ -301,13 +304,13 @@ class KalshiWebSocketClient(WebSocketManager):
                 return StreamMessage(
                     platform='kalshi',
                     channel='trade',
-                    market_id=data.get('market_ticker', ''),
+                    market_id=msg_data.get('market_ticker', ''),
                     data={
-                        'side': data.get('side'),
-                        'count': data.get('count'),
-                        'price': data.get('price'),
-                        'taker_side': data.get('taker_side'),
-                        'trade_time': data.get('ts')
+                        'side': msg_data.get('side'),
+                        'count': msg_data.get('count'),
+                        'price': msg_data.get('price'),
+                        'taker_side': msg_data.get('taker_side'),
+                        'trade_time': msg_data.get('ts')
                     },
                     timestamp=time.time()
                 )

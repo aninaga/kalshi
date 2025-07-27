@@ -1,337 +1,465 @@
-import aiohttp
 import asyncio
 import json
 import logging
 import os
 import time
-import base64
 from typing import Optional, Dict, List, Any
-from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import padding
 from .config import Config
+from .websocket_client import RealTimeDataManager, KalshiWebSocketClient, PolymarketWebSocketClient
 
 logger = logging.getLogger(__name__)
 
-class APIClient:
-    """Base class for async API clients with retry logic."""
-    
-    def __init__(self, base_url: str, timeout: int = 30):
-        self.base_url = base_url.rstrip('/')
-        self.timeout = aiohttp.ClientTimeout(total=timeout)
-    
-    async def _request_with_retry(self, method: str, endpoint: str, **kwargs) -> Optional[Dict[str, Any]]:
-        """Make request with retry logic."""
-        url = f"{self.base_url}/{endpoint.lstrip('/')}"
-        
-        for attempt in range(Config.MAX_RETRIES):
-            try:
-                async with aiohttp.ClientSession(timeout=self.timeout) as session:
-                    async with session.request(method, url, **kwargs) as response:
-                        response.raise_for_status()
-                        return await response.json()
-            except aiohttp.ClientError as e:
-                if attempt == Config.MAX_RETRIES - 1:
-                    logger.error(f"API request failed after {Config.MAX_RETRIES} attempts for {url}: {e}")
-                    return None
-                else:
-                    logger.warning(f"Attempt {attempt + 1} failed for {url}: {e}, retrying...")
-                    await asyncio.sleep(Config.RETRY_DELAY)
-            except Exception as e:
-                logger.error(f"Unexpected error for {url}: {e}")
-                return None
-    
-    async def get(self, endpoint: str, **kwargs) -> Optional[Dict[str, Any]]:
-        """GET request wrapper with retry logic."""
-        return await self._request_with_retry("GET", endpoint, **kwargs)
-    
-    async def post(self, endpoint: str, **kwargs) -> Optional[Dict[str, Any]]:
-        """POST request wrapper with retry logic."""
-        return await self._request_with_retry("POST", endpoint, **kwargs)
-
-class KalshiClient(APIClient):
-    """Kalshi API client with optional authentication for WebSocket access."""
+class KalshiClient:
+    """Hybrid Kalshi client: REST market discovery + WebSocket real-time data."""
     
     def __init__(self):
-        super().__init__(Config.KALSHI_API_BASE)
-        self.session_headers = {}
+        self.websocket_client = None
         self.auth_token = None
-        self.user_id = None
-    
-    def _sign_pss_text(self, private_key, text: str) -> str:
-        """Sign text using RSA-PSS with SHA256."""
-        message = text.encode('utf-8')
-        signature = private_key.sign(
-            message,
-            padding.PSS(
-                mgf=padding.MGF1(hashes.SHA256()),
-                salt_length=padding.PSS.DIGEST_LENGTH
-            ),
-            hashes.SHA256()
-        )
-        return base64.b64encode(signature).decode('utf-8')
-    
-    def _get_auth_headers(self, method: str, path: str) -> Dict[str, str]:
-        """Generate authentication headers for RSA-signed requests."""
-        kalshi_api_key = os.getenv('KALSHI_API_KEY')
-        kalshi_private_key = os.getenv('KALSHI_PRIVATE_KEY')
+        self.markets_cache = {}
+        self.price_cache = {}
+        self.orderbook_cache = {}
+        self.discovered_tickers = []  # Store all discovered market tickers
         
-        if not kalshi_api_key or not kalshi_private_key:
-            return {}
+    async def initialize(self) -> bool:
+        """Initialize with REST market discovery + WebSocket connection."""
+        try:
+            # Step 1: Bootstrap market discovery via REST API
+            logger.info("Discovering Kalshi markets via REST API...")
+            await self._discover_markets_via_rest()
+            
+            # Step 2: Initialize WebSocket connection
+            config = Config.WEBSOCKET_CONFIG['kalshi']
+            self.websocket_client = KalshiWebSocketClient(config, self.auth_token)
+            
+            # Set up data handlers
+            self.websocket_client.add_message_handler('ticker', self._handle_price_update)
+            self.websocket_client.add_message_handler('orderbook', self._handle_orderbook_update)
+            
+            await self.websocket_client.connect()
+            
+            # Subscribe to all markets after connection
+            if self.websocket_client.is_connected:
+                await self.websocket_client.subscribe_to_all_markets(['ticker_v2'])
+                logger.info("Subscribed to all Kalshi markets")
+            
+            logger.info(f"Kalshi client initialized with {len(self.markets_cache)} markets discovered via REST")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to initialize Kalshi client: {e}")
+            return False
+    
+    async def _handle_price_update(self, message):
+        """Handle real-time price updates."""
+        market_ticker = message.data.get('market_ticker')
+        if not market_ticker:
+            return
+            
+        # Store price data
+        self.price_cache[market_ticker] = {
+            'yes_price': message.data.get('yes_bid', 0) / 100.0 if message.data.get('yes_bid') else 0.5,  # Convert cents to dollars
+            'no_price': message.data.get('no_bid', 0) / 100.0 if message.data.get('no_bid') else 0.5,
+            'yes_ask': message.data.get('yes_ask', 0) / 100.0 if message.data.get('yes_ask') else 0.5,
+            'yes_bid': message.data.get('yes_bid', 0) / 100.0 if message.data.get('yes_bid') else 0.5,
+            'timestamp': message.timestamp
+        }
+        
+        # Also store basic market info
+        if market_ticker not in self.markets_cache:
+            self.markets_cache[market_ticker] = {
+                'id': message.market_id,
+                'ticker': market_ticker,
+                'title': market_ticker,  # We'll use ticker as title for now
+                'platform': 'kalshi',
+                'status': 'active',
+                'clean_title': self._clean_title(market_ticker)
+            }
+    
+    def _clean_title(self, title: str) -> str:
+        """Basic title cleaning."""
+        return title.replace('-', ' ').replace('KX', '').lower().strip()
+    
+    async def _discover_markets_via_rest(self):
+        """Discover all markets via REST API."""
+        import aiohttp
         
         try:
-            # Load private key
-            private_key = serialization.load_pem_private_key(
-                kalshi_private_key.encode('utf-8'),
-                password=None
-            )
-            
-            # Create timestamp
-            timestamp = str(int(time.time() * 1000))
-            
-            # Create message to sign: timestamp + method + path
-            msg_string = timestamp + method + path
-            
-            # Sign the message
-            signature = self._sign_pss_text(private_key, msg_string)
-            
-            logger.debug(f"Auth details - Method: {method}, Path: {path}, Message: {msg_string[:50]}...")
-            
-            return {
-                'KALSHI-ACCESS-KEY': kalshi_api_key,
-                'KALSHI-ACCESS-SIGNATURE': signature,
-                'KALSHI-ACCESS-TIMESTAMP': timestamp
-            }
+            async with aiohttp.ClientSession() as session:
+                # Get all events first
+                events_url = f"{Config.KALSHI_API_BASE}/events"
+                async with session.get(events_url) as response:
+                    if response.status == 200:
+                        events_data = await response.json()
+                        events = events_data.get('events', [])
+                        logger.info(f"Discovered {len(events)} Kalshi events")
+                    else:
+                        logger.warning(f"Failed to fetch Kalshi events: {response.status}")
+                        events = []
+                
+                # Get markets for each event (or use global markets endpoint)
+                markets_url = f"{Config.KALSHI_API_BASE}/markets"
+                all_markets = []
+                
+                # Paginate through markets with reasonable limit for performance
+                cursor = None
+                page_count = 0
+                max_pages = 50  # Reasonable limit: 50 pages * 200 = 10,000 markets max
+                
+                while page_count < max_pages:
+                    params = {'limit': 200}  # Max limit per request
+                    if cursor:
+                        params['cursor'] = cursor
+                    
+                    try:
+                        # Increased timeout for reliability
+                        timeout = aiohttp.ClientTimeout(total=15)  # 15 second timeout per request
+                        async with session.get(markets_url, params=params, timeout=timeout) as response:
+                            if response.status == 200:
+                                data = await response.json()
+                                markets = data.get('markets', [])
+                                
+                                if not markets:
+                                    logger.info(f"No more markets found after page {page_count}")
+                                    break
+                                    
+                                all_markets.extend(markets)
+                                cursor = data.get('cursor')
+                                page_count += 1
+                                logger.info(f"Fetched page {page_count}, {len(markets)} markets, total: {len(all_markets)}")
+                                
+                                # Break if no cursor (end of data)
+                                if not cursor:
+                                    break
+                            else:
+                                logger.warning(f"Failed to fetch Kalshi markets: {response.status}")
+                                break
+                    except asyncio.TimeoutError:
+                        logger.warning(f"Timeout on page {page_count + 1}, retrying once...")
+                        # Retry once before giving up
+                        try:
+                            async with session.get(markets_url, params=params, timeout=timeout) as response:
+                                if response.status == 200:
+                                    data = await response.json()
+                                    markets = data.get('markets', [])
+                                    if markets:
+                                        all_markets.extend(markets)
+                                        cursor = data.get('cursor')
+                                        page_count += 1
+                                        logger.info(f"Retry successful: page {page_count}, total: {len(all_markets)}")
+                                        if not cursor:
+                                            break
+                                        continue
+                        except Exception as retry_e:
+                            logger.warning(f"Retry failed: {retry_e}")
+                        logger.info(f"Stopping pagination after timeout, captured {len(all_markets)} markets")
+                        break
+                    except Exception as e:
+                        logger.warning(f"Error fetching page {page_count + 1}: {e}, continuing...")
+                        break
+                
+                logger.info(f"Discovered {len(all_markets)} total Kalshi markets via REST")
+                
+                # Process and cache the discovered markets
+                for market in all_markets:
+                    ticker = market.get('ticker')
+                    if ticker:
+                        self.discovered_tickers.append(ticker)
+                        self.markets_cache[ticker] = {
+                            'id': market.get('id'),
+                            'ticker': ticker,
+                            'title': market.get('title', ticker),
+                            'platform': 'kalshi',
+                            'status': market.get('status', 'active'),
+                            'close_time': market.get('close_time'),
+                            'clean_title': self._clean_title(market.get('title', ticker)),
+                            'raw_data': market
+                        }
+                
+                logger.info(f"Cached {len(self.markets_cache)} Kalshi markets from REST discovery")
+                
         except Exception as e:
-            logger.error(f"Error creating auth headers: {e}")
-            return {}
+            logger.error(f"Failed to discover Kalshi markets via REST: {e}")
+            # Continue with empty cache - WebSocket might still provide some data
     
-    async def authenticate(self) -> bool:
-        """Authenticate with Kalshi API using RSA private key and get WebSocket token."""
-        kalshi_api_key = os.getenv('KALSHI_API_KEY')
-        kalshi_private_key = os.getenv('KALSHI_PRIVATE_KEY')
-        
-        if kalshi_api_key and kalshi_private_key:
-            try:
-                # Test with a simpler public endpoint first
-                logger.info("Testing Kalshi RSA authentication...")
-                response = await self._kalshi_request_with_retry('GET', 'portfolio')
-                if response:
-                    # Create a simple access token (for WebSocket auth)
-                    self.auth_token = kalshi_api_key  # Use API key as token for now
-                    logger.info("Successfully configured Kalshi RSA authentication")
-                    return True
-                else:
-                    logger.warning("Kalshi RSA authentication failed, using public endpoints")
-                    return False
-            except Exception as e:
-                logger.warning(f"Kalshi authentication error: {e}, using public endpoints")
-                return False
-        else:
-            logger.info("Using Kalshi public endpoints (no authentication required)")
-            return True
-    
-    async def _kalshi_request_with_retry(self, method: str, endpoint: str, **kwargs) -> Optional[Dict[str, Any]]:
-        """Make Kalshi request with RSA authentication."""
-        url = f"{self.base_url}/{endpoint.lstrip('/')}"
-        path = f"/trade-api/v2/{endpoint.lstrip('/')}"
-        
-        # Add authentication headers if available
-        auth_headers = self._get_auth_headers(method, path)
-        if 'headers' not in kwargs:
-            kwargs['headers'] = {}
-        kwargs['headers'].update(auth_headers)
-        
-        for attempt in range(Config.MAX_RETRIES):
-            try:
-                async with aiohttp.ClientSession(timeout=self.timeout) as session:
-                    async with session.request(method, url, **kwargs) as response:
-                        response.raise_for_status()
-                        return await response.json()
-            except aiohttp.ClientError as e:
-                if attempt == Config.MAX_RETRIES - 1:
-                    logger.error(f"API request failed after {Config.MAX_RETRIES} attempts for {url}: {e}")
-                    return None
-                else:
-                    logger.warning(f"Attempt {attempt + 1} failed for {url}: {e}, retrying...")
-                    await asyncio.sleep(Config.RETRY_DELAY)
-            except Exception as e:
-                logger.error(f"Unexpected error for {url}: {e}")
-                return None
+    async def _handle_orderbook_update(self, message):
+        """Handle real-time orderbook updates."""
+        market_id = message.market_id
+        self.orderbook_cache[market_id] = {
+            'yes_asks': message.data.get('yes_asks', []),
+            'yes_bids': message.data.get('yes_bids', []),
+            'no_asks': message.data.get('no_asks', []),
+            'no_bids': message.data.get('no_bids', []),
+            'timestamp': message.timestamp
+        }
     
     async def get_all_markets(self) -> List[Dict[str, Any]]:
-        """Fetch ALL active markets from Kalshi with pagination."""
-        all_markets = []
-        cursor = None
-        
-        while True:
-            try:
-                params = {"status": "open", "limit": 1000}
-                if cursor:
-                    params["cursor"] = cursor
-                
-                response = await self.get("markets", 
-                                        params=params)
-                
-                if not response:
-                    break
-                
-                markets = response.get("markets", [])
-                all_markets.extend(markets)
-                
-                # Check for pagination
-                cursor = response.get("cursor")
-                if not cursor or not markets:
-                    break
-                    
-                logger.info(f"Fetched {len(markets)} markets, total: {len(all_markets)}")
-                
-            except Exception as e:
-                logger.error(f"Error fetching Kalshi markets: {e}")
-                break
-        
-        logger.info(f"Total Kalshi markets fetched: {len(all_markets)}")
-        return all_markets
+        """Get all markets from REST discovery + WebSocket data."""
+        # Return markets from cache (populated by REST discovery and enhanced by WebSocket)
+        markets = list(self.markets_cache.values())
+        logger.info(f"Returning {len(markets)} Kalshi markets from hybrid REST+WebSocket cache")
+        return markets
     
     async def get_market_details(self, market_ticker: str) -> Optional[Dict[str, Any]]:
-        """Get detailed information for a specific market."""
+        """Get market details from cache."""
+        return self.markets_cache.get(market_ticker)
+    
+    async def get_market_prices(self, market_ticker: str) -> Optional[Dict[str, Any]]:
+        """Get market prices from cache or REST fallback."""
+        # First try WebSocket cache
+        cached_prices = self.price_cache.get(market_ticker)
+        if cached_prices:
+            return cached_prices
+        
+        # Fallback to REST API for missing prices
+        return await self._fetch_prices_via_rest(market_ticker)
+    
+    async def _fetch_prices_via_rest(self, market_ticker: str) -> Optional[Dict[str, Any]]:
+        """Fetch market prices via REST API as fallback."""
+        import aiohttp
+        
         try:
-            response = await self.get(f"markets/{market_ticker}", 
-                                    headers=self.session_headers)
-            return response.get("market") if response else None
+            market = self.markets_cache.get(market_ticker)
+            if not market:
+                return None
+            
+            market_id = market.get('id')
+            if not market_id:
+                return None
+            
+            async with aiohttp.ClientSession() as session:
+                # Get market data including current prices
+                url = f"{Config.KALSHI_API_BASE}/markets/{market_id}"
+                async with session.get(url) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        market_data = data.get('market', {})
+                        
+                        # Extract price information
+                        yes_bid = market_data.get('yes_bid', 0)
+                        yes_ask = market_data.get('yes_ask', 0) 
+                        
+                        prices = {
+                            'yes_price': yes_bid / 100.0 if yes_bid else 0.5,
+                            'no_price': (100 - yes_ask) / 100.0 if yes_ask else 0.5,
+                            'yes_ask': yes_ask / 100.0 if yes_ask else 0.5,
+                            'yes_bid': yes_bid / 100.0 if yes_bid else 0.5,
+                            'timestamp': time.time(),
+                            'source': 'rest_fallback'
+                        }
+                        
+                        # Cache the result
+                        self.price_cache[market_ticker] = prices
+                        return prices
+                    
         except Exception as e:
-            logger.error(f"Error fetching details for market {market_ticker}: {e}")
-            return None
+            logger.warning(f"Failed to fetch prices via REST for {market_ticker}: {e}")
+        
+        return None
+    
+    async def get_market_orderbook(self, market_ticker: str) -> Optional[Dict[str, Any]]:
+        """Get market orderbook from cache."""
+        return self.orderbook_cache.get(market_ticker)
 
-class PolymarketClient(APIClient):
-    """Comprehensive Polymarket client for full market capture."""
+class PolymarketClient:
+    """Hybrid Polymarket client: REST bootstrap + WebSocket real-time data."""
     
     def __init__(self):
-        super().__init__(Config.POLYMARKET_GAMMA_BASE)
-        self.clob_base = Config.POLYMARKET_CLOB_BASE
-    
-    async def get_all_markets(self, include_closed: bool = False) -> List[Dict[str, Any]]:
-        """Fetch ALL markets from Polymarket with pagination."""
-        all_markets = []
-        offset = 0
-        limit = 100
+        self.websocket_client = None
+        self.markets_cache = {}
+        self.price_cache = {}
+        self.orderbook_cache = {}
+        self.asset_ids = []  # Store asset IDs for WebSocket subscription
         
-        while True:
-            try:
-                params = {
-                    "active": "true",
-                    "closed": str(include_closed).lower(),
-                    "limit": limit,
-                    "offset": offset
-                }
+    async def initialize(self) -> bool:
+        """Initialize with REST bootstrap + WebSocket connection."""
+        try:
+            # Step 1: Bootstrap markets via REST API
+            logger.info("Bootstrapping Polymarket markets via REST API...")
+            await self._bootstrap_markets_via_rest()
+            
+            # Step 2: Initialize WebSocket connection if we have asset IDs
+            if self.asset_ids:
+                config = Config.WEBSOCKET_CONFIG['polymarket']
+                self.websocket_client = PolymarketWebSocketClient(config)
                 
-                response = await self.get("markets", params=params)
+                # Set up data handlers
+                self.websocket_client.add_message_handler('price', self._handle_price_update)
+                self.websocket_client.add_message_handler('orderbook', self._handle_orderbook_update)
                 
-                if not response or not isinstance(response, list):
-                    break
+                await self.websocket_client.connect()
                 
-                if not response:  # Empty response means no more markets
-                    break
-                
-                all_markets.extend(response)
-                logger.info(f"Fetched {len(response)} markets, total: {len(all_markets)}")
-                
-                # If we got fewer markets than the limit, we've reached the end
-                if len(response) < limit:
-                    break
-                
-                offset += limit
-                
-            except Exception as e:
-                logger.error(f"Error fetching Polymarket markets: {e}")
-                break
-        
-        logger.info(f"Total Polymarket markets fetched: {len(all_markets)}")
-        return all_markets
+                # Subscribe to discovered markets (increased limit for better coverage)
+                subscription_limit = min(len(self.asset_ids), 200)  # Increased from 50 to 200
+                await self.websocket_client.subscribe_to_markets(self.asset_ids[:subscription_limit])
+                logger.info(f"Subscribed to {subscription_limit} Polymarket assets via WebSocket")
+            
+            logger.info(f"Polymarket client initialized with {len(self.markets_cache)} markets")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to initialize Polymarket client: {e}")
+            return False
     
-    async def get_market_prices(self, market_id: str) -> Dict[str, Optional[float]]:
-        """Get current prices for all tokens in a market."""
-        prices = {}
+    async def _bootstrap_markets_via_rest(self):
+        """Bootstrap market discovery using REST API with full pagination."""
+        import aiohttp
+        import json
         
         try:
-            # Get market details
-            market_response = await self.get(f"markets/{market_id}")
-            if not market_response:
-                return prices
+            # Use Polymarket Gamma API to discover markets with pagination
+            url = f"{Config.POLYMARKET_GAMMA_BASE}/markets"
+            all_markets = []
+            offset = 0
+            limit = 500  # Max limit per request
             
-            # Parse outcomes and prices from the market response
-            outcomes = market_response.get('outcomes')
-            outcome_prices = market_response.get('outcomePrices')
-            clob_token_ids = market_response.get('clobTokenIds')
-            
-            # Parse JSON strings if needed
-            if isinstance(outcomes, str):
-                try:
-                    outcomes = json.loads(outcomes)
-                except json.JSONDecodeError:
-                    outcomes = []
-            
-            if isinstance(outcome_prices, str):
-                try:
-                    outcome_prices = json.loads(outcome_prices)
-                except json.JSONDecodeError:
-                    outcome_prices = []
-            
-            if isinstance(clob_token_ids, str):
-                try:
-                    clob_token_ids = json.loads(clob_token_ids)
-                except json.JSONDecodeError:
-                    clob_token_ids = []
-            
-            # Ensure we have matching arrays
-            if not all([outcomes, outcome_prices, clob_token_ids]) or \
-               not (len(outcomes) == len(outcome_prices) == len(clob_token_ids)):
-                logger.warning(f"Mismatched data arrays for market {market_id}")
-                return prices
-            
-            # Create price data for each outcome
-            for i, (outcome, price_str, token_id) in enumerate(zip(outcomes, outcome_prices, clob_token_ids)):
-                try:
-                    mid_price = float(price_str)
-                    
-                    # Try to get more precise bid/ask prices from CLOB if available
-                    buy_price = await self._get_token_price(token_id, "BUY")
-                    sell_price = await self._get_token_price(token_id, "SELL")
-                    
-                    # Use CLOB prices if available, otherwise use the market price
-                    if buy_price is not None and sell_price is not None:
-                        actual_mid = (buy_price + sell_price) / 2
-                    else:
-                        actual_mid = mid_price
-                        buy_price = mid_price  # Fallback
-                        sell_price = mid_price  # Fallback
-                    
-                    prices[token_id] = {
-                        'outcome': outcome,
-                        'buy_price': buy_price,
-                        'sell_price': sell_price,
-                        'mid_price': actual_mid
+            timeout = aiohttp.ClientTimeout(total=30)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                while True:
+                    params = {
+                        "active": "true",
+                        "closed": "false", 
+                        "limit": limit,
+                        "offset": offset
                     }
                     
-                except (ValueError, TypeError) as e:
-                    logger.warning(f"Could not parse price for outcome {outcome}: {price_str}")
-                    continue
+                    try:
+                        async with session.get(url, params=params) as response:
+                            response.raise_for_status()
+                            markets_data = await response.json()
+                        
+                        if not markets_data or not isinstance(markets_data, list) or len(markets_data) == 0:
+                            break
+                        
+                        all_markets.extend(markets_data)
+                        logger.info(f"Fetched {len(markets_data)} markets at offset {offset}, total: {len(all_markets)}")
+                        
+                        # If we got fewer than the limit, we've reached the end
+                        if len(markets_data) < limit:
+                            break
+                            
+                        offset += limit
+                        
+                    except Exception as e:
+                        logger.warning(f"Error fetching markets at offset {offset}: {e}")
+                        break
+            
+            if not all_markets:
+                logger.warning("No markets returned from Polymarket REST API")
+                return
+            
+            markets_data = all_markets
+            
+            # Process and cache markets
+            for market in markets_data:
+                try:
+                    # Parse market data
+                    market_id = market.get('id')
+                    question = market.get('question', '')
+                    outcomes = market.get('outcomes', '[]')
+                    clob_token_ids = market.get('clobTokenIds', '[]')
+                    outcome_prices = market.get('outcomePrices', '[]')
+                    
+                    # Parse JSON strings if needed
+                    if isinstance(outcomes, str):
+                        outcomes = json.loads(outcomes)
+                    if isinstance(clob_token_ids, str):
+                        clob_token_ids = json.loads(clob_token_ids)
+                    if isinstance(outcome_prices, str):
+                        outcome_prices = json.loads(outcome_prices)
+                    
+                    if not all([market_id, question, outcomes, clob_token_ids]):
+                        continue
+                    
+                    # Store market data
+                    self.markets_cache[market_id] = {
+                        'id': market_id,
+                        'title': question,
+                        'clean_title': self._clean_title(question),
+                        'platform': 'polymarket',
+                        'status': 'active',
+                        'active': True,  # Explicitly set as active since we filter for active markets
+                        'outcomes': outcomes,
+                        'clob_token_ids': clob_token_ids,
+                        'outcome_prices': outcome_prices,
+                        'raw_data': market
+                    }
+                    
+                    # Store asset IDs for WebSocket subscription
+                    self.asset_ids.extend(clob_token_ids)
+                    
+                    # Store initial price data
+                    for i, (outcome, price_str, token_id) in enumerate(zip(outcomes, outcome_prices, clob_token_ids)):
+                        if market_id not in self.price_cache:
+                            self.price_cache[market_id] = {}
+                        
+                        try:
+                            price = float(price_str)
+                            self.price_cache[market_id][token_id] = {
+                                'outcome': outcome,
+                                'buy_price': price,
+                                'sell_price': price,
+                                'mid_price': price,
+                                'timestamp': time.time()
+                            }
+                        except (ValueError, TypeError):
+                            continue
                 
+                except Exception as e:
+                    logger.debug(f"Error processing Polymarket market: {e}")
+                    continue
+            
+            logger.info(f"Bootstrapped {len(self.markets_cache)} Polymarket markets via REST API")
+            logger.info(f"Collected {len(self.asset_ids)} asset IDs for WebSocket subscription")
+            
         except Exception as e:
-            logger.error(f"Error fetching prices for market {market_id}: {e}")
-        
-        return prices
+            logger.error(f"Failed to bootstrap Polymarket markets: {e}")
     
-    async def _get_token_price(self, token_id: str, side: str) -> Optional[float]:
-        """Get price for a specific token and side."""
-        url = f"{self.clob_base}/price"
-        try:
-            async with aiohttp.ClientSession(timeout=self.timeout) as session:
-                params = {"token_id": token_id, "side": side}
-                async with session.get(url, params=params) as response:
-                    response.raise_for_status()
-                    result = await response.json()
-                    price_str = result.get("price")
-                    return float(price_str) if price_str else None
-        except Exception as e:
-            logger.debug(f"Failed to fetch {side} price for token {token_id}: {e}")
-            return None
+    def _clean_title(self, title: str) -> str:
+        """Basic title cleaning."""
+        if not title:
+            return ""
+        return title.lower().strip()
+    
+    async def _handle_price_update(self, message):
+        """Handle real-time price updates."""
+        market_id = message.market_id
+        if market_id not in self.price_cache:
+            self.price_cache[market_id] = {}
+        
+        token_id = message.data.get('outcome', 'default')
+        self.price_cache[market_id][token_id] = {
+            'outcome': message.data.get('outcome'),
+            'buy_price': message.data.get('price'),
+            'sell_price': message.data.get('price'),
+            'mid_price': message.data.get('price'),
+            'timestamp': message.timestamp
+        }
+    
+    async def _handle_orderbook_update(self, message):
+        """Handle real-time orderbook updates."""
+        market_id = message.market_id
+        if market_id not in self.orderbook_cache:
+            self.orderbook_cache[market_id] = {}
+        
+        outcome = message.data.get('outcome', 'default')
+        self.orderbook_cache[market_id][outcome] = {
+            'bids': message.data.get('bids', []),
+            'asks': message.data.get('asks', []),
+            'timestamp': message.timestamp
+        }
+    
+    async def get_all_markets(self, include_closed: bool = False) -> List[Dict[str, Any]]:
+        """Get all markets from bootstrap + WebSocket data."""
+        # Return cached markets from bootstrap process
+        markets = list(self.markets_cache.values())
+        logger.info(f"Returning {len(markets)} Polymarket markets from bootstrap cache")
+        return markets
+    
+    async def get_market_prices(self, market_id: str) -> Dict[str, Optional[float]]:
+        """Get market prices from cache."""
+        return self.price_cache.get(market_id, {})
+    
+    async def get_market_orderbook(self, market_id: str, token_id: str = None) -> Optional[Dict[str, Any]]:
+        """Get market orderbook from cache."""
+        market_orderbooks = self.orderbook_cache.get(market_id, {})
+        if token_id:
+            return market_orderbooks.get(token_id)
+        return market_orderbooks
