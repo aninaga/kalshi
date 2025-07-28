@@ -27,7 +27,7 @@ class Config:
             'heartbeat_interval': 30,
             'max_reconnect_attempts': 10,
             'channels': ['ticker_v2', 'orderbook_delta', 'trade'],
-            'enabled': False  # Correct implementation, but API key lacks WebSocket permissions
+            'enabled': True  # Enable Kalshi WebSocket with proper auth
         },
         'polymarket': {
             'endpoint': 'wss://ws-subscriptions-clob.polymarket.com/ws/market',
@@ -40,11 +40,11 @@ class Config:
         }
     }
     
-    # Real-time Data Stream Settings
+    # Real-time Data Stream Settings (WebSocket-only mode)
     REALTIME_ENABLED = True
     STREAM_BUFFER_SIZE = 1000  # Max messages to buffer during disconnections
     STREAM_FRESHNESS_THRESHOLD = 10  # Seconds before data considered stale
-    STREAM_FALLBACK_TO_REST = True  # Fall back to REST if streams fail
+    STREAM_FALLBACK_TO_REST = False  # WebSocket-only mode - no REST fallback
     
     # Fee Structure for analysis (more accurate rates)
     KALSHI_FEE_RATE = 0.00  # Kalshi has no trading fees

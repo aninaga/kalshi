@@ -30,6 +30,7 @@ class ArbitrageAnalysisSystem:
         
         self.logger.info("=" * 60)
         self.logger.info("KALSHI-POLYMARKET ARBITRAGE ANALYSIS SYSTEM")
+        self.logger.info("WebSocket-Only Real-Time Data Mode")
         self.logger.info("=" * 60)
         self.logger.info(f"Scan Interval: {Config.SCAN_INTERVAL_SECONDS} seconds")
         self.logger.info(f"Min Profit Threshold: {Config.MIN_PROFIT_THRESHOLD}")
@@ -240,7 +241,8 @@ def main():
     parser.add_argument(
         "--realtime",
         action="store_true",
-        help="Enable real-time WebSocket streaming for zero-latency data (Phase 2 lossless feature)"
+        default=True,
+        help="WebSocket streaming is always enabled in this version (WebSocket-only mode)"
     )
     
     args = parser.parse_args()
@@ -250,14 +252,14 @@ def main():
     Config.MIN_PROFIT_THRESHOLD = args.threshold
     Config.SIMILARITY_THRESHOLD = args.similarity
     
-    # Enable real-time streaming if requested
-    if args.realtime:
-        Config.REALTIME_ENABLED = True
-        # Only enable if not explicitly disabled in config
-        if Config.WEBSOCKET_CONFIG['kalshi'].get('enabled', True):
-            Config.WEBSOCKET_CONFIG['kalshi']['enabled'] = True
-        if Config.WEBSOCKET_CONFIG['polymarket'].get('enabled', True):
-            Config.WEBSOCKET_CONFIG['polymarket']['enabled'] = True
+    # WebSocket-only mode is always enabled - remove REST fallback option
+    Config.REALTIME_ENABLED = True
+    Config.STREAM_FALLBACK_TO_REST = False
+    
+    # Ensure WebSocket connections are enabled (can be controlled via CLI)
+    if args.realtime or not hasattr(args, 'realtime'):
+        Config.WEBSOCKET_CONFIG['kalshi']['enabled'] = True
+        Config.WEBSOCKET_CONFIG['polymarket']['enabled'] = True
     
     # Create and run the analysis system
     system = ArbitrageAnalysisSystem()

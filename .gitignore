@@ -108,4 +108,4 @@ market_data/scan_report_*.json
 market_data/arbitrage_opportunities.json
 
 # Test files
-test_*.py
+test_*.pykalshi_private_key.pem
