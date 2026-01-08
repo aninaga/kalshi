@@ -7,7 +7,7 @@ import asyncio
 import logging
 import math
 from typing import Dict, List, Optional, Any, Tuple, Union
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_HALF_UP
 from dataclasses import dataclass, field
 from enum import Enum
@@ -271,7 +271,7 @@ class SlippageModel:
                 confidence *= Decimal("0.5")
         
         # Reduce confidence for old data
-        age_seconds = (datetime.now() - orderbook.timestamp).total_seconds()
+        age_seconds = (datetime.now(timezone.utc) - orderbook.timestamp).total_seconds()
         if age_seconds > 10:
             confidence *= Decimal("0.9")
         if age_seconds > 30:
@@ -627,7 +627,7 @@ class RiskEngine:
         
         # Reduce for stale data
         if buy_orderbook:
-            age = (datetime.now() - buy_orderbook.timestamp).total_seconds()
+            age = (datetime.now(timezone.utc) - buy_orderbook.timestamp).total_seconds()
             if age > 30:
                 confidence *= Decimal("0.8")
         
