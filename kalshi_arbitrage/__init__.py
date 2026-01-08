@@ -6,6 +6,8 @@ Implements multiple arbitrage strategies:
 - Intra-market (YES + NO < $1)
 - Multi-outcome (all outcomes < $1)
 - Cross-platform (same market, different prices)
+
+Production-ready WebSocket-based real-time detection.
 """
 
 from .config import Config
@@ -15,10 +17,10 @@ from .arbitrage_engine import (
     ArbitrageEngine,
     ArbitrageOpportunity,
     ArbitrageType,
-    RealTimeArbitrageScanner
 )
+from .realtime_scanner import RealTimeArbitrageScanner
 
-__version__ = "4.0.0"
+__version__ = "4.1.0"
 __all__ = [
     "Config",
     "MarketAnalyzer",
