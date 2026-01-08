@@ -8,9 +8,20 @@ load_dotenv()
 class Config:
     """Configuration for the arbitrage analysis system."""
     
-    # Analysis Parameters
-    MIN_PROFIT_THRESHOLD = 0.02  # 2% minimum profit threshold
+    # Analysis Parameters - Updated based on real-world arbitrage research
+    MIN_PROFIT_THRESHOLD = 0.005  # 0.5% minimum profit (lowered to catch more opportunities)
     SIMILARITY_THRESHOLD = 0.55  # 55% similarity for market matching
+    CROSS_PLATFORM_SIMILARITY = 0.70  # Higher threshold for cross-platform (different rules)
+
+    # New Arbitrage Engine Settings
+    ARBITRAGE_CONFIG = {
+        'min_profit_pct': 0.005,      # 0.5% minimum profit
+        'min_profit_abs': 0.01,       # $0.01 absolute minimum
+        'intra_market_enabled': True,  # YES + NO < $1
+        'multi_outcome_enabled': True, # Sum of all outcomes < $1
+        'cross_platform_enabled': True, # Same market different platforms
+        'max_position_per_opp': 1000,  # Max $ per opportunity
+    }
     
     # API Configuration
     KALSHI_API_BASE = "https://api.elections.kalshi.com/trade-api/v2"
@@ -46,12 +57,14 @@ class Config:
     STREAM_FRESHNESS_THRESHOLD = 10  # Seconds before data considered stale
     STREAM_FALLBACK_TO_REST = False  # WebSocket-only mode - no REST fallback
     
-    # Fee Structure for analysis (more accurate rates)
+    # Fee Structure for analysis (updated based on 2025 research)
     KALSHI_FEE_RATE = 0.00  # Kalshi has no trading fees
-    POLYMARKET_FEE_RATE = 0.02  # ~2% gas + protocol fees (average estimate)
-    POLYMARKET_GAS_FEE = 0.005  # ~0.5% typical gas fee
-    POLYMARKET_PROTOCOL_FEE = 0.01  # ~1% protocol fee
-    POLYMARKET_SLIPPAGE_TOLERANCE = 0.005  # 0.5% slippage tolerance
+    # Polymarket fees are now much lower for most markets
+    POLYMARKET_FEE_RATE = 0.005  # ~0.5% for standard markets
+    POLYMARKET_15MIN_FEE = 0.0315  # ~3.15% for 15-min crypto markets (new dynamic fees)
+    POLYMARKET_GAS_FEE = 0.002  # ~0.2% typical gas fee (Polygon is cheap)
+    POLYMARKET_PROTOCOL_FEE = 0.00  # 0% protocol fee for takers (as of 2025)
+    POLYMARKET_SLIPPAGE_TOLERANCE = 0.003  # 0.3% slippage tolerance
     
     # Volume and liquidity thresholds
     MIN_TRADEABLE_VOLUME = 10  # Minimum shares to consider for arbitrage

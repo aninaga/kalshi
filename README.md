@@ -1,33 +1,38 @@
 # Kalshi-Polymarket Arbitrage Detection System
 
-A comprehensive Python system for detecting and analyzing arbitrage opportunities between Kalshi and Polymarket prediction markets with real-time streaming and multiple completeness levels.
+A comprehensive Python system for detecting **ALL types** of arbitrage opportunities in prediction markets. Based on strategies that have extracted **$40M+** from these markets.
 
 ## 🎯 Overview
 
-This system continuously monitors **ALL** markets on both Kalshi and Polymarket, identifies equivalent markets, and detects arbitrage opportunities with detailed analysis and historical tracking. Features two-phase architecture with lossless analysis and real-time streaming capabilities.
+This system implements **multiple arbitrage strategies** proven to be profitable in production:
+
+| Strategy | Description | Typical Profit |
+|----------|-------------|----------------|
+| **Intra-Market** | YES + NO < $1 on same market | 2-6% |
+| **Multi-Outcome** | All outcomes sum < $1 | 0.5-5% |
+| **Cross-Platform** | Same market, different prices | 2-7% |
 
 ## ✨ Key Features
 
-### Phase 1: Lossless Arbitrage Detection
-- **Three Completeness Levels**:
-  - `FAST`: 95% completeness, optimized for speed (3 matches/market, 10 trades/opportunity)
-  - `BALANCED`: 99% completeness, good speed/accuracy balance (10 matches/market, 25 trades/opportunity)
-  - `LOSSLESS`: 100% completeness, no information loss (unlimited matches/trades)
+### 🆕 NEW: Comprehensive Arbitrage Engine (v4.0)
+- **Intra-Market Arbitrage**: Detects when YES + NO prices sum to less than $1
+- **Multi-Outcome Arbitrage**: Finds markets where all outcome prices sum < $1
+- **Cross-Platform Arbitrage**: Identifies price differences between Kalshi and Polymarket
+- **Real-Time Scanner**: Triggers on price updates for sub-second detection
+- **Configurable Thresholds**: Set minimum profit percentages (default: 0.5%)
 
-### Phase 2: Real-Time Streaming
+### Real-Time Streaming
 - **WebSocket Integration**: Live price and orderbook updates
 - **Cache Staleness Elimination**: Fresh data with sub-second latency
 - **Fallback Mechanisms**: Graceful degradation to REST APIs when streams fail
 - **Stream Health Monitoring**: Connection quality and data freshness tracking
 
 ### Core Capabilities
-- **Complete Market Coverage**: Captures ALL active markets from both platforms using pagination
+- **Complete Market Coverage**: Captures ALL active markets from both platforms
 - **Intelligent Matching**: Advanced fuzzy string matching with similarity scoring
-- **Comprehensive Pricing**: Real-time bid/ask spreads with slippage calculations
-- **Volume Assessment**: Liquidity analysis for tradeable opportunities
-- **Historical Tracking**: Persistent storage of all opportunities and market data
-- **Professional Logging**: Multi-level logging with file rotation
-- **Authentication Support**: Full Kalshi API access with proper authentication
+- **Fee-Aware Calculations**: Accounts for Polymarket gas fees, slippage
+- **Risk Assessment**: Liquidity scoring and execution risk analysis
+- **Historical Tracking**: Persistent storage of all opportunities
 
 ## 🚀 Installation
 
@@ -45,33 +50,31 @@ cp .env.example .env
 
 ## ⚡ Quick Start
 
-### Basic Continuous Monitoring
-Monitor markets continuously with default settings:
+### 🆕 NEW: Comprehensive Arbitrage Scanner (Recommended)
+Scan for ALL types of arbitrage opportunities:
+```bash
+python run_arbitrage.py --mode continuous --min-profit 0.5
+```
+
+### Single Scan
+Run one comprehensive scan:
+```bash
+python run_arbitrage.py --mode single
+```
+
+### Legacy Cross-Platform Only
+For cross-platform arbitrage only (original analyzer):
 ```bash
 python arbitrage_analyzer.py --mode continuous
 ```
 
-### Single Comprehensive Scan
-Run one complete analysis with lossless completeness:
-```bash
-python arbitrage_analyzer.py --mode single --completeness LOSSLESS
-```
-
-### Real-Time Streaming Mode
-Enable WebSocket streaming for sub-second latency:
-```bash
-python arbitrage_analyzer.py --mode continuous --realtime --completeness BALANCED
-```
-
 ### Custom Parameters
-Fine-tune analysis with custom thresholds and completeness:
+Fine-tune with custom thresholds:
 ```bash
-python arbitrage_analyzer.py \
+python run_arbitrage.py \
   --mode continuous \
   --interval 15 \
-  --threshold 0.015 \
-  --similarity 0.8 \
-  --completeness LOSSLESS
+  --min-profit 1.0  # 1% minimum profit
 ```
 
 ## 📊 Sample Output
