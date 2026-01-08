@@ -6,9 +6,9 @@ Connects to Polymarket and Kalshi via WebSockets and detects
 arbitrage opportunities in real-time as prices change.
 
 Usage:
-    python realtime_arb.py                    # Run with defaults
-    python realtime_arb.py --min-profit 1.0   # 1% minimum profit
-    python realtime_arb.py --alert-sound      # Play sound on opportunity
+    python main.py                    # Run with defaults
+    python main.py --min-profit 1.0   # 1% minimum profit
+    python main.py --alert-sound      # Play sound on opportunity
 
 This is designed to be a money-making engine.
 """

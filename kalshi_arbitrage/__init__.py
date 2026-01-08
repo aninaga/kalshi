@@ -1,18 +1,14 @@
 """
-Kalshi-Polymarket Arbitrage Analysis System
-Comprehensive prediction market arbitrage detection and analysis
+Kalshi-Polymarket Arbitrage System
+WebSocket-powered real-time arbitrage detection.
 
-Implements multiple arbitrage strategies:
+Strategies:
 - Intra-market (YES + NO < $1)
 - Multi-outcome (all outcomes < $1)
 - Cross-platform (same market, different prices)
-
-Production-ready WebSocket-based real-time detection.
 """
 
 from .config import Config
-from .market_analyzer import MarketAnalyzer
-from .api_clients import KalshiClient, PolymarketClient
 from .arbitrage_engine import (
     ArbitrageEngine,
     ArbitrageOpportunity,
@@ -20,12 +16,9 @@ from .arbitrage_engine import (
 )
 from .realtime_scanner import RealTimeArbitrageScanner
 
-__version__ = "4.1.0"
+__version__ = "5.0.0"
 __all__ = [
     "Config",
-    "MarketAnalyzer",
-    "KalshiClient",
-    "PolymarketClient",
     "ArbitrageEngine",
     "ArbitrageOpportunity",
     "ArbitrageType",

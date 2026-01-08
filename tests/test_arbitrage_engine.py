@@ -16,7 +16,7 @@ from kalshi_arbitrage.arbitrage_engine import (
     ArbitrageEngine,
     ArbitrageOpportunity,
     ArbitrageType,
-    RealTimeArbitrageScanner
+    RealTimeArbitrageScanner as ARBRealTimeScanner
 )
 
 
@@ -316,7 +316,7 @@ class TestRealTimeScanner:
     @pytest.fixture
     def scanner(self):
         engine = ArbitrageEngine({'min_profit_pct': 0.005})
-        return RealTimeArbitrageScanner(engine)
+        return ARBRealTimeScanner(engine)
 
     def test_update_prices(self, scanner):
         """Should store price updates."""
