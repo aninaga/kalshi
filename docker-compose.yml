@@ -1,0 +1,53 @@
+version: '3.8'
+
+services:
+  arbitrage-scanner:
+    build: .
+    container_name: arbitrage-scanner
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./market_data:/app/market_data
+      - ./logs:/app/logs
+    environment:
+      - TZ=UTC
+    networks:
+      - arbitrage-net
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # Optional: Redis for caching (uncomment if needed)
+  # redis:
+  #   image: redis:7-alpine
+  #   container_name: arbitrage-redis
+  #   restart: unless-stopped
+  #   volumes:
+  #     - redis-data:/data
+  #   networks:
+  #     - arbitrage-net
+
+  # Optional: PostgreSQL for production persistence (uncomment if needed)
+  # postgres:
+  #   image: postgres:15-alpine
+  #   container_name: arbitrage-postgres
+  #   restart: unless-stopped
+  #   environment:
+  #     POSTGRES_DB: arbitrage
+  #     POSTGRES_USER: arbitrage
+  #     POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+  #   volumes:
+  #     - postgres-data:/var/lib/postgresql/data
+  #   networks:
+  #     - arbitrage-net
+
+networks:
+  arbitrage-net:
+    driver: bridge
+
+volumes:
+  redis-data:
+  postgres-data:
