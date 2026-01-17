@@ -97,6 +97,9 @@ class ArbitrageAnalysisSystem:
         except Exception as e:
             self.logger.error(f"Error during single scan: {e}")
             sys.exit(1)
+        finally:
+            if hasattr(self, 'analyzer') and self.analyzer:
+                await self.analyzer.shutdown()
     
     def _print_scan_summary(self, scan_report: dict, cycle_start: datetime):
         """Print a concise summary of the scan results."""
@@ -192,6 +195,8 @@ class ArbitrageAnalysisSystem:
     
     async def _cleanup(self):
         """Cleanup operations before shutdown."""
+        if hasattr(self, 'analyzer') and self.analyzer:
+            await self.analyzer.shutdown()
         if self.start_time:
             total_runtime = datetime.now() - self.start_time
             avg_opportunities = self.total_opportunities_found / self.scan_count if self.scan_count > 0 else 0
