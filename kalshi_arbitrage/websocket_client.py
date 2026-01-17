@@ -47,9 +47,12 @@ class WebSocketManager:
             'reconnections': 0,
             'last_message_time': None
         }
+        self._closing = False
         
     async def connect(self):
         """Establish WebSocket connection."""
+        if self._closing:
+            return
         if self.session is None:
             self.session = aiohttp.ClientSession()
             
@@ -74,6 +77,7 @@ class WebSocketManager:
     
     async def disconnect(self):
         """Gracefully disconnect from WebSocket."""
+        self._closing = True
         self.is_connected = False
         if self.websocket:
             await self.websocket.close()
@@ -99,6 +103,8 @@ class WebSocketManager:
             logger.error(f"Error in message loop for {self.platform}: {e}")
         finally:
             self.is_connected = False
+            if self._closing:
+                return
             await self._handle_reconnection()
     
     async def _handle_message(self, raw_data: str):
@@ -126,6 +132,8 @@ class WebSocketManager:
     
     async def _handle_reconnection(self):
         """Handle reconnection logic with exponential backoff."""
+        if self._closing:
+            return
         if self.reconnect_attempts >= self.config.get('max_reconnect_attempts', 10):
             logger.error(f"Max reconnection attempts reached for {self.platform}")
             return
@@ -135,7 +143,10 @@ class WebSocketManager:
         backoff_time = min(300, 2 ** self.reconnect_attempts)  # Max 5 minutes
         
         logger.info(f"Reconnecting to {self.platform} in {backoff_time} seconds (attempt {self.reconnect_attempts})")
-        await asyncio.sleep(backoff_time)
+        try:
+            await asyncio.sleep(backoff_time)
+        except RuntimeError:
+            return
         await self.connect()
     
     def add_message_handler(self, channel: str, handler: Callable):

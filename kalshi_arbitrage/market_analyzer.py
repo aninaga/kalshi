@@ -81,6 +81,28 @@ class MarketAnalyzer:
         
         logger.info(f"Market Analyzer initialized successfully with {self.completeness_level} completeness level")
     
+    async def shutdown(self):
+        """Shutdown WebSocket clients and real-time streams cleanly."""
+        try:
+            if self.realtime_manager:
+                await self.realtime_manager.stop()
+        except Exception as e:
+            logger.warning(f"Failed to stop realtime manager: {e}")
+
+        try:
+            if getattr(self.kalshi_client, 'websocket_client', None):
+                await self.kalshi_client.websocket_client.disconnect()
+        except Exception as e:
+            logger.warning(f"Failed to disconnect Kalshi WebSocket: {e}")
+
+        try:
+            if getattr(self.polymarket_client, 'websocket_client', None):
+                await self.polymarket_client.websocket_client.disconnect()
+        except Exception as e:
+            logger.warning(f"Failed to disconnect Polymarket WebSocket: {e}")
+
+        self.realtime_enabled = False
+
     def set_completeness_level(self, level: str) -> None:
         """Set the completeness level for scanning."""
         if level not in Config.COMPLETENESS_LEVELS:
