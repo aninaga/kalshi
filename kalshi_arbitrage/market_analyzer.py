@@ -241,9 +241,15 @@ class MarketAnalyzer:
             # Get active Polymarket asset IDs
             for market in polymarket_markets[:50]:  # Subscribe to top 50 active markets
                 if market.get('active', True):  # Polymarket markets are generally active
-                    for token in market.get('tokens', []):
-                        if token.get('token_id'):
-                            polymarket_assets.append(token['token_id'])
+                    token_ids = market.get('clob_token_ids') or market.get('tokens', [])
+                    if isinstance(token_ids, list):
+                        for token in token_ids:
+                            if isinstance(token, dict):
+                                token_id = token.get('token_id')
+                            else:
+                                token_id = token
+                            if token_id:
+                                polymarket_assets.append(token_id)
             
             # Subscribe to markets
             if kalshi_tickers or polymarket_assets:
@@ -321,6 +327,7 @@ class MarketAnalyzer:
                     'status': market.get('status', 'active'),  # Use status field, default to active
                     'close_time': market.get('endDate'),  # Use 'endDate' instead of 'end_date_iso'
                     'outcomes': outcomes,
+                    'clob_token_ids': market.get('clob_token_ids') or market.get('clobTokenIds'),
                     'volume': self._safe_float(market.get('volume', 0)),
                     'raw_data': market
                 }
@@ -658,6 +665,9 @@ class MarketAnalyzer:
         for token_id, price_data in polymarket_prices.items():
             if not price_data:
                 continue
+            outcome_name = str(price_data.get('outcome', '')).lower()
+            if outcome_name and outcome_name not in {'yes', 'true', '1'}:
+                continue
                 
             # Get Polymarket order book with caching
             polymarket_orderbook = await self._get_cached_orderbook(polymarket_market['id'], 'polymarket', token_id)
@@ -722,19 +732,25 @@ class MarketAnalyzer:
             return None
     
     async def _get_cached_orderbook(self, market_id: str, platform: str, token_id: str = None) -> Optional[Dict]:
-        """Get order book from WebSocket streams only."""
+        """Get order book from WebSocket streams with synthetic fallback."""
         try:
             if platform == 'kalshi':
                 orderbook = await self.kalshi_client.get_market_orderbook(market_id)
             else:  # polymarket
                 orderbook = await self.polymarket_client.get_market_orderbook(market_id, token_id)
-            
+
             if orderbook:
                 self.completeness_stats['cache_hits'] += 1
                 return orderbook
-            else:
-                self.completeness_stats['cache_misses'] += 1
-                return None
+
+            self.completeness_stats['cache_misses'] += 1
+
+            # Synthetic fallback when no orderbook data is available
+            if platform == 'kalshi':
+                return await self._create_synthetic_kalshi_orderbook(market_id)
+            if platform == 'polymarket' and token_id:
+                return await self._create_synthetic_polymarket_orderbook(token_id)
+            return None
         except Exception as e:
             logger.debug(f"Failed to fetch orderbook for {platform}:{market_id}: {e}")
             return None
@@ -795,19 +811,23 @@ class MarketAnalyzer:
         
         profitable_trades = []
         
-        # Pre-sort orderbooks once (buy ascending, sell descending)  
-        buy_orders = sorted(buy_orderbook, key=lambda x: x['price'])
-        sell_orders = sorted(sell_orderbook, key=lambda x: x['price'], reverse=True)
+        # Normalize and sort orderbooks once (buy ascending, sell descending)
+        buy_orders = self._normalize_orderbook_levels(buy_orderbook)
+        sell_orders = self._normalize_orderbook_levels(sell_orderbook)
+        if not buy_orders or not sell_orders:
+            return []
+        buy_orders = sorted(buy_orders, key=lambda x: x['price'])
+        sell_orders = sorted(sell_orders, key=lambda x: x['price'], reverse=True)
         
         # Pre-calculate fee multipliers
         buy_fee_multiplier = 1 + buy_fee_rate
         sell_fee_multiplier = 1 - sell_fee_rate
         
-        # Fast early termination check
-        min_sell_price = sell_orders[0]['price'] * sell_fee_multiplier
-        max_buy_price = buy_orders[-1]['price'] * buy_fee_multiplier
+        # Fast early termination check (best bid vs best ask after fees)
+        best_sell_price = sell_orders[0]['price'] * sell_fee_multiplier
+        best_buy_price = buy_orders[0]['price'] * buy_fee_multiplier
         
-        if min_sell_price <= max_buy_price:
+        if best_sell_price <= best_buy_price:
             return []  # No profitable opportunities possible
         
         buy_index = 0
@@ -883,6 +903,27 @@ class MarketAnalyzer:
             self.completeness_stats['truncated_trades'] += remaining_trades
         
         return profitable_trades
+
+    def _normalize_orderbook_levels(self, levels: List[Dict]) -> List[Dict[str, float]]:
+        """Normalize orderbook levels to numeric {price, size} dicts."""
+        normalized = []
+        if not levels:
+            return normalized
+        for level in levels:
+            if isinstance(level, dict):
+                price = level.get('price')
+                size = level.get('size') if level.get('size') is not None else level.get('quantity')
+            elif isinstance(level, (list, tuple)) and len(level) >= 2:
+                price, size = level[0], level[1]
+            else:
+                continue
+            try:
+                price = float(price)
+                size = float(size)
+            except (TypeError, ValueError):
+                continue
+            normalized.append({'price': price, 'size': size})
+        return normalized
     
     def _get_cached_similarity(self, title1: str, title2: str) -> float:
         """Get similarity score with caching for performance."""

@@ -7,6 +7,7 @@ import asyncio
 import json
 import logging
 import time
+from pathlib import Path
 from typing import Dict, List, Callable, Optional, Any, Set
 from datetime import datetime, timedelta
 from dataclasses import dataclass
@@ -169,11 +170,61 @@ class KalshiWebSocketClient(WebSocketManager):
         import base64
         from cryptography.hazmat.primitives import hashes, serialization
         from cryptography.hazmat.primitives.asymmetric import padding
-        
+
         kalshi_api_key = os.getenv('KALSHI_API_KEY')
-        
+
         if not kalshi_api_key:
             return {}
+
+        try:
+            # Load private key from file (env override, else repo-local)
+            key_path = os.getenv('KALSHI_PRIVATE_KEY_PATH')
+            if not key_path:
+                key_path = Path(__file__).resolve().parents[1] / 'kalshi_private_key.pem'
+            key_path = Path(key_path).expanduser()
+            if not key_path.exists():
+                logger.error(f"Kalshi private key not found at {key_path}")
+                return {}
+
+            with open(key_path, 'rb') as key_file:
+                private_key = serialization.load_pem_private_key(
+                    key_file.read(),
+                    password=None
+                )
+
+            # Create timestamp
+            timestamp = str(int(time.time() * 1000))
+
+            # Create message to sign: timestamp + method + path
+            # For WebSocket, we sign the connection request
+            method = "GET"
+            path = "/trade-api/ws/v2"  # Back to full path
+            msg_string = timestamp + method + path
+
+            # Sign the message using RSA-PSS
+            message = msg_string.encode('utf-8')
+            signature = private_key.sign(
+                message,
+                padding.PSS(
+                    mgf=padding.MGF1(hashes.SHA256()),
+                    salt_length=padding.PSS.DIGEST_LENGTH
+                ),
+                hashes.SHA256()
+            )
+            signature_b64 = base64.b64encode(signature).decode('utf-8')
+
+            logger.debug(f"Kalshi WS auth - Method: {method}, Path: {path}, Timestamp: {timestamp}")
+
+            return {
+                'Content-Type': 'application/json',
+                'KALSHI-ACCESS-KEY': kalshi_api_key,
+                'KALSHI-ACCESS-SIGNATURE': signature_b64,
+                'KALSHI-ACCESS-TIMESTAMP': timestamp
+            }
+        except Exception as e:
+            logger.error(f"Error creating Kalshi WebSocket auth headers: {e}")
+            return {}
+
         
         try:
             # Load private key from file
@@ -402,15 +453,22 @@ class PolymarketWebSocketClient(WebSocketManager):
         # Handle market data updates
         if 'event_type' in data:
             event_type = data['event_type']
+            market_id = (
+                data.get('market_id')
+                or data.get('condition_id')
+                or data.get('market')
+            )
+            asset_id = data.get('asset_id') or data.get('token_id')
             
             if event_type == 'price_change':
                 return StreamMessage(
                     platform='polymarket',
                     channel='price',
-                    market_id=data.get('market_id', ''),
+                    market_id=market_id or (asset_id or ''),
                     data={
                         'price': data.get('price'),
                         'outcome': data.get('outcome'),
+                        'asset_id': asset_id,
                         'timestamp': data.get('timestamp')
                     },
                     timestamp=time.time()
@@ -420,11 +478,12 @@ class PolymarketWebSocketClient(WebSocketManager):
                 return StreamMessage(
                     platform='polymarket',
                     channel='orderbook',
-                    market_id=data.get('market_id', ''),
+                    market_id=market_id or (asset_id or ''),
                     data={
                         'bids': data.get('bids', []),
                         'asks': data.get('asks', []),
                         'outcome': data.get('outcome'),
+                        'asset_id': asset_id,
                         'sequence': data.get('sequence')
                     },
                     timestamp=time.time(),

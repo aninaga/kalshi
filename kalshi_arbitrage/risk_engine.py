@@ -7,7 +7,7 @@ import asyncio
 import logging
 import math
 from typing import Dict, List, Optional, Any, Tuple, Union
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_HALF_UP
 from dataclasses import dataclass, field
 from enum import Enum
@@ -214,6 +214,10 @@ class SlippageModel:
             slippage = abs(avg_price - best_price) / best_price
         else:
             slippage = Decimal("0.05")  # Max slippage if no depth
+        
+        # If we couldn't fill the full size, treat as maximum slippage
+        if depth_consumed < trade_size:
+            slippage = max(slippage, Decimal("0.05"))
             
         return slippage, depth_consumed
     
@@ -271,7 +275,11 @@ class SlippageModel:
                 confidence *= Decimal("0.5")
         
         # Reduce confidence for old data
-        age_seconds = (datetime.now() - orderbook.timestamp).total_seconds()
+        if orderbook.timestamp.tzinfo is None:
+            now = datetime.now()
+        else:
+            now = datetime.now(orderbook.timestamp.tzinfo)
+        age_seconds = (now - orderbook.timestamp).total_seconds()
         if age_seconds > 10:
             confidence *= Decimal("0.9")
         if age_seconds > 30:
@@ -283,7 +291,8 @@ class SlippageModel:
         """Update price history for volatility calculation."""
         if market_id not in self.price_history:
             self.price_history[market_id] = deque(maxlen=1000)
-        
+        if timestamp.tzinfo is None:
+            timestamp = timestamp.replace(tzinfo=timezone.utc)
         self.price_history[market_id].append((timestamp, price))
     
     def calculate_volatility(self, market_id: str) -> Decimal:
@@ -292,7 +301,7 @@ class SlippageModel:
             return Decimal("0.001")  # Default 0.1% volatility
         
         prices = self.price_history[market_id]
-        current_time = datetime.now()
+        current_time = datetime.now(timezone.utc)
         cutoff_time = current_time - timedelta(seconds=self.volatility_window)
         
         # Filter recent prices
@@ -627,7 +636,11 @@ class RiskEngine:
         
         # Reduce for stale data
         if buy_orderbook:
-            age = (datetime.now() - buy_orderbook.timestamp).total_seconds()
+            if buy_orderbook.timestamp.tzinfo is None:
+                now = datetime.now()
+            else:
+                now = datetime.now(buy_orderbook.timestamp.tzinfo)
+            age = (now - buy_orderbook.timestamp).total_seconds()
             if age > 30:
                 confidence *= Decimal("0.8")
         
