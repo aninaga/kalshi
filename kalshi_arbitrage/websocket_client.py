@@ -8,7 +8,7 @@ import json
 import logging
 import time
 from pathlib import Path
-from typing import Dict, List, Callable, Optional, Any, Set
+from typing import Dict, List, Callable, Optional, Any, Set, Union
 from datetime import datetime, timedelta
 from dataclasses import dataclass
 import aiohttp
@@ -44,10 +44,18 @@ class WebSocketManager:
         self.stats = {
             'messages_received': 0,
             'messages_processed': 0,
+            'messages_parsed': 0,
+            'messages_invalid_json': 0,
+            'messages_ignored_empty': 0,
+            'messages_ignored_control': 0,
+            'messages_server_errors': 0,
+            'messages_unrecognized': 0,
             'reconnections': 0,
             'last_message_time': None
         }
         self._closing = False
+        self._invalid_json_log_count = 0
+        self._server_error_log_count = 0
         
     async def connect(self):
         """Establish WebSocket connection."""
@@ -109,13 +117,54 @@ class WebSocketManager:
     
     async def _handle_message(self, raw_data: str):
         """Process incoming WebSocket message."""
+        # Ignore empty/control payloads to avoid poisoning parse quality metrics.
+        if raw_data is None:
+            self.stats['messages_ignored_empty'] += 1
+            return
+
+        payload = raw_data.strip()
+        if not payload:
+            self.stats['messages_ignored_empty'] += 1
+            return
+        if payload.lower() in {'ping', 'pong'}:
+            self.stats['messages_ignored_control'] += 1
+            return
+        if payload.upper() in {'INVALID OPERATION', 'INVALID REQUEST'}:
+            self.stats['messages_server_errors'] += 1
+            self._server_error_log_count += 1
+            if self._server_error_log_count <= 5 or self._server_error_log_count % 100 == 0:
+                logger.warning(
+                    f"Server error message from {self.platform}: {payload!r} "
+                    f"(count={self._server_error_log_count})"
+                )
+            return
+
         try:
-            data = json.loads(raw_data)
-            message = await self._parse_message(data)
-            if message:
+            data = json.loads(payload)
+        except json.JSONDecodeError as e:
+            self.stats['messages_invalid_json'] += 1
+            self._invalid_json_log_count += 1
+            # Keep logs actionable without flooding output every scan.
+            if self._invalid_json_log_count <= 5 or self._invalid_json_log_count % 100 == 0:
+                snippet = payload[:120].replace('\n', '\\n')
+                logger.warning(
+                    f"Failed to parse message from {self.platform}: {e} | snippet={snippet!r} "
+                    f"(count={self._invalid_json_log_count})"
+                )
+            return
+
+        try:
+            parsed = await self._parse_message(data)
+            messages = self._coerce_messages(parsed)
+            if not messages:
+                self.stats['messages_unrecognized'] += 1
+                return
+
+            for message in messages:
+                self.stats['messages_parsed'] += 1
                 # Add to queue for offline resilience
                 self.message_queue.append(message)
-                
+
                 # Dispatch to handlers
                 for handler in self.message_handlers[message.channel]:
                     try:
@@ -125,8 +174,18 @@ class WebSocketManager:
                         logger.error(f"Error in message handler: {e}")
         except Exception as e:
             logger.error(f"Failed to parse message from {self.platform}: {e}")
+
+    def _coerce_messages(self, parsed: Union[None, StreamMessage, List[StreamMessage]]) -> List[StreamMessage]:
+        """Normalize parser output to a list of StreamMessages."""
+        if parsed is None:
+            return []
+        if isinstance(parsed, list):
+            return [m for m in parsed if isinstance(m, StreamMessage)]
+        if isinstance(parsed, StreamMessage):
+            return [parsed]
+        return []
     
-    async def _parse_message(self, data: Dict) -> Optional[StreamMessage]:
+    async def _parse_message(self, data: Any) -> Optional[Union[StreamMessage, List[StreamMessage]]]:
         """Parse platform-specific message format. Override in subclasses."""
         raise NotImplementedError
     
@@ -383,6 +442,11 @@ class KalshiWebSocketClient(WebSocketManager):
         """Subscribe to real-time updates for specific markets."""
         if channels is None:
             channels = ['ticker_v2', 'orderbook_delta', 'trade']
+        unique_tickers = [ticker for ticker in dict.fromkeys(market_tickers or []) if ticker]
+        new_tickers = [ticker for ticker in unique_tickers if ticker not in self.subscribed_markets]
+        if not new_tickers:
+            logger.debug("No new Kalshi tickers to subscribe")
+            return
         
         for channel in channels:
             command = {
@@ -390,13 +454,13 @@ class KalshiWebSocketClient(WebSocketManager):
                 "cmd": "subscribe",
                 "params": {
                     "channels": [channel],
-                    "market_tickers": market_tickers
+                    "market_tickers": new_tickers
                 }
             }
             
             await self._send_command(command)
-            self.subscribed_markets.update(market_tickers)
-            logger.info(f"Subscribed to {channel} for {len(market_tickers)} Kalshi markets")
+            self.subscribed_markets.update(new_tickers)
+            logger.info(f"Subscribed to {channel} for {len(new_tickers)} Kalshi markets")
     
     async def subscribe_to_all_markets(self, channels: List[str] = None):
         """Subscribe to all active markets."""
@@ -454,65 +518,146 @@ class PolymarketWebSocketClient(WebSocketManager):
         """Send authentication message to Polymarket."""
         auth_message = {
             "auth": self.auth_token,
-            "type": "MARKET"
+            "type": "market"
         }
         await self.websocket.send_str(json.dumps(auth_message))
         logger.info("Sent authentication to Polymarket WebSocket")
     
-    async def _parse_message(self, data: Dict) -> Optional[StreamMessage]:
+    async def _parse_message(self, data: Any) -> Optional[Union[StreamMessage, List[StreamMessage]]]:
         """Parse Polymarket WebSocket message format."""
-        # Handle market data updates
-        if 'event_type' in data:
-            event_type = data['event_type']
-            market_id = (
-                data.get('market_id')
-                or data.get('condition_id')
-                or data.get('market')
+        if isinstance(data, list):
+            parsed_messages: List[StreamMessage] = []
+            for item in data:
+                if not isinstance(item, dict):
+                    continue
+                parsed = self._parse_polymarket_event(item)
+                if isinstance(parsed, list):
+                    parsed_messages.extend(parsed)
+                elif isinstance(parsed, StreamMessage):
+                    parsed_messages.append(parsed)
+            return parsed_messages or None
+
+        if not isinstance(data, dict):
+            return None
+        return self._parse_polymarket_event(data)
+
+    def _parse_polymarket_event(self, data: Dict[str, Any]) -> Optional[Union[StreamMessage, List[StreamMessage]]]:
+        """Parse a single Polymarket event payload."""
+        event_type = str(data.get('event_type', '')).lower()
+        market_id = (
+            data.get('market_id')
+            or data.get('condition_id')
+            or data.get('market')
+        )
+        asset_id = data.get('asset_id') or data.get('token_id')
+        event_timestamp = self._parse_polymarket_timestamp(data.get('timestamp'))
+
+        # Snapshot/orderbook event payloads.
+        if event_type in {'book', 'order_book_update'}:
+            return StreamMessage(
+                platform='polymarket',
+                channel='orderbook',
+                market_id=str(market_id or asset_id or ''),
+                data={
+                    'bids': data.get('bids', []),
+                    'asks': data.get('asks', []),
+                    'outcome': data.get('outcome'),
+                    'asset_id': asset_id,
+                    'sequence': data.get('sequence'),
+                    'tick_size': data.get('tick_size'),
+                },
+                timestamp=event_timestamp,
+                sequence=data.get('sequence')
             )
-            asset_id = data.get('asset_id') or data.get('token_id')
-            
-            if event_type == 'price_change':
-                return StreamMessage(
-                    platform='polymarket',
-                    channel='price',
-                    market_id=market_id or (asset_id or ''),
-                    data={
-                        'price': data.get('price'),
-                        'outcome': data.get('outcome'),
-                        'asset_id': asset_id,
-                        'timestamp': data.get('timestamp')
-                    },
-                    timestamp=time.time()
-                )
-            
-            elif event_type == 'order_book_update':
-                return StreamMessage(
-                    platform='polymarket',
-                    channel='orderbook',
-                    market_id=market_id or (asset_id or ''),
-                    data={
-                        'bids': data.get('bids', []),
-                        'asks': data.get('asks', []),
-                        'outcome': data.get('outcome'),
-                        'asset_id': asset_id,
-                        'sequence': data.get('sequence')
-                    },
-                    timestamp=time.time(),
-                    sequence=data.get('sequence')
-                )
-        
+
+        # Incremental price updates, usually in `price_changes`.
+        if event_type == 'price_change':
+            changes = data.get('price_changes')
+            if isinstance(changes, list) and changes:
+                messages: List[StreamMessage] = []
+                for change in changes:
+                    if not isinstance(change, dict):
+                        continue
+                    change_asset_id = change.get('asset_id') or change.get('token_id') or asset_id
+                    messages.append(
+                        StreamMessage(
+                            platform='polymarket',
+                            channel='price',
+                            market_id=str(market_id or change_asset_id or ''),
+                            data={
+                                'price': self._safe_float(change.get('price')),
+                                'size': self._safe_float(change.get('size')),
+                                'side': change.get('side'),
+                                'outcome': change.get('outcome'),
+                                'asset_id': change_asset_id,
+                                'timestamp': data.get('timestamp')
+                            },
+                            timestamp=event_timestamp
+                        )
+                    )
+                return messages or None
+
+            return StreamMessage(
+                platform='polymarket',
+                channel='price',
+                market_id=str(market_id or asset_id or ''),
+                data={
+                    'price': self._safe_float(data.get('price')),
+                    'outcome': data.get('outcome'),
+                    'asset_id': asset_id,
+                    'timestamp': data.get('timestamp')
+                },
+                timestamp=event_timestamp
+            )
+
         return None
+
+    def _parse_polymarket_timestamp(self, value: Any) -> float:
+        """Normalize Polymarket timestamp fields to unix seconds."""
+        default = time.time()
+        if value is None:
+            return default
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return default
+        # Polymarket timestamps are usually milliseconds.
+        if parsed > 1e11:
+            return parsed / 1000.0
+        return parsed
+
+    def _safe_float(self, value: Any) -> Optional[float]:
+        """Parse float value safely."""
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
     
     async def subscribe_to_markets(self, asset_ids: List[str]):
         """Subscribe to market updates for specific assets."""
-        subscription_message = {
-            "assets_ids": asset_ids,
-            "type": "MARKET"
-        }
-        
-        await self.websocket.send_str(json.dumps(subscription_message))
-        self.subscribed_markets.update(asset_ids)
-        logger.info(f"Subscribed to {len(asset_ids)} Polymarket assets")
+        unique_assets = [asset for asset in dict.fromkeys(asset_ids or []) if asset]
+        new_assets = [asset for asset in unique_assets if asset not in self.subscribed_markets]
+        if not new_assets:
+            logger.debug("No new Polymarket assets to subscribe")
+            return
+
+        max_assets_per_subscribe = int(self.config.get('max_assets_per_subscribe', 300))
+        chunk_count = 0
+        for start in range(0, len(new_assets), max_assets_per_subscribe):
+            chunk = new_assets[start:start + max_assets_per_subscribe]
+            subscription_message = {
+                "assets_ids": chunk,
+                "type": "market"
+            }
+
+            await self.websocket.send_str(json.dumps(subscription_message))
+            self.subscribed_markets.update(chunk)
+            chunk_count += 1
+
+        logger.info(
+            f"Subscribed to {len(new_assets)} Polymarket assets "
+            f"across {chunk_count} request(s)"
+        )
 
 class RealTimeDataManager:
     """Manages real-time data streams from both platforms."""
@@ -646,6 +791,8 @@ class RealTimeDataManager:
     async def subscribe_to_markets(self, kalshi_tickers: List[str] = None, polymarket_assets: List[str] = None):
         """Subscribe to specific markets on both platforms."""
         tasks = []
+        kalshi_before = len(self.kalshi_client.subscribed_markets) if self.kalshi_client else 0
+        polymarket_before = len(self.polymarket_client.subscribed_markets) if self.polymarket_client else 0
         
         if kalshi_tickers:
             tasks.append(self.kalshi_client.subscribe_to_markets(kalshi_tickers))
@@ -655,4 +802,11 @@ class RealTimeDataManager:
         
         if tasks:
             await asyncio.gather(*tasks)
-            logger.info(f"Subscribed to {len(kalshi_tickers or [])} Kalshi + {len(polymarket_assets or [])} Polymarket markets")
+            kalshi_after = len(self.kalshi_client.subscribed_markets) if self.kalshi_client else 0
+            polymarket_after = len(self.polymarket_client.subscribed_markets) if self.polymarket_client else 0
+            new_kalshi = max(0, kalshi_after - kalshi_before)
+            new_polymarket = max(0, polymarket_after - polymarket_before)
+            if new_kalshi or new_polymarket:
+                logger.info(f"Subscribed to {new_kalshi} Kalshi + {new_polymarket} Polymarket markets")
+            else:
+                logger.debug("No new market subscriptions were required")

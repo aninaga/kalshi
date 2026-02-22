@@ -6,11 +6,13 @@ Comprehensive prediction market arbitrage detection and analysis
 from .config import Config
 from .market_analyzer import MarketAnalyzer
 from .api_clients import KalshiClient, PolymarketClient
+from .confirmed_pnl import ConfirmedPnLTracker
 
 __version__ = "3.0.0"
 __all__ = [
     "Config",
     "MarketAnalyzer",
     "KalshiClient",
-    "PolymarketClient"
+    "PolymarketClient",
+    "ConfirmedPnLTracker"
 ]

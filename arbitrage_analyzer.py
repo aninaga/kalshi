@@ -22,6 +22,8 @@ class ArbitrageAnalysisSystem:
         self.scan_count = 0
         self.total_opportunities_found = 0
         self.start_time = None
+        self.max_scans = None
+        self.max_runtime_seconds = None
         
     async def initialize(self):
         """Initialize the analysis system."""
@@ -35,6 +37,8 @@ class ArbitrageAnalysisSystem:
         self.logger.info(f"Scan Interval: {Config.SCAN_INTERVAL_SECONDS} seconds")
         self.logger.info(f"Min Profit Threshold: {Config.MIN_PROFIT_THRESHOLD}")
         self.logger.info(f"Similarity Threshold: {Config.SIMILARITY_THRESHOLD}")
+        self.logger.info(f"Require Real Orderbooks: {Config.REQUIRE_REAL_ORDERBOOKS_FOR_ESTIMATED}")
+        self.logger.info(f"Confirmed PnL Includes Simulation: {Config.CONFIRMED_PNL_INCLUDE_SIMULATION}")
         self.logger.info("=" * 60)
         
         await self.analyzer.initialize()
@@ -52,35 +56,48 @@ class ArbitrageAnalysisSystem:
         
         try:
             while self.running:
+                if self.max_runtime_seconds is not None:
+                    elapsed_runtime = (datetime.now() - self.start_time).total_seconds()
+                    if elapsed_runtime >= self.max_runtime_seconds:
+                        self.logger.info(f"Reached max runtime ({self.max_runtime_seconds}s), stopping continuous mode")
+                        break
+                if self.max_scans is not None and self.scan_count >= self.max_scans:
+                    self.logger.info(f"Reached max scans ({self.max_scans}), stopping continuous mode")
+                    break
+
                 cycle_start = datetime.now()
-                
+
                 # Run full market scan
                 try:
                     scan_report = await self.analyzer.run_full_scan()
                     self.scan_count += 1
                     opportunities_found = scan_report['arbitrage_opportunities']
                     self.total_opportunities_found += opportunities_found
-                    
+
                     # Print summary
                     self._print_scan_summary(scan_report, cycle_start)
-                    
+
                     # Print top opportunities if found
                     if scan_report['top_opportunities']:
                         self._print_top_opportunities(scan_report['top_opportunities'])
-                    
+
+                    if self.max_scans is not None and self.scan_count >= self.max_scans:
+                        self.logger.info(f"Reached max scans ({self.max_scans}), stopping continuous mode")
+                        break
+
                 except Exception as e:
                     self.logger.error(f"Error during scan cycle: {e}")
-                
+
                 # Calculate sleep time to maintain 30-second intervals
                 cycle_duration = (datetime.now() - cycle_start).total_seconds()
                 sleep_time = max(0, Config.SCAN_INTERVAL_SECONDS - cycle_duration)
-                
+
                 if sleep_time > 0:
                     self.logger.info(f"Next scan in {sleep_time:.1f} seconds...")
                     await asyncio.sleep(sleep_time)
                 else:
                     self.logger.warning(f"Scan took {cycle_duration:.1f}s - longer than {Config.SCAN_INTERVAL_SECONDS}s interval")
-                    
+
         except Exception as e:
             self.logger.error(f"Fatal error in continuous analysis: {e}")
         finally:
@@ -115,12 +132,71 @@ class ArbitrageAnalysisSystem:
         print(f"Duration: {duration:.1f}s | Uptime: {uptime}")
         print(f"Markets: Kalshi({kalshi_count}) + Polymarket({poly_count}) = {kalshi_count + poly_count}")
         print(f"Matches: {matches} | Opportunities: {opportunities}")
-        
+        self._print_guaranteed_pnl_summary(scan_report)
+
         if opportunities > 0:
             print(f"🚨 {opportunities} ARBITRAGE OPPORTUNITIES DETECTED!")
         else:
             print("✅ No arbitrage opportunities found")
-    
+
+    def _print_guaranteed_pnl_summary(self, scan_report: dict):
+        """Print estimated, guaranteed, and confirmed-realized PnL outputs."""
+        estimated_scan = float(scan_report.get('estimated_pnl_per_scan_usd', 0.0))
+        estimated_hour = float(scan_report.get('estimated_pnl_per_hour_usd', 0.0))
+        estimated_day = float(scan_report.get('estimated_pnl_per_day_usd', 0.0))
+        estimated_count = int(scan_report.get('estimated_pnl_opportunity_count', 0))
+
+        guaranteed_scan = float(scan_report.get('guaranteed_pnl_per_scan_usd', 0.0))
+        guaranteed_hour = float(scan_report.get('guaranteed_pnl_per_hour_usd', 0.0))
+        guaranteed_day = float(scan_report.get('guaranteed_pnl_per_day_usd', 0.0))
+        guaranteed_count = int(scan_report.get('guaranteed_pnl_opportunity_count', 0))
+
+        confirmed_scan = float(scan_report.get('confirmed_realized_pnl_per_scan_usd', 0.0))
+        confirmed_hour = float(scan_report.get('confirmed_realized_pnl_per_hour_usd', 0.0))
+        confirmed_day = float(scan_report.get('confirmed_realized_pnl_per_day_usd', 0.0))
+        confirmed_count = int(scan_report.get('confirmed_realized_pnl_opportunity_count', 0))
+        confirmed_settled = int(scan_report.get('confirmed_settled_execution_count', 0))
+        confirmed_pending = int(scan_report.get('confirmed_pending_execution_count', 0))
+        counting_simulated = bool(scan_report.get('confirmed_counting_simulated_confirmations', False))
+
+        print(
+            f"Estimated PnL: ${estimated_scan:,.2f}/scan | "
+            f"${estimated_hour:,.2f}/hour | ${estimated_day:,.2f}/day"
+        )
+        print(
+            f"Guaranteed PnL (simulated fills): ${guaranteed_scan:,.2f}/scan | "
+            f"${guaranteed_hour:,.2f}/hour | ${guaranteed_day:,.2f}/day"
+        )
+        print(
+            f"Confirmed Realized PnL (settled fills): ${confirmed_scan:,.2f}/scan | "
+            f"${confirmed_hour:,.2f}/hour | ${confirmed_day:,.2f}/day"
+        )
+        print(
+            f"Opportunities: estimated={estimated_count}, guaranteed={guaranteed_count}, "
+            f"confirmed_realized={confirmed_count}"
+        )
+        print(
+            f"Confirmed Executions: settled={confirmed_settled}, pending={confirmed_pending}, "
+            f"include_simulated={counting_simulated}"
+        )
+        if 'synthetic_orderbook_opportunities' in scan_report:
+            synthetic_count = int(scan_report.get('synthetic_orderbook_opportunities', 0))
+            real_count = int(scan_report.get('real_orderbook_opportunities', 0))
+            print(f"Orderbook Quality: real={real_count}, synthetic={synthetic_count}")
+        data_quality = scan_report.get('data_quality', {})
+        if isinstance(data_quality, dict):
+            pm_ws = data_quality.get('polymarket_websocket') or {}
+            pm_ingest = data_quality.get('polymarket_ingest') or {}
+            if pm_ws or pm_ingest:
+                print(
+                    "Polymarket Feed Quality: "
+                    f"ws_invalid_json={int(pm_ws.get('messages_invalid_json', 0))}, "
+                    f"ws_server_errors={int(pm_ws.get('messages_server_errors', 0))}, "
+                    f"ws_unrecognized={int(pm_ws.get('messages_unrecognized', 0))}, "
+                    f"price_dropped={int(pm_ingest.get('price_updates_dropped', 0))}, "
+                    f"orderbook_dropped={int(pm_ingest.get('orderbook_updates_dropped', 0))}"
+                )
+
     def _print_top_opportunities(self, opportunities: list, max_display: int = 5):
         """Print top arbitrage opportunities."""
         print(f"\n🎯 TOP {min(len(opportunities), max_display)} OPPORTUNITIES:")
@@ -161,7 +237,22 @@ class ArbitrageAnalysisSystem:
         print(f"Polymarket Markets: {scan_report['polymarket_markets_count']:,}")
         print(f"Potential Matches: {scan_report['potential_matches']:,}")
         print(f"Arbitrage Opportunities: {scan_report['arbitrage_opportunities']:,}")
-        
+        self._print_guaranteed_pnl_summary(scan_report)
+        print(f"ESTIMATED_PNL_PER_SCAN_USD={float(scan_report.get('estimated_pnl_per_scan_usd', 0.0)):.6f}")
+        print(f"ESTIMATED_PNL_PER_HOUR_USD={float(scan_report.get('estimated_pnl_per_hour_usd', 0.0)):.6f}")
+        print(f"ESTIMATED_PNL_PER_DAY_USD={float(scan_report.get('estimated_pnl_per_day_usd', 0.0)):.6f}")
+        print(f"GUARANTEED_PNL_PER_SCAN_USD={float(scan_report.get('guaranteed_pnl_per_scan_usd', 0.0)):.6f}")
+        print(f"GUARANTEED_PNL_PER_HOUR_USD={float(scan_report.get('guaranteed_pnl_per_hour_usd', 0.0)):.6f}")
+        print(f"GUARANTEED_PNL_PER_DAY_USD={float(scan_report.get('guaranteed_pnl_per_day_usd', 0.0)):.6f}")
+        print(f"CONFIRMED_REALIZED_PNL_PER_SCAN_USD={float(scan_report.get('confirmed_realized_pnl_per_scan_usd', 0.0)):.6f}")
+        print(f"CONFIRMED_REALIZED_PNL_PER_HOUR_USD={float(scan_report.get('confirmed_realized_pnl_per_hour_usd', 0.0)):.6f}")
+        print(f"CONFIRMED_REALIZED_PNL_PER_DAY_USD={float(scan_report.get('confirmed_realized_pnl_per_day_usd', 0.0)):.6f}")
+
+        if 'simulated_summary' in scan_report:
+            sim = scan_report['simulated_summary']
+            print(f"Simulated Executions: {sim['count']} | Skipped: {sim['skipped']}")
+            print(f"Simulated Net Profit: ${sim['net_profit']:.2f} | Capital: ${sim['capital']:.2f} | ROI: {sim['roi']:.2%}")
+
         # Show completeness information
         if 'completeness_info' in scan_report:
             completeness = scan_report['completeness_info']
@@ -226,6 +317,18 @@ def main():
         help=f"Scan interval in seconds (default: {Config.SCAN_INTERVAL_SECONDS})"
     )
     parser.add_argument(
+        "--max-scans",
+        type=int,
+        default=0,
+        help="Maximum number of scans in continuous mode (0 = unbounded)"
+    )
+    parser.add_argument(
+        "--max-runtime-seconds",
+        type=int,
+        default=0,
+        help="Maximum runtime in seconds for continuous mode (0 = unbounded)"
+    )
+    parser.add_argument(
         "--threshold", 
         type=float, 
         default=Config.MIN_PROFIT_THRESHOLD,
@@ -244,10 +347,34 @@ def main():
         help=f"Completeness level: FAST (95%%), BALANCED (99%%), LOSSLESS (100%%) (default: {Config.DEFAULT_COMPLETENESS_LEVEL})"
     )
     parser.add_argument(
+        "--simulate",
+        action="store_true",
+        default=False,
+        help="Enable mock execution simulation"
+    )
+    parser.add_argument(
+        "--latency-ms",
+        type=int,
+        default=Config.SIMULATION_LATENCY_MS,
+        help=f"Simulated execution latency in ms (default: {Config.SIMULATION_LATENCY_MS})"
+    )
+    parser.add_argument(
         "--realtime",
         action="store_true",
         default=True,
         help="WebSocket streaming is always enabled in this version (WebSocket-only mode)"
+    )
+    parser.add_argument(
+        "--allow-synthetic-orderbooks",
+        action="store_true",
+        default=False,
+        help="Allow synthetic orderbook fallback when live orderbooks are missing"
+    )
+    parser.add_argument(
+        "--count-simulated-as-confirmed",
+        action="store_true",
+        default=False,
+        help="Count simulation receipts in confirmed realized PnL outputs (dry-run mode)"
     )
     
     args = parser.parse_args()
@@ -256,7 +383,11 @@ def main():
     Config.SCAN_INTERVAL_SECONDS = args.interval
     Config.MIN_PROFIT_THRESHOLD = args.threshold
     Config.SIMILARITY_THRESHOLD = args.similarity
-    
+    Config.SIMULATION_ENABLED = args.simulate
+    Config.SIMULATION_LATENCY_MS = args.latency_ms
+    Config.REQUIRE_REAL_ORDERBOOKS_FOR_ESTIMATED = not args.allow_synthetic_orderbooks
+    Config.CONFIRMED_PNL_INCLUDE_SIMULATION = args.count_simulated_as_confirmed
+
     # WebSocket-only mode is always enabled - remove REST fallback option
     Config.REALTIME_ENABLED = True
     Config.STREAM_FALLBACK_TO_REST = False
@@ -268,14 +399,18 @@ def main():
     
     # Create and run the analysis system
     system = ArbitrageAnalysisSystem()
-    
+    system.max_scans = args.max_scans if args.max_scans > 0 else None
+    system.max_runtime_seconds = args.max_runtime_seconds if args.max_runtime_seconds > 0 else None
+
     async def run_system():
         await system.initialize()
         
         # Set completeness level if specified
         if hasattr(args, 'completeness'):
             system.analyzer.set_completeness_level(args.completeness)
-        
+        if args.simulate:
+            system.analyzer.enable_simulation(args.latency_ms)
+
         if args.mode == "continuous":
             await system.run_continuous_analysis()
         else:

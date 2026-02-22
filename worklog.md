@@ -39,3 +39,27 @@ Date: 2026-01-17
 
 ## Notes
 - Live scan attempts were aborted by user and not completed.
+
+## 2026-01-17 (Mock execution)
+- Added mock execution engine with market-order fills, latency simulation, and per-fill fee calculation.
+- Added Polymarket fee-rate lookup via CLOB fee-rate endpoint with caching.
+- Implemented Kalshi taker fee formula (rounded up to cent) and Polymarket fee curve with 0.0001 USDC precision.
+- Integrated simulation into analyzer with optional CLI flags and simulated P&L summary.
+- Added live-orderbook freshness checks and skipped simulation when data is stale or missing.
+
+## 2026-02-16 (PnL semantics + runtime guardrails)
+- Split reported PnL into `estimated` (model-based opportunities) vs `guaranteed` (non-skipped simulated fills only).
+- Added bounded continuous-run controls: `--max-scans` and `--max-runtime-seconds`.
+- Added strict orderbook quality mode: estimated opportunities require real orderbooks by default.
+- Added `--allow-synthetic-orderbooks` flag to permit synthetic fallback when explicitly requested.
+- Added orderbook quality counters to scan output (`real` vs `synthetic`) and surfaced them in CLI summaries.
+- Integrated venue-aware fee estimation in overlapping-volume profitability checks.
+- Added/updated tests for guaranteed PnL reporting and orderbook quality controls.
+
+## 2026-02-16 (Exchange-confirmed PnL tracking)
+- Added `ConfirmedPnLTracker` with execution lifecycle tracking: execution IDs, order IDs, fill IDs, trade IDs, and settlement IDs.
+- Enforced settled-and-confirmed gating for confirmed realized PnL, with simulation receipts excluded by default.
+- Integrated tracker into `MarketAnalyzer` scan reports with new `confirmed_realized_*` metrics (per scan/hour/day + settled/pending counters).
+- Extended mock execution results to emit deterministic simulation execution artifacts for ledger ingestion.
+- Added CLI flag `--count-simulated-as-confirmed` for explicit dry-run inclusion of simulation receipts.
+- Expanded tests with comprehensive tracker and reporting suites.

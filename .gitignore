@@ -107,5 +107,5 @@ market_data/*.log
 market_data/scan_report_*.json
 market_data/arbitrage_opportunities.json
 
-# Test files
-test_*.pykalshi_private_key.pem
+# Local credentials
+kalshi_private_key.pem
