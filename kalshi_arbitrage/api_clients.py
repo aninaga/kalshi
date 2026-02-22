@@ -19,7 +19,12 @@ class KalshiClient:
         self.price_cache = {}
         self.orderbook_cache = {}
         self.discovered_tickers = []  # Store all discovered market tickers
-    
+        self._rest_discovered_tickers = set()  # Track REST-originated tickers
+        self._last_market_cleanup = time.time()
+        self._orderbook_rest_semaphore = asyncio.Semaphore(Config.ORDERBOOK_REST_MAX_PER_SECOND)
+        self._orderbook_rest_last_call = 0.0
+        self._orderbook_rest_session = None
+
     def _cents_to_dollars(self, value, default: float = 0.5) -> float:
         """Convert Kalshi cent pricing to dollars with safe fallback."""
         if value is None:
@@ -113,16 +118,42 @@ class KalshiClient:
             self.markets_cache[market_ticker] = {
                 'id': message.market_id,
                 'ticker': market_ticker,
-                'title': market_ticker,  # We'll use ticker as title for now
+                'title': market_ticker,
                 'platform': 'kalshi',
                 'status': 'active',
-                'clean_title': self._clean_title(market_ticker)
+                'clean_title': self._clean_title(market_ticker),
+                'source': 'websocket',
+                'last_updated': time.time()
             }
+        else:
+            self.markets_cache[market_ticker]['last_updated'] = time.time()
+
+        # Periodically clean up stale WebSocket-only entries
+        self._cleanup_stale_markets()
     
+    def _cleanup_stale_markets(self):
+        """Remove WebSocket-only market entries older than KALSHI_STALE_MARKET_TTL."""
+        now = time.time()
+        if now - self._last_market_cleanup < Config.KALSHI_MARKET_CLEANUP_INTERVAL:
+            return
+        self._last_market_cleanup = now
+        stale_keys = []
+        for ticker, market in self.markets_cache.items():
+            if ticker in self._rest_discovered_tickers:
+                continue
+            if market.get('source') == 'websocket':
+                last_updated = market.get('last_updated', 0)
+                if now - last_updated > Config.KALSHI_STALE_MARKET_TTL:
+                    stale_keys.append(ticker)
+        for key in stale_keys:
+            del self.markets_cache[key]
+        if stale_keys:
+            logger.info(f"Kalshi market cache cleanup: removed {len(stale_keys)} stale WebSocket-only entries, {len(self.markets_cache)} remain")
+
     def _clean_title(self, title: str) -> str:
         """Basic title cleaning."""
         return title.replace('-', ' ').replace('KX', '').lower().strip()
-    
+
     async def _discover_markets_via_rest(self):
         """Discover all markets via REST API."""
         import aiohttp
@@ -227,6 +258,7 @@ class KalshiClient:
                     ticker = market.get('ticker')
                     if ticker:
                         self.discovered_tickers.append(ticker)
+                        self._rest_discovered_tickers.add(ticker)
                         self.markets_cache[ticker] = {
                             'id': market.get('id'),
                             'ticker': ticker,
@@ -235,7 +267,9 @@ class KalshiClient:
                             'status': market.get('status', 'active'),
                             'close_time': market.get('close_time'),
                             'clean_title': self._clean_title(market.get('title', ticker)),
-                            'raw_data': market
+                            'raw_data': market,
+                            'source': 'rest',
+                            'last_updated': time.time()
                         }
                 
                 logger.info(f"Cached {len(self.markets_cache)} Kalshi markets from REST discovery")
@@ -320,8 +354,50 @@ class KalshiClient:
         return None
     
     async def get_market_orderbook(self, market_ticker: str) -> Optional[Dict[str, Any]]:
-        """Get market orderbook from cache."""
-        return self.orderbook_cache.get(market_ticker)
+        """Get market orderbook from cache, with REST fallback."""
+        result = self.orderbook_cache.get(market_ticker)
+        if result is not None:
+            return result
+        # REST fallback
+        if Config.ORDERBOOK_REST_FALLBACK:
+            return await self._fetch_orderbook_rest(market_ticker)
+        return None
+
+    async def _fetch_orderbook_rest(self, market_ticker: str) -> Optional[Dict[str, Any]]:
+        """Fetch orderbook via REST API as fallback when WebSocket cache misses."""
+        import aiohttp
+        try:
+            async with self._orderbook_rest_semaphore:
+                now = time.time()
+                elapsed = now - self._orderbook_rest_last_call
+                if elapsed < 0.2:  # Max 5/sec
+                    await asyncio.sleep(0.2 - elapsed)
+                self._orderbook_rest_last_call = time.time()
+
+                url = f"{Config.KALSHI_API_BASE}/markets/{market_ticker}/orderbook"
+                if self._orderbook_rest_session is None or self._orderbook_rest_session.closed:
+                    self._orderbook_rest_session = aiohttp.ClientSession()
+                async with self._orderbook_rest_session.get(url) as resp:
+                        if resp.status == 200:
+                            data = await resp.json()
+                            orderbook = data.get('orderbook', data)
+                            # Normalize to standard format
+                            normalized = {
+                                'yes_asks': self._normalize_kalshi_levels(orderbook.get('yes', {}).get('asks', orderbook.get('yes_asks', []))),
+                                'yes_bids': self._normalize_kalshi_levels(orderbook.get('yes', {}).get('bids', orderbook.get('yes_bids', []))),
+                                'no_asks': self._normalize_kalshi_levels(orderbook.get('no', {}).get('asks', orderbook.get('no_asks', []))),
+                                'no_bids': self._normalize_kalshi_levels(orderbook.get('no', {}).get('bids', orderbook.get('no_bids', []))),
+                                'timestamp': time.time(),
+                                'source': 'rest_fallback'
+                            }
+                            self.orderbook_cache[market_ticker] = normalized
+                            return normalized
+                        else:
+                            logger.debug(f"REST orderbook fetch failed for {market_ticker}: HTTP {resp.status}")
+                            return None
+        except Exception as e:
+            logger.debug(f"REST orderbook fetch error for {market_ticker}: {e}")
+            return None
 
 class PolymarketClient:
     """Hybrid Polymarket client: REST bootstrap + WebSocket real-time data."""
@@ -334,6 +410,10 @@ class PolymarketClient:
         self.asset_ids = []  # Store asset IDs for WebSocket subscription
         self.token_to_market = {}
         self.token_outcome_map = {}
+        self._last_market_refresh = time.time()
+        self._orderbook_rest_semaphore = asyncio.Semaphore(Config.ORDERBOOK_REST_MAX_PER_SECOND)
+        self._orderbook_rest_last_call = 0.0
+        self._orderbook_rest_session = None
         self.stream_quality_stats = {
             'price_updates_received': 0,
             'price_updates_accepted': 0,
@@ -617,12 +697,121 @@ class PolymarketClient:
         """Get market prices from cache."""
         return self.price_cache.get(market_id, {})
     
+    async def refresh_markets(self):
+        """Re-fetch markets from REST API, merging new ones into existing cache."""
+        import aiohttp
+        import json as _json
+        try:
+            logger.info("Refreshing Polymarket markets from REST API...")
+            url = f"{Config.POLYMARKET_GAMMA_BASE}/markets"
+            added = 0
+            offset = 0
+            limit = 500
+            timeout = aiohttp.ClientTimeout(total=30)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                while True:
+                    params = {"active": "true", "closed": "false", "limit": limit, "offset": offset}
+                    try:
+                        async with session.get(url, params=params) as response:
+                            response.raise_for_status()
+                            markets_data = await response.json()
+                        if not markets_data or not isinstance(markets_data, list) or len(markets_data) == 0:
+                            break
+                        for market in markets_data:
+                            market_id = market.get('id')
+                            if market_id and market_id not in self.markets_cache:
+                                question = market.get('question', '')
+                                outcomes = market.get('outcomes', '[]')
+                                clob_token_ids = market.get('clobTokenIds', '[]')
+                                outcome_prices = market.get('outcomePrices', '[]')
+                                if isinstance(outcomes, str):
+                                    outcomes = _json.loads(outcomes)
+                                if isinstance(clob_token_ids, str):
+                                    clob_token_ids = _json.loads(clob_token_ids)
+                                if isinstance(outcome_prices, str):
+                                    outcome_prices = _json.loads(outcome_prices)
+                                if not all([market_id, question, outcomes, clob_token_ids]):
+                                    continue
+                                self.markets_cache[market_id] = {
+                                    'id': market_id, 'title': question,
+                                    'clean_title': self._clean_title(question),
+                                    'platform': 'polymarket', 'status': 'active', 'active': True,
+                                    'outcomes': outcomes, 'clob_token_ids': clob_token_ids,
+                                    'outcome_prices': outcome_prices, 'raw_data': market
+                                }
+                                for outcome, price_str, token_id in zip(outcomes, outcome_prices, clob_token_ids):
+                                    self.token_to_market[token_id] = market_id
+                                    self.token_outcome_map[token_id] = outcome
+                                added += 1
+                        if len(markets_data) < limit:
+                            break
+                        offset += limit
+                    except Exception as e:
+                        logger.warning(f"Error during Polymarket refresh at offset {offset}: {e}")
+                        break
+            self._last_market_refresh = time.time()
+            logger.info(f"Polymarket refresh complete: {added} new markets added, {len(self.markets_cache)} total")
+        except Exception as e:
+            logger.error(f"Failed to refresh Polymarket markets: {e}")
+
     async def get_market_orderbook(self, market_id: str, token_id: str = None) -> Optional[Dict[str, Any]]:
-        """Get market orderbook from cache."""
+        """Get market orderbook from cache, with REST fallback."""
         market_orderbooks = self.orderbook_cache.get(market_id, {})
         if token_id:
-            return market_orderbooks.get(token_id) or market_orderbooks.get(self.token_outcome_map.get(token_id))
+            result = market_orderbooks.get(token_id) or market_orderbooks.get(self.token_outcome_map.get(token_id))
+            if result is not None:
+                return result
+            # REST fallback
+            if Config.ORDERBOOK_REST_FALLBACK:
+                return await self._fetch_orderbook_rest(token_id)
+            return None
+        if market_orderbooks:
+            return market_orderbooks
+        # REST fallback for first token if available
+        market_data = self.markets_cache.get(market_id)
+        if Config.ORDERBOOK_REST_FALLBACK and market_data:
+            clob_ids = market_data.get('clob_token_ids', [])
+            if clob_ids:
+                return await self._fetch_orderbook_rest(clob_ids[0])
         return market_orderbooks
+
+    async def _fetch_orderbook_rest(self, token_id: str) -> Optional[Dict[str, Any]]:
+        """Fetch orderbook via CLOB REST API as fallback."""
+        import aiohttp
+        try:
+            async with self._orderbook_rest_semaphore:
+                now = time.time()
+                elapsed = now - self._orderbook_rest_last_call
+                if elapsed < 0.2:
+                    await asyncio.sleep(0.2 - elapsed)
+                self._orderbook_rest_last_call = time.time()
+
+                url = f"{Config.POLYMARKET_CLOB_BASE}/book"
+                params = {"token_id": token_id}
+                if self._orderbook_rest_session is None or self._orderbook_rest_session.closed:
+                    self._orderbook_rest_session = aiohttp.ClientSession()
+                async with self._orderbook_rest_session.get(url, params=params) as resp:
+                        if resp.status == 200:
+                            data = await resp.json()
+                            # Normalize and store
+                            bids = self._normalize_polymarket_levels(data.get('bids', []), side='bids')
+                            asks = self._normalize_polymarket_levels(data.get('asks', []), side='asks')
+                            orderbook = {
+                                'bids': bids, 'asks': asks,
+                                'timestamp': time.time(), 'source': 'rest_fallback'
+                            }
+                            market_id = self.token_to_market.get(token_id)
+                            if market_id:
+                                if market_id not in self.orderbook_cache:
+                                    self.orderbook_cache[market_id] = {}
+                                self.orderbook_cache[market_id][token_id] = orderbook
+                            return orderbook
+                        else:
+                            logger.debug(f"REST orderbook fetch failed for Polymarket {token_id}: HTTP {resp.status}")
+                            return None
+        except Exception as e:
+            logger.debug(f"REST orderbook fetch error for Polymarket {token_id}: {e}")
+            return None
 
     def get_data_quality_stats(self) -> Dict[str, int]:
         """Expose Polymarket stream ingest quality counters."""

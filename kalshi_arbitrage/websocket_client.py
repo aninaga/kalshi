@@ -16,6 +16,14 @@ from collections import defaultdict, deque
 
 logger = logging.getLogger(__name__)
 
+# Known non-JSON ack-style payloads that platforms may send.
+_NON_JSON_ACK_PAYLOADS = frozenset({
+    'ping', 'pong',
+    'ok', 'subscribed', 'unsubscribed',
+    'connected', 'disconnected',
+    'ack', 'heartbeat',
+})
+
 @dataclass
 class StreamMessage:
     """Represents a streaming message from either platform."""
@@ -48,6 +56,7 @@ class WebSocketManager:
             'messages_invalid_json': 0,
             'messages_ignored_empty': 0,
             'messages_ignored_control': 0,
+            'messages_ignored_non_json': 0,
             'messages_server_errors': 0,
             'messages_unrecognized': 0,
             'reconnections': 0,
@@ -56,6 +65,14 @@ class WebSocketManager:
         self._closing = False
         self._invalid_json_log_count = 0
         self._server_error_log_count = 0
+        # Connection health tracking
+        self._connect_time = None
+        self._total_connected_seconds = 0.0
+        self._last_disconnect_time = None
+        self._last_message_time_epoch = None
+        self._reconnection_count = 0
+        self._session_start_time = time.time()
+        self._total_errors = 0
         
     async def connect(self):
         """Establish WebSocket connection."""
@@ -74,12 +91,14 @@ class WebSocketManager:
             self.is_connected = True
             self.reconnect_attempts = 0
             self.last_heartbeat = time.time()
+            self._connect_time = time.time()
             logger.info(f"Successfully connected to {self.platform} WebSocket")
-            
+
             # Start message handling task
             asyncio.create_task(self._message_loop())
-            
+
         except Exception as e:
+            self._total_errors += 1
             logger.error(f"Failed to connect to {self.platform} WebSocket: {e}")
             await self._handle_reconnection()
     
@@ -87,6 +106,9 @@ class WebSocketManager:
         """Gracefully disconnect from WebSocket."""
         self._closing = True
         self.is_connected = False
+        if self._connect_time is not None:
+            self._total_connected_seconds += time.time() - self._connect_time
+            self._connect_time = None
         if self.websocket:
             await self.websocket.close()
         if self.session:
@@ -101,6 +123,7 @@ class WebSocketManager:
                     await self._handle_message(msg.data)
                     self.stats['messages_received'] += 1
                     self.stats['last_message_time'] = datetime.now()
+                    self._last_message_time_epoch = time.time()
                 elif msg.type == aiohttp.WSMsgType.ERROR:
                     logger.error(f"WebSocket error: {self.websocket.exception()}")
                     break
@@ -111,6 +134,10 @@ class WebSocketManager:
             logger.error(f"Error in message loop for {self.platform}: {e}")
         finally:
             self.is_connected = False
+            if self._connect_time is not None:
+                self._total_connected_seconds += time.time() - self._connect_time
+                self._connect_time = None
+                self._last_disconnect_time = time.time()
             if self._closing:
                 return
             await self._handle_reconnection()
@@ -126,7 +153,7 @@ class WebSocketManager:
         if not payload:
             self.stats['messages_ignored_empty'] += 1
             return
-        if payload.lower() in {'ping', 'pong'}:
+        if payload.lower() in _NON_JSON_ACK_PAYLOADS:
             self.stats['messages_ignored_control'] += 1
             return
         if payload.upper() in {'INVALID OPERATION', 'INVALID REQUEST'}:
@@ -137,6 +164,12 @@ class WebSocketManager:
                     f"Server error message from {self.platform}: {payload!r} "
                     f"(count={self._server_error_log_count})"
                 )
+            return
+
+        # Quick structural check: valid JSON must start with { or [
+        if payload[0] not in ('{', '['):
+            self.stats['messages_ignored_non_json'] += 1
+            logger.debug(f"Non-JSON payload from {self.platform}, ignoring: {payload[:80]!r}")
             return
 
         try:
@@ -199,6 +232,7 @@ class WebSocketManager:
             
         self.reconnect_attempts += 1
         self.stats['reconnections'] += 1
+        self._reconnection_count += 1
         backoff_time = min(300, 2 ** self.reconnect_attempts)  # Max 5 minutes
         
         logger.info(f"Reconnecting to {self.platform} in {backoff_time} seconds (attempt {self.reconnect_attempts})")
@@ -221,6 +255,36 @@ class WebSocketManager:
             'subscribed_markets': len(self.subscribed_markets),
             'queued_messages': len(self.message_queue),
             **self.stats
+        }
+
+    def get_connection_health(self) -> Dict:
+        """Get detailed connection health metrics."""
+        now = time.time()
+        session_elapsed = now - self._session_start_time
+        connected_seconds = self._total_connected_seconds
+        if self._connect_time is not None:
+            connected_seconds += now - self._connect_time
+        uptime_pct = (connected_seconds / session_elapsed * 100) if session_elapsed > 0 else 0.0
+
+        last_msg_age = None
+        if self._last_message_time_epoch is not None:
+            last_msg_age = now - self._last_message_time_epoch
+
+        msgs_per_min = 0.0
+        if connected_seconds > 0:
+            msgs_per_min = self.stats['messages_received'] / (connected_seconds / 60.0)
+
+        return {
+            'platform': self.platform,
+            'is_connected': self.is_connected,
+            'total_messages_received': self.stats['messages_received'],
+            'total_reconnections': self._reconnection_count,
+            'total_errors': self._total_errors,
+            'uptime_percentage': round(uptime_pct, 2),
+            'last_message_age_seconds': round(last_msg_age, 1) if last_msg_age is not None else None,
+            'messages_per_minute': round(msgs_per_min, 1),
+            'session_elapsed_seconds': round(session_elapsed, 0),
+            'connected_seconds': round(connected_seconds, 0),
         }
 
 class KalshiWebSocketClient(WebSocketManager):
@@ -362,12 +426,14 @@ class KalshiWebSocketClient(WebSocketManager):
             self.is_connected = True
             self.reconnect_attempts = 0
             self.last_heartbeat = time.time()
+            self._connect_time = time.time()
             logger.info(f"Successfully connected to {self.platform} WebSocket")
-            
+
             # Start message handling task
             asyncio.create_task(self._message_loop())
-            
+
         except Exception as e:
+            self._total_errors += 1
             if hasattr(e, 'status') and e.status == 401:
                 logger.error(f"Kalshi WebSocket 401 Unauthorized - API key may not have WebSocket permissions")
                 logger.error(f"Auth headers used: {[k for k in headers.keys()] if 'headers' in locals() else 'No headers'}")
@@ -462,22 +528,43 @@ class KalshiWebSocketClient(WebSocketManager):
             self.subscribed_markets.update(new_tickers)
             logger.info(f"Subscribed to {channel} for {len(new_tickers)} Kalshi markets")
     
-    async def subscribe_to_all_markets(self, channels: List[str] = None):
-        """Subscribe to all active markets."""
+    async def subscribe_to_all_markets(self, channels: List[str] = None, market_tickers: List[str] = None):
+        """Subscribe to markets, optionally filtered to specific tickers."""
         if channels is None:
             channels = ['ticker_v2']  # Start with ticker only to avoid overwhelming
-        
-        for channel in channels:
-            command = {
-                "id": self._get_next_command_id(),
-                "cmd": "subscribe",
-                "params": {
-                    "channels": [channel]
+
+        if market_tickers is not None:
+            unique_tickers = [t for t in dict.fromkeys(market_tickers) if t]
+            if not unique_tickers:
+                logger.debug("No valid tickers provided for subscribe_to_all_markets")
+                return
+            for channel in channels:
+                command = {
+                    "id": self._get_next_command_id(),
+                    "cmd": "subscribe",
+                    "params": {
+                        "channels": [channel],
+                        "market_tickers": unique_tickers
+                    }
                 }
-            }
-            
-            await self._send_command(command)
-            logger.info(f"Subscribed to {channel} for all Kalshi markets")
+                await self._send_command(command)
+                self.subscribed_markets.update(unique_tickers)
+                logger.info(f"Subscribed to {channel} for {len(unique_tickers)} specific Kalshi markets")
+        else:
+            logger.warning(
+                "Subscribing to ALL Kalshi markets - this may cause high memory usage. "
+                "Consider passing market_tickers to limit the subscription scope."
+            )
+            for channel in channels:
+                command = {
+                    "id": self._get_next_command_id(),
+                    "cmd": "subscribe",
+                    "params": {
+                        "channels": [channel]
+                    }
+                }
+                await self._send_command(command)
+                logger.info(f"Subscribed to {channel} for all Kalshi markets")
     
     async def _send_command(self, command: Dict):
         """Send command to Kalshi WebSocket."""

@@ -71,7 +71,18 @@ class Config:
     STREAM_BUFFER_SIZE = 1000  # Max messages to buffer during disconnections
     STREAM_FRESHNESS_THRESHOLD = 10  # Seconds before data considered stale
     STREAM_FALLBACK_TO_REST = False  # WebSocket-only mode - no REST fallback
-    
+
+    # Orderbook REST fallback (used when WebSocket cache misses)
+    ORDERBOOK_REST_FALLBACK = True
+    ORDERBOOK_REST_MAX_PER_SECOND = 10
+
+    # Kalshi market cache management
+    KALSHI_STALE_MARKET_TTL = 7200  # 2 hours - evict WS-only markets older than this
+    KALSHI_MARKET_CLEANUP_INTERVAL = 1800  # 30 minutes between cleanups
+
+    # Polymarket market refresh
+    POLYMARKET_REFRESH_INTERVAL = 3600  # 1 hour between market refreshes
+
     # Fee Structure for analysis (more accurate rates)
     KALSHI_FEE_RATE = 0.00  # Kalshi has no trading fees
     POLYMARKET_FEE_RATE = 0.02  # ~2% gas + protocol fees (average estimate)

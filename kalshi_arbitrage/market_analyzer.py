@@ -72,6 +72,13 @@ class MarketAnalyzer:
             'live_orderbooks': {}, # platform:market_id -> latest orderbook
             'update_times': {}     # platform:market_id -> last update timestamp
         }
+
+        # Scan lifecycle tracking
+        self._first_scan_completed = False
+        self._last_polymarket_refresh = time.time()
+        self._orderbook_miss_logged: Set[str] = set()
+        self._scan_orderbook_hits: Dict[str, int] = {'kalshi': 0, 'polymarket': 0}
+        self._scan_orderbook_misses: Dict[str, int] = {'kalshi': 0, 'polymarket': 0}
     
     async def initialize(self):
         """Initialize the analyzer with WebSocket connections."""
@@ -111,6 +118,15 @@ class MarketAnalyzer:
                 await self.polymarket_client.websocket_client.disconnect()
         except Exception as e:
             logger.warning(f"Failed to disconnect Polymarket WebSocket: {e}")
+
+        # Close REST fallback sessions
+        for client in (self.kalshi_client, self.polymarket_client):
+            session = getattr(client, '_orderbook_rest_session', None)
+            if session and not session.closed:
+                try:
+                    await session.close()
+                except Exception:
+                    pass
 
         self.realtime_enabled = False
         try:
@@ -181,6 +197,10 @@ class MarketAnalyzer:
         """Run a comprehensive scan of all markets and find arbitrage opportunities."""
         scan_start_time = datetime.now()
         logger.info(f"Starting full market scan at {scan_start_time}")
+
+        # Reset per-scan orderbook counters
+        self._scan_orderbook_hits = {'kalshi': 0, 'polymarket': 0}
+        self._scan_orderbook_misses = {'kalshi': 0, 'polymarket': 0}
         
         # Fetch all markets from both platforms
         logger.info("Fetching markets from both platforms...")
@@ -251,6 +271,20 @@ class MarketAnalyzer:
                 'estimated_completeness': estimated_completeness,
                 'stats': self.completeness_stats.copy(),
                 'level_config': Config.COMPLETENESS_LEVELS[self.completeness_level]
+            },
+            'orderbook_availability': {
+                'kalshi_hits': self._scan_orderbook_hits['kalshi'],
+                'kalshi_misses': self._scan_orderbook_misses['kalshi'],
+                'kalshi_hit_rate': (
+                    self._scan_orderbook_hits['kalshi'] /
+                    max(1, self._scan_orderbook_hits['kalshi'] + self._scan_orderbook_misses['kalshi'])
+                ),
+                'polymarket_hits': self._scan_orderbook_hits['polymarket'],
+                'polymarket_misses': self._scan_orderbook_misses['polymarket'],
+                'polymarket_hit_rate': (
+                    self._scan_orderbook_hits['polymarket'] /
+                    max(1, self._scan_orderbook_hits['polymarket'] + self._scan_orderbook_misses['polymarket'])
+                ),
             }
         }
         
@@ -274,6 +308,17 @@ class MarketAnalyzer:
         # Periodic cache cleanup
         await self._cleanup_expired_caches()
         
+        # Log orderbook availability summary
+        k_hits = self._scan_orderbook_hits['kalshi']
+        k_misses = self._scan_orderbook_misses['kalshi']
+        p_hits = self._scan_orderbook_hits['polymarket']
+        p_misses = self._scan_orderbook_misses['polymarket']
+        logger.info(
+            f"Orderbook availability: Kalshi {k_hits}/{k_hits+k_misses} hits, "
+            f"Polymarket {p_hits}/{p_hits+p_misses} hits"
+        )
+
+        self._first_scan_completed = True
         logger.info(f"Scan completed in {scan_duration:.2f}s - Found {len(opportunities)} opportunities")
         return scan_report
 
@@ -402,14 +447,27 @@ class MarketAnalyzer:
         """Fetch all markets from WebSocket streams."""
         try:
             # In WebSocket mode, markets are populated from live streams
-            # Wait for initial market data to be received
-            logger.info("Waiting for initial market data from WebSocket streams...")
-            await asyncio.sleep(10)  # Allow time for initial data
+            # Only wait for initial data on the very first scan
+            if not self._first_scan_completed:
+                logger.info("Waiting for initial market data from WebSocket streams...")
+                await asyncio.sleep(10)  # Allow time for initial data
+            else:
+                logger.debug("Skipping initial wait (not first scan)")
             
+            # Trigger periodic Polymarket catalog refresh
+            now = time.time()
+            if now - self._last_polymarket_refresh >= Config.POLYMARKET_REFRESH_INTERVAL:
+                logger.info("Triggering periodic Polymarket market catalog refresh...")
+                try:
+                    await self.polymarket_client.refresh_markets()
+                    self._last_polymarket_refresh = now
+                except Exception as e:
+                    logger.warning(f"Polymarket refresh failed: {e}")
+
             # Get markets from WebSocket clients
             kalshi_markets = await self.kalshi_client.get_all_markets()
             polymarket_markets = await self.polymarket_client.get_all_markets()
-            
+
             # If no markets received from WebSocket, use cached data
             if not kalshi_markets and hasattr(self, '_cached_kalshi_markets'):
                 kalshi_markets = self._cached_kalshi_markets
@@ -1163,11 +1221,16 @@ class MarketAnalyzer:
 
             if orderbook:
                 self.completeness_stats['cache_hits'] += 1
+                self._scan_orderbook_hits[platform] = self._scan_orderbook_hits.get(platform, 0) + 1
                 orderbook_copy = dict(orderbook)
                 orderbook_copy.setdefault('is_synthetic', False)
                 return orderbook_copy
 
             self.completeness_stats['cache_misses'] += 1
+            self._scan_orderbook_misses[platform] = self._scan_orderbook_misses.get(platform, 0) + 1
+            if market_id not in self._orderbook_miss_logged:
+                self._orderbook_miss_logged.add(market_id)
+                logger.debug(f"{platform} orderbook miss: {market_id}")
 
             if Config.REQUIRE_REAL_ORDERBOOKS_FOR_ESTIMATED:
                 return None
@@ -1423,17 +1486,24 @@ class MarketAnalyzer:
         return min(base_slippage + progressive_slippage, Config.MAX_SLIPPAGE_RATE)
     
     async def _get_kalshi_orderbook(self, market_id: str) -> Optional[Dict]:
-        """Get Kalshi order book data from WebSocket cache."""
+        """Get Kalshi order book data from WebSocket cache (with REST fallback)."""
         try:
-            # Get orderbook from WebSocket client cache
             orderbook = await self.kalshi_client.get_market_orderbook(market_id)
             if orderbook:
+                self._scan_orderbook_hits['kalshi'] += 1
                 return orderbook
-            
+
+            # Log first miss per market (avoid flooding)
+            self._scan_orderbook_misses['kalshi'] += 1
+            if market_id not in self._orderbook_miss_logged:
+                self._orderbook_miss_logged.add(market_id)
+                logger.debug(f"Kalshi orderbook cache miss: {market_id}")
+
             # Fallback to synthetic orderbook if no real data
             return await self._create_synthetic_kalshi_orderbook(market_id)
-            
+
         except Exception as e:
+            self._scan_orderbook_misses['kalshi'] += 1
             logger.debug(f"Failed to fetch Kalshi orderbook for {market_id}: {e}")
             return await self._create_synthetic_kalshi_orderbook(market_id)
     
@@ -1469,19 +1539,23 @@ class MarketAnalyzer:
             return None
     
     async def _get_polymarket_orderbook(self, token_id: str) -> Optional[Dict]:
-        """Get Polymarket order book data from WebSocket cache."""
+        """Get Polymarket order book data from WebSocket cache (with REST fallback)."""
         try:
-            # Get orderbook from WebSocket client cache  
-            # Note: For Polymarket, we need to map token_id to market_id
-            # This is a simplification - in reality we'd need a mapping
             orderbook = await self.polymarket_client.get_market_orderbook(token_id)
             if orderbook:
+                self._scan_orderbook_hits['polymarket'] += 1
                 return orderbook
-            
+
+            self._scan_orderbook_misses['polymarket'] += 1
+            if token_id not in self._orderbook_miss_logged:
+                self._orderbook_miss_logged.add(token_id)
+                logger.debug(f"Polymarket orderbook cache miss: {token_id}")
+
             # Fallback to synthetic orderbook
             return await self._create_synthetic_polymarket_orderbook(token_id)
-            
+
         except Exception as e:
+            self._scan_orderbook_misses['polymarket'] += 1
             logger.debug(f"Failed to fetch Polymarket orderbook for {token_id}: {e}")
             return await self._create_synthetic_polymarket_orderbook(token_id)
     
