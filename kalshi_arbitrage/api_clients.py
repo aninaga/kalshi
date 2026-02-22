@@ -24,6 +24,11 @@ class KalshiClient:
         self._orderbook_rest_semaphore = asyncio.Semaphore(Config.ORDERBOOK_REST_MAX_PER_SECOND)
         self._orderbook_rest_last_call = 0.0
         self._orderbook_rest_session = None
+        self._orderbook_rest_budget = Config.ORDERBOOK_REST_BUDGET_PER_SCAN
+
+    def reset_rest_budget(self):
+        """Reset per-scan REST orderbook fetch budget."""
+        self._orderbook_rest_budget = Config.ORDERBOOK_REST_BUDGET_PER_SCAN
 
     def _cents_to_dollars(self, value, default: float = 0.5) -> float:
         """Convert Kalshi cent pricing to dollars with safe fallback."""
@@ -358,8 +363,9 @@ class KalshiClient:
         result = self.orderbook_cache.get(market_ticker)
         if result is not None:
             return result
-        # REST fallback
-        if Config.ORDERBOOK_REST_FALLBACK:
+        # REST fallback (budget-limited to avoid rate limits)
+        if Config.ORDERBOOK_REST_FALLBACK and self._orderbook_rest_budget > 0:
+            self._orderbook_rest_budget -= 1
             return await self._fetch_orderbook_rest(market_ticker)
         return None
 
@@ -370,8 +376,8 @@ class KalshiClient:
             async with self._orderbook_rest_semaphore:
                 now = time.time()
                 elapsed = now - self._orderbook_rest_last_call
-                if elapsed < 0.2:  # Max 5/sec
-                    await asyncio.sleep(0.2 - elapsed)
+                if elapsed < 0.5:  # Max ~2/sec to stay under Kalshi rate limits
+                    await asyncio.sleep(0.5 - elapsed)
                 self._orderbook_rest_last_call = time.time()
 
                 url = f"{Config.KALSHI_API_BASE}/markets/{market_ticker}/orderbook"
@@ -414,6 +420,7 @@ class PolymarketClient:
         self._orderbook_rest_semaphore = asyncio.Semaphore(Config.ORDERBOOK_REST_MAX_PER_SECOND)
         self._orderbook_rest_last_call = 0.0
         self._orderbook_rest_session = None
+        self._orderbook_rest_budget = Config.ORDERBOOK_REST_BUDGET_PER_SCAN
         self.stream_quality_stats = {
             'price_updates_received': 0,
             'price_updates_accepted': 0,
@@ -761,15 +768,16 @@ class PolymarketClient:
             result = market_orderbooks.get(token_id) or market_orderbooks.get(self.token_outcome_map.get(token_id))
             if result is not None:
                 return result
-            # REST fallback
-            if Config.ORDERBOOK_REST_FALLBACK:
+            # REST fallback (budget-limited)
+            if Config.ORDERBOOK_REST_FALLBACK and self._orderbook_rest_budget > 0:
+                self._orderbook_rest_budget -= 1
                 return await self._fetch_orderbook_rest(token_id)
             return None
         if market_orderbooks:
             return market_orderbooks
         # REST fallback for first token if available
         market_data = self.markets_cache.get(market_id)
-        if Config.ORDERBOOK_REST_FALLBACK and market_data:
+        if Config.ORDERBOOK_REST_FALLBACK and self._orderbook_rest_budget > 0 and market_data:
             clob_ids = market_data.get('clob_token_ids', [])
             if clob_ids:
                 return await self._fetch_orderbook_rest(clob_ids[0])

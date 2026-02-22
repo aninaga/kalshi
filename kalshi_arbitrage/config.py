@@ -74,7 +74,8 @@ class Config:
 
     # Orderbook REST fallback (used when WebSocket cache misses)
     ORDERBOOK_REST_FALLBACK = True
-    ORDERBOOK_REST_MAX_PER_SECOND = 10
+    ORDERBOOK_REST_MAX_PER_SECOND = 3
+    ORDERBOOK_REST_BUDGET_PER_SCAN = 50  # Max REST orderbook fetches per scan
 
     # Kalshi market cache management
     KALSHI_STALE_MARKET_TTL = 7200  # 2 hours - evict WS-only markets older than this

@@ -198,9 +198,11 @@ class MarketAnalyzer:
         scan_start_time = datetime.now()
         logger.info(f"Starting full market scan at {scan_start_time}")
 
-        # Reset per-scan orderbook counters
+        # Reset per-scan orderbook counters and REST budgets
         self._scan_orderbook_hits = {'kalshi': 0, 'polymarket': 0}
         self._scan_orderbook_misses = {'kalshi': 0, 'polymarket': 0}
+        self.kalshi_client.reset_rest_budget()
+        self.polymarket_client._orderbook_rest_budget = Config.ORDERBOOK_REST_BUDGET_PER_SCAN
         
         # Fetch all markets from both platforms
         logger.info("Fetching markets from both platforms...")
