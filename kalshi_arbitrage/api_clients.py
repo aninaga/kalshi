@@ -387,12 +387,14 @@ class KalshiClient:
                         if resp.status == 200:
                             data = await resp.json()
                             orderbook = data.get('orderbook', data)
-                            # Normalize to standard format
+                            # Normalize to standard format (yes/no may be None)
+                            yes_side = orderbook.get('yes') or {}
+                            no_side = orderbook.get('no') or {}
                             normalized = {
-                                'yes_asks': self._normalize_kalshi_levels(orderbook.get('yes', {}).get('asks', orderbook.get('yes_asks', []))),
-                                'yes_bids': self._normalize_kalshi_levels(orderbook.get('yes', {}).get('bids', orderbook.get('yes_bids', []))),
-                                'no_asks': self._normalize_kalshi_levels(orderbook.get('no', {}).get('asks', orderbook.get('no_asks', []))),
-                                'no_bids': self._normalize_kalshi_levels(orderbook.get('no', {}).get('bids', orderbook.get('no_bids', []))),
+                                'yes_asks': self._normalize_kalshi_levels(yes_side.get('asks') if isinstance(yes_side, dict) else orderbook.get('yes_asks', [])),
+                                'yes_bids': self._normalize_kalshi_levels(yes_side.get('bids') if isinstance(yes_side, dict) else orderbook.get('yes_bids', [])),
+                                'no_asks': self._normalize_kalshi_levels(no_side.get('asks') if isinstance(no_side, dict) else orderbook.get('no_asks', [])),
+                                'no_bids': self._normalize_kalshi_levels(no_side.get('bids') if isinstance(no_side, dict) else orderbook.get('no_bids', [])),
                                 'timestamp': time.time(),
                                 'source': 'rest_fallback'
                             }
