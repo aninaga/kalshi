@@ -239,7 +239,7 @@ class TestRiskEngine:
             "buy"
         )
         
-        # Should have meaningful slippage due to thin liquidity
+        # Thin books should still produce non-trivial slippage.
         assert slippage.total_slippage >= Decimal("0.01")
         assert slippage.confidence < Decimal("0.5")
         

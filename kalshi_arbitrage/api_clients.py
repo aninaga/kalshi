@@ -19,6 +19,45 @@ class KalshiClient:
         self.price_cache = {}
         self.orderbook_cache = {}
         self.discovered_tickers = []  # Store all discovered market tickers
+    
+    def _cents_to_dollars(self, value, default: float = 0.5) -> float:
+        """Convert Kalshi cent pricing to dollars with safe fallback."""
+        if value is None:
+            return default
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            return default
+        return value / 100.0 if value > 1 else value
+
+    def _safe_float(self, value: Any) -> Optional[float]:
+        """Parse float safely."""
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+    
+    def _normalize_kalshi_levels(self, levels: List[Any]) -> List[Dict[str, float]]:
+        """Normalize Kalshi orderbook levels to {price, size} in dollars."""
+        normalized = []
+        if not levels:
+            return normalized
+        for level in levels:
+            if isinstance(level, (list, tuple)) and len(level) >= 2:
+                price, size = level[0], level[1]
+            elif isinstance(level, dict):
+                price = level.get('price')
+                size = level.get('size') if level.get('size') is not None else level.get('quantity')
+            else:
+                continue
+            try:
+                price = float(price)
+                size = float(size)
+            except (TypeError, ValueError):
+                continue
+            price = self._cents_to_dollars(price, default=0.0)
+            normalized.append({'price': price, 'size': size})
+        return normalized
         
     async def initialize(self) -> bool:
         """Initialize with REST market discovery + WebSocket connection."""
@@ -26,22 +65,28 @@ class KalshiClient:
             # Step 1: Bootstrap market discovery via REST API
             logger.info("Discovering Kalshi markets via REST API...")
             await self._discover_markets_via_rest()
-            
-            # Step 2: Initialize WebSocket connection
+
+            # Step 2: Initialize WebSocket connection (requires auth)
+            if not os.getenv('KALSHI_API_KEY'):
+                logger.warning("KALSHI_API_KEY not set; skipping Kalshi WebSocket connection (REST-only mode)")
+                logger.info(f"Kalshi client initialized with {len(self.markets_cache)} markets discovered via REST")
+                return True
+
             config = Config.WEBSOCKET_CONFIG['kalshi']
             self.websocket_client = KalshiWebSocketClient(config, self.auth_token)
-            
+
             # Set up data handlers
             self.websocket_client.add_message_handler('ticker', self._handle_price_update)
             self.websocket_client.add_message_handler('orderbook', self._handle_orderbook_update)
-            
+
             await self.websocket_client.connect()
-            
+
             # Subscribe to all markets after connection
             if self.websocket_client.is_connected:
-                await self.websocket_client.subscribe_to_all_markets(['ticker_v2'])
+                channels = Config.WEBSOCKET_CONFIG.get('kalshi', {}).get('channels', ['ticker_v2'])
+                await self.websocket_client.subscribe_to_all_markets(channels)
                 logger.info("Subscribed to all Kalshi markets")
-            
+
             logger.info(f"Kalshi client initialized with {len(self.markets_cache)} markets discovered via REST")
             return True
         except Exception as e:
@@ -56,10 +101,10 @@ class KalshiClient:
             
         # Store price data
         self.price_cache[market_ticker] = {
-            'yes_price': message.data.get('yes_bid', 0) / 100.0 if message.data.get('yes_bid') else 0.5,  # Convert cents to dollars
-            'no_price': message.data.get('no_bid', 0) / 100.0 if message.data.get('no_bid') else 0.5,
-            'yes_ask': message.data.get('yes_ask', 0) / 100.0 if message.data.get('yes_ask') else 0.5,
-            'yes_bid': message.data.get('yes_bid', 0) / 100.0 if message.data.get('yes_bid') else 0.5,
+            'yes_price': self._cents_to_dollars(message.data.get('yes_bid')),
+            'no_price': self._cents_to_dollars(message.data.get('no_bid')),
+            'yes_ask': self._cents_to_dollars(message.data.get('yes_ask')),
+            'yes_bid': self._cents_to_dollars(message.data.get('yes_bid')),
             'timestamp': message.timestamp
         }
         
@@ -103,6 +148,9 @@ class KalshiClient:
                 cursor = None
                 page_count = 0
                 max_pages = 50  # Reasonable limit: 50 pages * 200 = 10,000 markets max
+                rate_limit_retries = 0
+                max_rate_limit_retries = 8
+                timeout = aiohttp.ClientTimeout(total=15)  # 15 second timeout per request
                 
                 while page_count < max_pages:
                     params = {'limit': 200}  # Max limit per request
@@ -110,12 +158,11 @@ class KalshiClient:
                         params['cursor'] = cursor
                     
                     try:
-                        # Increased timeout for reliability
-                        timeout = aiohttp.ClientTimeout(total=15)  # 15 second timeout per request
                         async with session.get(markets_url, params=params, timeout=timeout) as response:
                             if response.status == 200:
                                 data = await response.json()
                                 markets = data.get('markets', [])
+                                rate_limit_retries = 0
                                 
                                 if not markets:
                                     logger.info(f"No more markets found after page {page_count}")
@@ -129,6 +176,23 @@ class KalshiClient:
                                 # Break if no cursor (end of data)
                                 if not cursor:
                                     break
+                            elif response.status == 429:
+                                rate_limit_retries += 1
+                                if rate_limit_retries > max_rate_limit_retries:
+                                    logger.warning(
+                                        "Kalshi markets pagination hit repeated rate limits; "
+                                        f"stopping after {max_rate_limit_retries} retries"
+                                    )
+                                    break
+                                retry_after_header = response.headers.get('Retry-After')
+                                retry_after = self._safe_float(retry_after_header)
+                                backoff_seconds = retry_after if retry_after and retry_after > 0 else min(30.0, float(2 ** rate_limit_retries))
+                                logger.warning(
+                                    f"Kalshi markets rate-limited (429); retrying page {page_count + 1} "
+                                    f"in {backoff_seconds:.1f}s (retry {rate_limit_retries}/{max_rate_limit_retries})"
+                                )
+                                await asyncio.sleep(backoff_seconds)
+                                continue
                             else:
                                 logger.warning(f"Failed to fetch Kalshi markets: {response.status}")
                                 break
@@ -184,10 +248,10 @@ class KalshiClient:
         """Handle real-time orderbook updates."""
         market_id = message.market_id
         self.orderbook_cache[market_id] = {
-            'yes_asks': message.data.get('yes_asks', []),
-            'yes_bids': message.data.get('yes_bids', []),
-            'no_asks': message.data.get('no_asks', []),
-            'no_bids': message.data.get('no_bids', []),
+            'yes_asks': self._normalize_kalshi_levels(message.data.get('yes_asks', [])),
+            'yes_bids': self._normalize_kalshi_levels(message.data.get('yes_bids', [])),
+            'no_asks': self._normalize_kalshi_levels(message.data.get('no_asks', [])),
+            'no_bids': self._normalize_kalshi_levels(message.data.get('no_bids', [])),
             'timestamp': message.timestamp
         }
     
@@ -268,6 +332,68 @@ class PolymarketClient:
         self.price_cache = {}
         self.orderbook_cache = {}
         self.asset_ids = []  # Store asset IDs for WebSocket subscription
+        self.token_to_market = {}
+        self.token_outcome_map = {}
+        self.stream_quality_stats = {
+            'price_updates_received': 0,
+            'price_updates_accepted': 0,
+            'price_updates_dropped': 0,
+            'orderbook_updates_received': 0,
+            'orderbook_updates_accepted': 0,
+            'orderbook_updates_dropped': 0,
+            'orphan_token_updates': 0,
+            'invalid_price_updates': 0,
+            'invalid_orderbook_levels': 0,
+            'invalid_orderbook_updates': 0,
+            'normalized_orderbook_levels': 0,
+        }
+
+    def _safe_float(self, value: Any) -> Optional[float]:
+        """Parse a float safely."""
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    def _is_valid_probability(self, value: float) -> bool:
+        """Check if probability is in [0, 1]."""
+        return (
+            value is not None
+            and Config.POLYMARKET_PRICE_MIN <= value <= Config.POLYMARKET_PRICE_MAX
+        )
+
+    def _normalize_polymarket_levels(self, levels: List[Any], side: str) -> List[Dict[str, float]]:
+        """Normalize Polymarket orderbook levels to {price, size} floats."""
+        normalized = []
+        if not levels:
+            return normalized
+        for level in levels:
+            if isinstance(level, (list, tuple)) and len(level) >= 2:
+                price, size = level[0], level[1]
+            elif isinstance(level, dict):
+                price = level.get('price')
+                size = level.get('size') if level.get('size') is not None else level.get('quantity')
+            else:
+                self.stream_quality_stats['invalid_orderbook_levels'] += 1
+                continue
+            price = self._safe_float(price)
+            size = self._safe_float(size)
+            if not self._is_valid_probability(price) or size is None or size <= 0:
+                self.stream_quality_stats['invalid_orderbook_levels'] += 1
+                continue
+            normalized.append({'price': price, 'size': size})
+            self.stream_quality_stats['normalized_orderbook_levels'] += 1
+        reverse = side == 'bids'
+        normalized.sort(key=lambda level: level['price'], reverse=reverse)
+        return normalized
+
+    def _resolve_market_id(self, market_id: str, token_id: Optional[str]) -> Optional[str]:
+        """Resolve market_id from token_id if needed."""
+        if market_id:
+            return market_id
+        if token_id and token_id in self.token_to_market:
+            return self.token_to_market[token_id]
+        return None
         
     async def initialize(self) -> bool:
         """Initialize with REST bootstrap + WebSocket connection."""
@@ -287,9 +413,10 @@ class PolymarketClient:
                 
                 await self.websocket_client.connect()
                 
-                # Subscribe to discovered markets (increased limit for better coverage)
-                subscription_limit = min(len(self.asset_ids), 200)  # Increased from 50 to 200
-                await self.websocket_client.subscribe_to_markets(self.asset_ids[:subscription_limit])
+                # Subscribe to discovered markets with configurable bounded coverage.
+                unique_assets = list(dict.fromkeys(asset_id for asset_id in self.asset_ids if asset_id))
+                subscription_limit = min(len(unique_assets), Config.POLYMARKET_STREAM_SUBSCRIPTION_ASSET_LIMIT)
+                await self.websocket_client.subscribe_to_markets(unique_assets[:subscription_limit])
                 logger.info(f"Subscribed to {subscription_limit} Polymarket assets via WebSocket")
             
             logger.info(f"Polymarket client initialized with {len(self.markets_cache)} markets")
@@ -390,24 +517,26 @@ class PolymarketClient:
                         if market_id not in self.price_cache:
                             self.price_cache[market_id] = {}
                         
-                        try:
-                            price = float(price_str)
-                            self.price_cache[market_id][token_id] = {
-                                'outcome': outcome,
-                                'buy_price': price,
-                                'sell_price': price,
-                                'mid_price': price,
-                                'timestamp': time.time()
-                            }
-                        except (ValueError, TypeError):
+                        price = self._safe_float(price_str)
+                        if not self._is_valid_probability(price):
                             continue
+                        self.price_cache[market_id][token_id] = {
+                            'outcome': outcome,
+                            'buy_price': price,
+                            'sell_price': price,
+                            'mid_price': price,
+                            'timestamp': time.time()
+                        }
+                        self.token_to_market[token_id] = market_id
+                        self.token_outcome_map[token_id] = outcome
                 
                 except Exception as e:
                     logger.debug(f"Error processing Polymarket market: {e}")
                     continue
             
+            self.asset_ids = list(dict.fromkeys(asset_id for asset_id in self.asset_ids if asset_id))
             logger.info(f"Bootstrapped {len(self.markets_cache)} Polymarket markets via REST API")
-            logger.info(f"Collected {len(self.asset_ids)} asset IDs for WebSocket subscription")
+            logger.info(f"Collected {len(self.asset_ids)} unique asset IDs for WebSocket subscription")
             
         except Exception as e:
             logger.error(f"Failed to bootstrap Polymarket markets: {e}")
@@ -420,31 +549,62 @@ class PolymarketClient:
     
     async def _handle_price_update(self, message):
         """Handle real-time price updates."""
-        market_id = message.market_id
+        self.stream_quality_stats['price_updates_received'] += 1
+        token_id = message.data.get('asset_id') or message.data.get('token_id') or message.data.get('outcome')
+        market_id = self._resolve_market_id(message.market_id, token_id)
+        if not market_id:
+            self.stream_quality_stats['price_updates_dropped'] += 1
+            self.stream_quality_stats['orphan_token_updates'] += 1
+            return
+
+        price = self._safe_float(message.data.get('price'))
+        if not self._is_valid_probability(price):
+            self.stream_quality_stats['price_updates_dropped'] += 1
+            self.stream_quality_stats['invalid_price_updates'] += 1
+            return
+
         if market_id not in self.price_cache:
             self.price_cache[market_id] = {}
-        
-        token_id = message.data.get('outcome', 'default')
-        self.price_cache[market_id][token_id] = {
-            'outcome': message.data.get('outcome'),
-            'buy_price': message.data.get('price'),
-            'sell_price': message.data.get('price'),
-            'mid_price': message.data.get('price'),
+
+        self.price_cache[market_id][token_id or 'default'] = {
+            'outcome': message.data.get('outcome') or self.token_outcome_map.get(token_id),
+            'buy_price': price,
+            'sell_price': price,
+            'mid_price': price,
             'timestamp': message.timestamp
         }
+        self.stream_quality_stats['price_updates_accepted'] += 1
     
     async def _handle_orderbook_update(self, message):
         """Handle real-time orderbook updates."""
-        market_id = message.market_id
+        self.stream_quality_stats['orderbook_updates_received'] += 1
+        token_id = message.data.get('asset_id') or message.data.get('token_id') or message.data.get('outcome')
+        market_id = self._resolve_market_id(message.market_id, token_id)
+        if not market_id:
+            self.stream_quality_stats['orderbook_updates_dropped'] += 1
+            self.stream_quality_stats['orphan_token_updates'] += 1
+            return
         if market_id not in self.orderbook_cache:
             self.orderbook_cache[market_id] = {}
-        
-        outcome = message.data.get('outcome', 'default')
-        self.orderbook_cache[market_id][outcome] = {
-            'bids': message.data.get('bids', []),
-            'asks': message.data.get('asks', []),
+
+        outcome = message.data.get('outcome') or self.token_outcome_map.get(token_id) or 'default'
+        bids = self._normalize_polymarket_levels(message.data.get('bids', []), side='bids')
+        asks = self._normalize_polymarket_levels(message.data.get('asks', []), side='asks')
+        if not bids and not asks:
+            self.stream_quality_stats['orderbook_updates_dropped'] += 1
+            self.stream_quality_stats['invalid_orderbook_updates'] += 1
+            return
+
+        orderbook = {
+            'bids': bids,
+            'asks': asks,
             'timestamp': message.timestamp
         }
+        # Store by token_id for analyzer, and also by outcome for fallback
+        self.orderbook_cache[market_id][token_id or outcome] = orderbook
+        if token_id and outcome and outcome not in self.orderbook_cache[market_id]:
+            self.orderbook_cache[market_id][outcome] = orderbook
+        self.stream_quality_stats['orderbook_updates_accepted'] += 1
     
     async def get_all_markets(self, include_closed: bool = False) -> List[Dict[str, Any]]:
         """Get all markets from bootstrap + WebSocket data."""
@@ -461,5 +621,9 @@ class PolymarketClient:
         """Get market orderbook from cache."""
         market_orderbooks = self.orderbook_cache.get(market_id, {})
         if token_id:
-            return market_orderbooks.get(token_id)
+            return market_orderbooks.get(token_id) or market_orderbooks.get(self.token_outcome_map.get(token_id))
         return market_orderbooks
+
+    def get_data_quality_stats(self) -> Dict[str, int]:
+        """Expose Polymarket stream ingest quality counters."""
+        return dict(self.stream_quality_stats)

@@ -18,6 +18,31 @@ class Config:
     
     POLYMARKET_GAMMA_BASE = "https://gamma-api.polymarket.com"
     POLYMARKET_CLOB_BASE = "https://clob.polymarket.com"
+
+    # Fee endpoints (live)
+    POLYMARKET_FEE_RATE_ENDPOINT = "https://clob.polymarket.com/fee-rate?token_id={token_id}"
+    POLYMARKET_FEE_RATE_TTL_SECONDS = 300
+
+    # Simulation settings (mock execution)
+    SIMULATION_ENABLED = False
+    SIMULATION_LATENCY_MS = 50
+    SIMULATION_MAX_ORDERBOOK_AGE_SECONDS = 1.0
+    SIMULATION_REQUIRE_LIVE_ORDERBOOKS = True
+
+    # Confirmed PnL tracking settings
+    CONFIRMED_PNL_REQUIRE_SETTLEMENT = True
+    CONFIRMED_PNL_INCLUDE_SIMULATION = False
+
+    # Data-quality controls for opportunity estimation
+    REQUIRE_REAL_ORDERBOOKS_FOR_ESTIMATED = True
+    POLYMARKET_ESTIMATED_FEE_RATE_BPS = 1000
+    POLYMARKET_PRICE_MIN = 0.0
+    POLYMARKET_PRICE_MAX = 1.0
+
+    # Stream subscription coverage (bounded to avoid overwhelming feeds)
+    KALSHI_STREAM_SUBSCRIPTION_LIMIT = 100
+    POLYMARKET_STREAM_SUBSCRIPTION_MARKET_LIMIT = 300
+    POLYMARKET_STREAM_SUBSCRIPTION_ASSET_LIMIT = 600
     
     # WebSocket Configuration for Real-time Data Streams (Phase 2)
     WEBSOCKET_CONFIG = {
@@ -34,6 +59,7 @@ class Config:
             'reconnect_interval': 5,
             'heartbeat_interval': 30,
             'max_reconnect_attempts': 10,
+            'max_assets_per_subscribe': 300,
             'channels': ['market', 'user'],
             'auth_token': os.getenv('POLYMARKET_AUTH_TOKEN'),
             'enabled': True

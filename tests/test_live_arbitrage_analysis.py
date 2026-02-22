@@ -11,6 +11,7 @@ from decimal import Decimal
 from typing import List, Dict, Any, Optional
 import sys
 import os
+import pytest
 
 # Add parent directory to path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -248,6 +249,7 @@ async def analyze_live_markets():
             if hasattr(analyzer.polymarket_client, 'websocket_client'):
                 await analyzer.polymarket_client.websocket_client.disconnect()
 
+@pytest.mark.asyncio
 async def test_specific_market_pair():
     """Test analysis on a specific known market pair for detailed examination."""
     logger.info("Testing specific market pair analysis...")

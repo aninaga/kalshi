@@ -3,6 +3,7 @@ import aiohttp
 import json
 import logging
 import os
+import time
 from datetime import datetime, timedelta
 from typing import List, Dict, Any, Tuple, Optional, Set
 from concurrent.futures import ThreadPoolExecutor
@@ -11,6 +12,8 @@ import heapq
 from .api_clients import KalshiClient, PolymarketClient
 from .utils import clean_title, get_similarity_score
 from .config import Config
+from .mock_execution import MockExecutionEngine, FeeModel
+from .confirmed_pnl import ConfirmedPnLTracker
 from .websocket_client import RealTimeDataManager, StreamMessage
 
 logger = logging.getLogger(__name__)
@@ -53,6 +56,14 @@ class MarketAnalyzer:
         self._update_cache_settings()
         self._last_cache_cleanup = datetime.now().timestamp()
         
+        # Simulation (mock execution)
+        self.simulation_enabled = Config.SIMULATION_ENABLED
+        self.simulation_latency_ms = Config.SIMULATION_LATENCY_MS
+        self.simulation_engine = MockExecutionEngine()
+        self.confirmed_pnl_tracker = ConfirmedPnLTracker(
+            allow_simulated_confirmed=Config.CONFIRMED_PNL_INCLUDE_SIMULATION
+        )
+
         # Real-time data streaming (Phase 2)
         self.realtime_manager = None
         self.realtime_enabled = Config.REALTIME_ENABLED
@@ -81,6 +92,39 @@ class MarketAnalyzer:
         
         logger.info(f"Market Analyzer initialized successfully with {self.completeness_level} completeness level")
     
+    async def shutdown(self):
+        """Shutdown WebSocket clients and real-time streams cleanly."""
+        try:
+            if self.realtime_manager:
+                await self.realtime_manager.stop()
+        except Exception as e:
+            logger.warning(f"Failed to stop realtime manager: {e}")
+
+        try:
+            if getattr(self.kalshi_client, 'websocket_client', None):
+                await self.kalshi_client.websocket_client.disconnect()
+        except Exception as e:
+            logger.warning(f"Failed to disconnect Kalshi WebSocket: {e}")
+
+        try:
+            if getattr(self.polymarket_client, 'websocket_client', None):
+                await self.polymarket_client.websocket_client.disconnect()
+        except Exception as e:
+            logger.warning(f"Failed to disconnect Polymarket WebSocket: {e}")
+
+        self.realtime_enabled = False
+        try:
+            if self.simulation_engine:
+                await self.simulation_engine.close()
+        except Exception:
+            pass
+
+    def enable_simulation(self, latency_ms: int = None) -> None:
+        """Enable mock execution simulation with optional latency override."""
+        self.simulation_enabled = True
+        if latency_ms is not None:
+            self.simulation_latency_ms = latency_ms
+
     def set_completeness_level(self, level: str) -> None:
         """Set the completeness level for scanning."""
         if level not in Config.COMPLETENESS_LEVELS:
@@ -166,7 +210,10 @@ class MarketAnalyzer:
         # Generate scan report with completeness information
         scan_duration = (datetime.now() - scan_start_time).total_seconds()
         estimated_completeness = self._calculate_estimated_completeness()
-        
+        pnl_summary = self._build_guaranteed_pnl_summary(opportunities, scan_start_time)
+        synthetic_orderbook_opportunities = sum(1 for o in opportunities if o.get('uses_synthetic_orderbook'))
+        data_quality_summary = self._build_data_quality_summary()
+
         scan_report = {
             'timestamp': scan_start_time.isoformat(),
             'duration_seconds': scan_duration,
@@ -174,10 +221,31 @@ class MarketAnalyzer:
             'polymarket_markets_count': len(polymarket_markets),
             'potential_matches': len(matches),
             'arbitrage_opportunities': len(opportunities),
+            'synthetic_orderbook_opportunities': synthetic_orderbook_opportunities,
+            'real_orderbook_opportunities': len(opportunities) - synthetic_orderbook_opportunities,
             'opportunities': opportunities,
-            'top_opportunities': sorted(opportunities, 
-                                      key=lambda x: x.get('total_profit', x.get('profit_margin', 0)), 
+            'top_opportunities': sorted(opportunities,
+                                      key=lambda x: x.get('total_profit', x.get('profit_margin', 0)),
                                       reverse=True)[:10],
+            'estimated_pnl_per_scan_usd': pnl_summary['estimated_pnl_per_scan_usd'],
+            'estimated_pnl_per_hour_usd': pnl_summary['estimated_pnl_per_hour_usd'],
+            'estimated_pnl_per_day_usd': pnl_summary['estimated_pnl_per_day_usd'],
+            'estimated_pnl_opportunity_count': pnl_summary['estimated_pnl_opportunity_count'],
+            'guaranteed_pnl_per_scan_usd': pnl_summary['guaranteed_pnl_per_scan_usd'],
+            'guaranteed_pnl_per_hour_usd': pnl_summary['guaranteed_pnl_per_hour_usd'],
+            'guaranteed_pnl_per_day_usd': pnl_summary['guaranteed_pnl_per_day_usd'],
+            'guaranteed_pnl_opportunity_count': pnl_summary['guaranteed_pnl_opportunity_count'],
+            'confirmed_realized_pnl_per_scan_usd': pnl_summary['confirmed_realized_pnl_per_scan_usd'],
+            'confirmed_realized_pnl_per_hour_usd': pnl_summary['confirmed_realized_pnl_per_hour_usd'],
+            'confirmed_realized_pnl_per_day_usd': pnl_summary['confirmed_realized_pnl_per_day_usd'],
+            'confirmed_realized_pnl_opportunity_count': pnl_summary['confirmed_realized_pnl_opportunity_count'],
+            'confirmed_settled_execution_count': pnl_summary['confirmed_settled_execution_count'],
+            'confirmed_pending_execution_count': pnl_summary['confirmed_pending_execution_count'],
+            'confirmed_cumulative_realized_pnl_usd': pnl_summary['confirmed_cumulative_realized_pnl_usd'],
+            'confirmed_counting_simulated_confirmations': pnl_summary['confirmed_counting_simulated_confirmations'],
+            'active_bot_scan_interval_seconds': pnl_summary['active_bot_scan_interval_seconds'],
+            'pnl_methodology': pnl_summary['pnl_methodology'],
+            'data_quality': data_quality_summary,
             'completeness_info': {
                 'level': self.completeness_level,
                 'estimated_completeness': estimated_completeness,
@@ -186,6 +254,19 @@ class MarketAnalyzer:
             }
         }
         
+        # Simulation summary
+        if self.simulation_enabled:
+            simulated = [o.get('simulated_execution') for o in opportunities if o.get('simulated_execution')]
+            sim_ok = [s for s in simulated if not s.get('skipped_reason')]
+            sim_profit = sum(s.get('net_profit', 0) for s in sim_ok)
+            sim_capital = sum((s.get('avg_buy_price', 0) * s.get('filled_volume', 0)) for s in sim_ok)
+            scan_report['simulated_summary'] = {
+                'count': len(sim_ok),
+                'skipped': len(simulated) - len(sim_ok),
+                'net_profit': sim_profit,
+                'capital': sim_capital,
+                'roi': (sim_profit / sim_capital) if sim_capital else 0
+            }
         # Store results
         await self._save_scan_results(scan_report)
         self.last_scan_time = scan_start_time
@@ -195,7 +276,128 @@ class MarketAnalyzer:
         
         logger.info(f"Scan completed in {scan_duration:.2f}s - Found {len(opportunities)} opportunities")
         return scan_report
-    
+
+    def _extract_non_negative_float(self, value: Any) -> float:
+        """Parse non-negative float from arbitrary value."""
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return 0.0
+        return max(parsed, 0.0)
+
+    def _get_estimated_pnl_for_opportunity(self, opportunity: Dict[str, Any]) -> float:
+        """Estimated PnL from detected opportunity model."""
+        return self._extract_non_negative_float(opportunity.get('total_profit', 0.0))
+
+    def _get_guaranteed_pnl_for_opportunity(self, opportunity: Dict[str, Any]) -> float:
+        """Guaranteed PnL only counts live-simulated, non-skipped fills."""
+        simulated_execution = opportunity.get('simulated_execution')
+        if not isinstance(simulated_execution, dict):
+            return 0.0
+        if simulated_execution.get('skipped_reason'):
+            return 0.0
+        if self._extract_non_negative_float(simulated_execution.get('filled_volume', 0.0)) <= 0.0:
+            return 0.0
+        return self._extract_non_negative_float(simulated_execution.get('net_profit', 0.0))
+
+    def _annualize_pnl(self, per_scan: float) -> Tuple[float, float, float]:
+        """Convert per-scan PnL into hourly and daily rates."""
+        scan_interval_seconds = max(float(Config.SCAN_INTERVAL_SECONDS), 1.0)
+        scans_per_hour = 3600.0 / scan_interval_seconds
+        per_hour = per_scan * scans_per_hour
+        per_day = per_hour * 24.0
+        return scan_interval_seconds, per_hour, per_day
+
+    def _build_guaranteed_pnl_summary(
+        self,
+        opportunities: List[Dict[str, Any]],
+        scan_started_at: Optional[datetime] = None,
+    ) -> Dict[str, Any]:
+        """Build estimated, guaranteed, and confirmed-realized PnL outputs."""
+        estimated_values = [self._get_estimated_pnl_for_opportunity(o) for o in opportunities]
+        guaranteed_values = [self._get_guaranteed_pnl_for_opportunity(o) for o in opportunities]
+
+        estimated_per_scan = float(sum(estimated_values))
+        guaranteed_per_scan = float(sum(guaranteed_values))
+
+        estimated_count = sum(1 for pnl in estimated_values if pnl > 0.0)
+        guaranteed_count = sum(1 for pnl in guaranteed_values if pnl > 0.0)
+
+        scan_interval_seconds, estimated_per_hour, estimated_per_day = self._annualize_pnl(estimated_per_scan)
+        _, guaranteed_per_hour, guaranteed_per_day = self._annualize_pnl(guaranteed_per_scan)
+
+        since_timestamp = scan_started_at.timestamp() if scan_started_at else None
+        confirmed_summary = self.confirmed_pnl_tracker.summarize(
+            scan_interval_seconds=scan_interval_seconds,
+            since_timestamp=since_timestamp,
+        )
+
+        return {
+            'estimated_pnl_per_scan_usd': estimated_per_scan,
+            'estimated_pnl_per_hour_usd': estimated_per_hour,
+            'estimated_pnl_per_day_usd': estimated_per_day,
+            'estimated_pnl_opportunity_count': estimated_count,
+            'guaranteed_pnl_per_scan_usd': guaranteed_per_scan,
+            'guaranteed_pnl_per_hour_usd': guaranteed_per_hour,
+            'guaranteed_pnl_per_day_usd': guaranteed_per_day,
+            'guaranteed_pnl_opportunity_count': guaranteed_count,
+            'confirmed_realized_pnl_per_scan_usd': confirmed_summary['realized_pnl_usd'],
+            'confirmed_realized_pnl_per_hour_usd': confirmed_summary['realized_pnl_per_hour_usd'],
+            'confirmed_realized_pnl_per_day_usd': confirmed_summary['realized_pnl_per_day_usd'],
+            'confirmed_realized_pnl_opportunity_count': confirmed_summary['realized_pnl_opportunity_count'],
+            'confirmed_settled_execution_count': confirmed_summary['settled_execution_count'],
+            'confirmed_pending_execution_count': confirmed_summary['pending_execution_count'],
+            'confirmed_cumulative_realized_pnl_usd': confirmed_summary['cumulative_realized_pnl_usd'],
+            'confirmed_counting_simulated_confirmations': confirmed_summary['counting_simulated_confirmations'],
+            'active_bot_scan_interval_seconds': scan_interval_seconds,
+            'pnl_methodology': {
+                'estimated': 'model_based_from_detected_opportunities',
+                'guaranteed': 'live_simulated_fills_only',
+                'confirmed_realized': 'settled_exchange_confirmed_fills',
+            },
+        }
+
+    def _build_data_quality_summary(self) -> Dict[str, Any]:
+        """Build high-level stream quality metrics for scan reporting."""
+        summary: Dict[str, Any] = {}
+
+        polymarket_client = getattr(self, 'polymarket_client', None)
+        if polymarket_client and hasattr(polymarket_client, 'get_data_quality_stats'):
+            summary['polymarket_ingest'] = polymarket_client.get_data_quality_stats()
+
+        pm_ws_client = getattr(polymarket_client, 'websocket_client', None) if polymarket_client else None
+        if pm_ws_client and hasattr(pm_ws_client, 'get_stats'):
+            ws_stats = pm_ws_client.get_stats()
+            summary['polymarket_websocket'] = {
+                'messages_received': ws_stats.get('messages_received', 0),
+                'messages_parsed': ws_stats.get('messages_parsed', 0),
+                'messages_processed': ws_stats.get('messages_processed', 0),
+                'messages_invalid_json': ws_stats.get('messages_invalid_json', 0),
+                'messages_ignored_empty': ws_stats.get('messages_ignored_empty', 0),
+                'messages_ignored_control': ws_stats.get('messages_ignored_control', 0),
+                'messages_server_errors': ws_stats.get('messages_server_errors', 0),
+                'messages_unrecognized': ws_stats.get('messages_unrecognized', 0),
+                'reconnections': ws_stats.get('reconnections', 0),
+            }
+
+        kalshi_client = getattr(self, 'kalshi_client', None)
+        kalshi_ws_client = getattr(kalshi_client, 'websocket_client', None) if kalshi_client else None
+        if kalshi_ws_client and hasattr(kalshi_ws_client, 'get_stats'):
+            ks_stats = kalshi_ws_client.get_stats()
+            summary['kalshi_websocket'] = {
+                'messages_received': ks_stats.get('messages_received', 0),
+                'messages_parsed': ks_stats.get('messages_parsed', 0),
+                'messages_processed': ks_stats.get('messages_processed', 0),
+                'messages_invalid_json': ks_stats.get('messages_invalid_json', 0),
+                'messages_ignored_empty': ks_stats.get('messages_ignored_empty', 0),
+                'messages_ignored_control': ks_stats.get('messages_ignored_control', 0),
+                'messages_server_errors': ks_stats.get('messages_server_errors', 0),
+                'messages_unrecognized': ks_stats.get('messages_unrecognized', 0),
+                'reconnections': ks_stats.get('reconnections', 0),
+            }
+
+        return summary
+
     async def _fetch_all_markets(self) -> Tuple[List[Dict], List[Dict]]:
         """Fetch all markets from WebSocket streams."""
         try:
@@ -233,17 +435,32 @@ class MarketAnalyzer:
             kalshi_tickers = []
             polymarket_assets = []
             
-            # Get active Kalshi market tickers (limit to avoid overwhelming)
-            for market in kalshi_markets[:50]:  # Subscribe to top 50 active markets
+            # Get active Kalshi market tickers with bounded, configurable coverage.
+            kalshi_limit = min(len(kalshi_markets), int(Config.KALSHI_STREAM_SUBSCRIPTION_LIMIT))
+            for market in kalshi_markets[:kalshi_limit]:
                 if market.get('status') == 'active' and market.get('ticker'):
                     kalshi_tickers.append(market['ticker'])
             
-            # Get active Polymarket asset IDs
-            for market in polymarket_markets[:50]:  # Subscribe to top 50 active markets
+            # Get active Polymarket asset IDs with bounded, configurable coverage.
+            polymarket_market_limit = min(
+                len(polymarket_markets),
+                int(Config.POLYMARKET_STREAM_SUBSCRIPTION_MARKET_LIMIT),
+            )
+            for market in polymarket_markets[:polymarket_market_limit]:
                 if market.get('active', True):  # Polymarket markets are generally active
-                    for token in market.get('tokens', []):
-                        if token.get('token_id'):
-                            polymarket_assets.append(token['token_id'])
+                    token_ids = market.get('clob_token_ids') or market.get('tokens', [])
+                    if isinstance(token_ids, list):
+                        for token in token_ids:
+                            if isinstance(token, dict):
+                                token_id = token.get('token_id')
+                            else:
+                                token_id = token
+                            if token_id:
+                                polymarket_assets.append(token_id)
+
+            kalshi_tickers = list(dict.fromkeys(kalshi_tickers))
+            polymarket_assets = list(dict.fromkeys(polymarket_assets))
+            polymarket_assets = polymarket_assets[:Config.POLYMARKET_STREAM_SUBSCRIPTION_ASSET_LIMIT]
             
             # Subscribe to markets
             if kalshi_tickers or polymarket_assets:
@@ -321,6 +538,7 @@ class MarketAnalyzer:
                     'status': market.get('status', 'active'),  # Use status field, default to active
                     'close_time': market.get('endDate'),  # Use 'endDate' instead of 'end_date_iso'
                     'outcomes': outcomes,
+                    'clob_token_ids': market.get('clob_token_ids') or market.get('clobTokenIds'),
                     'volume': self._safe_float(market.get('volume', 0)),
                     'raw_data': market
                 }
@@ -585,6 +803,201 @@ class MarketAnalyzer:
         self.market_cache['key_terms_cache'][title] = key_terms
         return key_terms
     
+    async def _simulate_opportunity(self, opportunity: Dict) -> Optional[Dict]:
+        """Simulate market-order execution against live orderbooks."""
+        try:
+            if not self.simulation_enabled:
+                return None
+
+            await asyncio.sleep(self.simulation_latency_ms / 1000.0)
+
+            buy_platform = opportunity.get('buy_platform')
+            sell_platform = opportunity.get('sell_platform')
+            kalshi_market = opportunity.get('match_data', {}).get('kalshi_market', {})
+            polymarket_market = opportunity.get('match_data', {}).get('polymarket_market', {})
+            token_id = opportunity.get('polymarket_token')
+            volume = float(opportunity.get('max_tradeable_volume', 0))
+            if volume <= 0:
+                return None
+
+            # Fetch live orderbooks
+            kalshi_ob = None
+            polymarket_ob = None
+            if buy_platform == 'kalshi' or sell_platform == 'kalshi':
+                kalshi_ob = await self.kalshi_client.get_market_orderbook(kalshi_market.get('id'))
+            if buy_platform == 'polymarket' or sell_platform == 'polymarket':
+                polymarket_ob = await self.polymarket_client.get_market_orderbook(polymarket_market.get('id'), token_id)
+
+            # Require live orderbooks if configured
+            if Config.SIMULATION_REQUIRE_LIVE_ORDERBOOKS:
+                if buy_platform == 'kalshi' and not kalshi_ob:
+                    return {'skipped_reason': 'missing_kalshi_orderbook'}
+                if sell_platform == 'kalshi' and not kalshi_ob:
+                    return {'skipped_reason': 'missing_kalshi_orderbook'}
+                if buy_platform == 'polymarket' and not polymarket_ob:
+                    return {'skipped_reason': 'missing_polymarket_orderbook'}
+                if sell_platform == 'polymarket' and not polymarket_ob:
+                    return {'skipped_reason': 'missing_polymarket_orderbook'}
+
+            # Freshness check
+            now = time.time()
+            def is_fresh(ob):
+                if not ob or ob.get('timestamp') is None:
+                    return False
+                return (now - ob['timestamp']) <= Config.SIMULATION_MAX_ORDERBOOK_AGE_SECONDS
+
+            if Config.SIMULATION_REQUIRE_LIVE_ORDERBOOKS:
+                if (buy_platform == 'kalshi' or sell_platform == 'kalshi') and not is_fresh(kalshi_ob):
+                    return {'skipped_reason': 'stale_kalshi_orderbook'}
+                if (buy_platform == 'polymarket' or sell_platform == 'polymarket') and not is_fresh(polymarket_ob):
+                    return {'skipped_reason': 'stale_polymarket_orderbook'}
+
+            # Extract side-specific books
+            if buy_platform == 'kalshi':
+                buy_asks = (kalshi_ob or {}).get('yes_asks', [])
+            else:
+                buy_asks = (polymarket_ob or {}).get('asks', [])
+
+            if sell_platform == 'kalshi':
+                sell_bids = (kalshi_ob or {}).get('yes_bids', [])
+            else:
+                sell_bids = (polymarket_ob or {}).get('bids', [])
+
+            result = await self.simulation_engine.execute_market(
+                opportunity_id=opportunity.get('opportunity_id', 'unknown'),
+                buy_platform=buy_platform,
+                sell_platform=sell_platform,
+                buy_asks=buy_asks,
+                sell_bids=sell_bids,
+                token_id=token_id,
+                requested_volume=volume,
+                latency_ms=self.simulation_latency_ms
+            )
+            if result.skipped_reason:
+                return {'skipped_reason': result.skipped_reason}
+
+            return {
+                'filled_volume': result.filled_volume,
+                'avg_buy_price': result.avg_buy_price,
+                'avg_sell_price': result.avg_sell_price,
+                'buy_fees': result.buy_fees,
+                'sell_fees': result.sell_fees,
+                'gross_profit': result.gross_profit,
+                'net_profit': result.net_profit,
+                'profit_margin': result.profit_margin,
+                'latency_ms': result.latency_ms,
+                'timestamp': result.timestamp,
+                'execution_id': result.execution_id,
+                'buy_order_id': result.buy_order_id,
+                'sell_order_id': result.sell_order_id,
+                'buy_fill_id': result.buy_fill_id,
+                'sell_fill_id': result.sell_fill_id,
+                'buy_trade_id': result.buy_trade_id,
+                'sell_trade_id': result.sell_trade_id,
+                'settlement_id': result.settlement_id,
+                'confirmation_source': result.confirmation_source,
+            }
+        except Exception as e:
+            return {'skipped_reason': f'simulation_error:{e}'}
+
+    def record_exchange_execution_receipt(
+        self,
+        opportunity_id: str,
+        buy_platform: str,
+        sell_platform: str,
+        buy_price: float,
+        buy_size: float,
+        buy_fee: float,
+        sell_price: float,
+        sell_size: float,
+        sell_fee: float,
+        execution_id: Optional[str] = None,
+        buy_order_id: Optional[str] = None,
+        sell_order_id: Optional[str] = None,
+        buy_fill_id: Optional[str] = None,
+        sell_fill_id: Optional[str] = None,
+        buy_trade_id: Optional[str] = None,
+        sell_trade_id: Optional[str] = None,
+        settlement_id: Optional[str] = None,
+        token_id: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        timestamp: Optional[float] = None,
+        mark_confirmed: bool = True,
+        mark_settled: bool = True,
+    ) -> str:
+        """Public hook for executor integrations to record exchange receipts."""
+        return self.confirmed_pnl_tracker.record_execution_receipt(
+            opportunity_id=opportunity_id,
+            buy_platform=buy_platform,
+            sell_platform=sell_platform,
+            buy_price=buy_price,
+            buy_size=buy_size,
+            buy_fee=buy_fee,
+            sell_price=sell_price,
+            sell_size=sell_size,
+            sell_fee=sell_fee,
+            execution_id=execution_id,
+            buy_order_id=buy_order_id,
+            sell_order_id=sell_order_id,
+            buy_fill_id=buy_fill_id,
+            sell_fill_id=sell_fill_id,
+            buy_trade_id=buy_trade_id,
+            sell_trade_id=sell_trade_id,
+            settlement_id=settlement_id,
+            token_id=token_id,
+            source='exchange',
+            metadata=metadata,
+            mark_confirmed=mark_confirmed,
+            mark_settled=mark_settled,
+            timestamp=timestamp,
+        )
+
+    def _record_execution_receipt(self, opportunity: Dict[str, Any], simulated_execution: Dict[str, Any]) -> Optional[str]:
+        """Record execution artifacts for confirmed-PnL accounting."""
+        try:
+            if not simulated_execution or simulated_execution.get('skipped_reason'):
+                return None
+
+            match_data = opportunity.get('match_data', {})
+            kalshi_market = match_data.get('kalshi_market', {})
+            polymarket_market = match_data.get('polymarket_market', {})
+
+            metadata = {
+                'strategy': opportunity.get('strategy'),
+                'kalshi_market_id': kalshi_market.get('id'),
+                'polymarket_market_id': polymarket_market.get('id'),
+                'token_id': opportunity.get('polymarket_token'),
+            }
+
+            return self.confirmed_pnl_tracker.record_execution_receipt(
+                opportunity_id=opportunity.get('opportunity_id', 'unknown'),
+                buy_platform=opportunity.get('buy_platform', 'unknown'),
+                sell_platform=opportunity.get('sell_platform', 'unknown'),
+                buy_price=float(simulated_execution.get('avg_buy_price', 0.0)),
+                buy_size=float(simulated_execution.get('filled_volume', 0.0)),
+                buy_fee=float(simulated_execution.get('buy_fees', 0.0)),
+                sell_price=float(simulated_execution.get('avg_sell_price', 0.0)),
+                sell_size=float(simulated_execution.get('filled_volume', 0.0)),
+                sell_fee=float(simulated_execution.get('sell_fees', 0.0)),
+                execution_id=simulated_execution.get('execution_id'),
+                buy_order_id=simulated_execution.get('buy_order_id'),
+                sell_order_id=simulated_execution.get('sell_order_id'),
+                buy_fill_id=simulated_execution.get('buy_fill_id'),
+                sell_fill_id=simulated_execution.get('sell_fill_id'),
+                buy_trade_id=simulated_execution.get('buy_trade_id'),
+                sell_trade_id=simulated_execution.get('sell_trade_id'),
+                settlement_id=simulated_execution.get('settlement_id'),
+                token_id=opportunity.get('polymarket_token'),
+                source=simulated_execution.get('confirmation_source', 'simulation'),
+                metadata=metadata,
+                mark_confirmed=True,
+                mark_settled=bool(Config.CONFIRMED_PNL_REQUIRE_SETTLEMENT),
+                timestamp=float(simulated_execution.get('timestamp', time.time())),
+            )
+        except Exception as e:
+            logger.debug(f"Failed to record execution receipt: {e}")
+            return None
+
     async def _calculate_opportunities(self, matches: List[Dict]) -> List[Dict]:
         """Calculate arbitrage opportunities with optimized concurrent processing."""
         opportunities = []
@@ -658,12 +1071,17 @@ class MarketAnalyzer:
         for token_id, price_data in polymarket_prices.items():
             if not price_data:
                 continue
+            outcome_name = str(price_data.get('outcome', '')).lower()
+            if outcome_name and outcome_name not in {'yes', 'true', '1'}:
+                continue
                 
             # Get Polymarket order book with caching
             polymarket_orderbook = await self._get_cached_orderbook(polymarket_market['id'], 'polymarket', token_id)
             if not polymarket_orderbook:
                 continue
-            
+
+            uses_synthetic_orderbook = bool(kalshi_orderbook.get('is_synthetic')) or bool(polymarket_orderbook.get('is_synthetic'))
+
             # Strategy 1: Buy Kalshi YES, Sell Polymarket
             opportunity_1 = await self._calculate_accurate_arbitrage(
                 buy_orderbook=kalshi_orderbook['yes_asks'],
@@ -679,6 +1097,9 @@ class MarketAnalyzer:
                 match_data=match
             )
             
+            if opportunity_1:
+                opportunity_1['uses_synthetic_orderbook'] = uses_synthetic_orderbook
+
             if opportunity_1 and opportunity_1['total_profit'] > best_total_profit:
                 best_opportunity = opportunity_1
                 best_total_profit = opportunity_1['total_profit']
@@ -698,10 +1119,21 @@ class MarketAnalyzer:
                 match_data=match
             )
             
+            if opportunity_2:
+                opportunity_2['uses_synthetic_orderbook'] = uses_synthetic_orderbook
+
             if opportunity_2 and opportunity_2['total_profit'] > best_total_profit:
                 best_opportunity = opportunity_2
                 best_total_profit = opportunity_2['total_profit']
         
+        if best_opportunity and self.simulation_enabled:
+            sim = await self._simulate_opportunity(best_opportunity)
+            if sim:
+                best_opportunity['simulated_execution'] = sim
+                if not sim.get('skipped_reason'):
+                    confirmed_execution_id = self._record_execution_receipt(best_opportunity, sim)
+                    if confirmed_execution_id:
+                        best_opportunity['confirmed_execution_id'] = confirmed_execution_id
         return best_opportunity
     
     async def _get_cached_market_prices(self, market_id: str) -> Optional[Dict]:
@@ -722,23 +1154,34 @@ class MarketAnalyzer:
             return None
     
     async def _get_cached_orderbook(self, market_id: str, platform: str, token_id: str = None) -> Optional[Dict]:
-        """Get order book from WebSocket streams only."""
+        """Get order book from WebSocket streams with optional synthetic fallback."""
         try:
             if platform == 'kalshi':
                 orderbook = await self.kalshi_client.get_market_orderbook(market_id)
             else:  # polymarket
                 orderbook = await self.polymarket_client.get_market_orderbook(market_id, token_id)
-            
+
             if orderbook:
                 self.completeness_stats['cache_hits'] += 1
-                return orderbook
-            else:
-                self.completeness_stats['cache_misses'] += 1
+                orderbook_copy = dict(orderbook)
+                orderbook_copy.setdefault('is_synthetic', False)
+                return orderbook_copy
+
+            self.completeness_stats['cache_misses'] += 1
+
+            if Config.REQUIRE_REAL_ORDERBOOKS_FOR_ESTIMATED:
                 return None
+
+            # Synthetic fallback when no orderbook data is available
+            if platform == 'kalshi':
+                return await self._create_synthetic_kalshi_orderbook(market_id)
+            if platform == 'polymarket' and token_id:
+                return await self._create_synthetic_polymarket_orderbook(token_id)
+            return None
         except Exception as e:
             logger.debug(f"Failed to fetch orderbook for {platform}:{market_id}: {e}")
             return None
-    
+
     async def _calculate_accurate_arbitrage(self, buy_orderbook: List[Dict], sell_orderbook: List[Dict],
                                           buy_platform: str, sell_platform: str,
                                           buy_fee_rate: float, sell_fee_rate: float,
@@ -750,7 +1193,12 @@ class MarketAnalyzer:
             
         # Calculate overlapping tradeable volume
         overlapping_trades = self._calculate_overlapping_volume(
-            buy_orderbook, sell_orderbook, buy_fee_rate, sell_fee_rate
+            buy_orderbook,
+            sell_orderbook,
+            buy_platform,
+            sell_platform,
+            buy_fee_rate,
+            sell_fee_rate
         )
         
         if not overlapping_trades:
@@ -787,53 +1235,78 @@ class MarketAnalyzer:
             'sell_price': weighted_avg_sell_price
         }
     
+    def _estimate_trade_fee(self, platform: str, price: float, volume: float, fallback_fee_rate: float) -> float:
+        """Estimate platform fee for one trade level using venue-aware formulas."""
+        price = max(float(price), 0.0)
+        volume = max(float(volume), 0.0)
+        notional = price * volume
+        if notional <= 0:
+            return 0.0
+
+        try:
+            if platform == 'kalshi':
+                return max(FeeModel.kalshi_taker_fee(price, volume), 0.0)
+            if platform == 'polymarket':
+                estimated_bps = int(getattr(Config, 'POLYMARKET_ESTIMATED_FEE_RATE_BPS', 0) or 0)
+                if estimated_bps > 0:
+                    modeled_fee = FeeModel.polymarket_taker_fee(price, volume, estimated_bps)
+                    if modeled_fee > 0:
+                        return modeled_fee
+        except Exception:
+            pass
+
+        return notional * max(float(fallback_fee_rate), 0.0)
+
     def _calculate_overlapping_volume(self, buy_orderbook: List[Dict], sell_orderbook: List[Dict],
+                                    buy_platform: str, sell_platform: str,
                                     buy_fee_rate: float, sell_fee_rate: float) -> List[Dict]:
         """Optimized calculation of overlapping tradeable volume at profitable prices."""
         if not buy_orderbook or not sell_orderbook:
             return []
-        
+
         profitable_trades = []
-        
-        # Pre-sort orderbooks once (buy ascending, sell descending)  
-        buy_orders = sorted(buy_orderbook, key=lambda x: x['price'])
-        sell_orders = sorted(sell_orderbook, key=lambda x: x['price'], reverse=True)
-        
-        # Pre-calculate fee multipliers
+
+        # Normalize and sort orderbooks once (buy ascending, sell descending)
+        buy_orders = self._normalize_orderbook_levels(buy_orderbook)
+        sell_orders = self._normalize_orderbook_levels(sell_orderbook)
+        if not buy_orders or not sell_orders:
+            return []
+        buy_orders = sorted(buy_orders, key=lambda x: x['price'])
+        sell_orders = sorted(sell_orders, key=lambda x: x['price'], reverse=True)
+
+        # Fast early termination check with conservative fallback fee rates
         buy_fee_multiplier = 1 + buy_fee_rate
         sell_fee_multiplier = 1 - sell_fee_rate
-        
-        # Fast early termination check
-        min_sell_price = sell_orders[0]['price'] * sell_fee_multiplier
-        max_buy_price = buy_orders[-1]['price'] * buy_fee_multiplier
-        
-        if min_sell_price <= max_buy_price:
+        best_sell_price = sell_orders[0]['price'] * sell_fee_multiplier
+        best_buy_price = buy_orders[0]['price'] * buy_fee_multiplier
+
+        if best_sell_price <= best_buy_price:
             return []  # No profitable opportunities possible
-        
+
         buy_index = 0
         sell_index = 0
-        
+
         # Get adaptive limit for trades
         adaptive_limits = self.get_adaptive_limits()
         max_trades = adaptive_limits['max_trades']
-        
-        while (buy_index < len(buy_orders) and sell_index < len(sell_orders) and 
+
+        while (buy_index < len(buy_orders) and sell_index < len(sell_orders) and
                len(profitable_trades) < max_trades):
-            
+
             buy_order = buy_orders[buy_index].copy()  # Copy to avoid modifying original
             sell_order = sell_orders[sell_index].copy()
-            
+
             buy_price = buy_order['price']
             sell_price = sell_order['price']
-            
+
             # Quick profitability check before expensive calculations
             quick_profit = sell_price * sell_fee_multiplier - buy_price * buy_fee_multiplier
             if quick_profit <= 0:
                 break  # No more profitable trades possible
-            
+
             # Calculate tradeable volume
             tradeable_volume = min(buy_order['size'], sell_order['size'])
-            
+
             # Skip small volumes
             if tradeable_volume < Config.MIN_TRADEABLE_VOLUME:
                 if buy_order['size'] <= sell_order['size']:
@@ -841,48 +1314,75 @@ class MarketAnalyzer:
                 else:
                     sell_index += 1
                 continue
-            
+
             # Optimize slippage calculation - use simplified model for speed
             volume_ratio = tradeable_volume / max(buy_order['size'], sell_order['size'], 1)
             slippage_adjustment = Config.BASE_SLIPPAGE_RATE + volume_ratio * Config.SLIPPAGE_IMPACT_FACTOR
             slippage_adjustment = min(slippage_adjustment, Config.MAX_SLIPPAGE_RATE)
-            
-            # Apply slippage and fees
-            final_buy_price = buy_price * (1 + slippage_adjustment) * buy_fee_multiplier
-            final_sell_price = sell_price * (1 - slippage_adjustment) * sell_fee_multiplier
-            
+
+            # Apply slippage first, then venue-aware fee models
+            slipped_buy_price = buy_price * (1 + slippage_adjustment)
+            slipped_sell_price = sell_price * (1 - slippage_adjustment)
+
+            gross_profit = (slipped_sell_price - slipped_buy_price) * tradeable_volume
+            buy_fee = self._estimate_trade_fee(buy_platform, slipped_buy_price, tradeable_volume, buy_fee_rate)
+            sell_fee = self._estimate_trade_fee(sell_platform, slipped_sell_price, tradeable_volume, sell_fee_rate)
+            net_profit = gross_profit - buy_fee - sell_fee
+
             # Final profitability check
-            if final_sell_price > final_buy_price:
-                net_profit = (final_sell_price - final_buy_price) * tradeable_volume
-                
+            if net_profit > 0:
+                effective_buy_price = slipped_buy_price + (buy_fee / tradeable_volume)
+                effective_sell_price = slipped_sell_price - (sell_fee / tradeable_volume)
+
                 profitable_trades.append({
-                    'buy_price': final_buy_price,
-                    'sell_price': final_sell_price,
+                    'buy_price': effective_buy_price,
+                    'sell_price': effective_sell_price,
                     'volume': tradeable_volume,
-                    'gross_profit': net_profit,  # Simplified - fees already in prices
+                    'gross_profit': gross_profit,
                     'net_profit': net_profit,
                     'slippage_impact': slippage_adjustment,
-                    'buy_fee': final_buy_price * buy_fee_rate * tradeable_volume,
-                    'sell_fee': final_sell_price * sell_fee_rate * tradeable_volume
+                    'buy_fee': buy_fee,
+                    'sell_fee': sell_fee
                 })
-            
+
             # Update remaining volumes efficiently
             buy_order['size'] -= tradeable_volume
             sell_order['size'] -= tradeable_volume
-            
+
             if buy_order['size'] <= 0:
                 buy_index += 1
             if sell_order['size'] <= 0:
                 sell_index += 1
-        
+
         # Check if we hit the trade limit and track truncation
-        if (buy_index < len(buy_orders) and sell_index < len(sell_orders) and 
+        if (buy_index < len(buy_orders) and sell_index < len(sell_orders) and
             len(profitable_trades) >= max_trades):
             # Estimate how many more trades were possible
             remaining_trades = min(len(buy_orders) - buy_index, len(sell_orders) - sell_index)
             self.completeness_stats['truncated_trades'] += remaining_trades
-        
+
         return profitable_trades
+
+    def _normalize_orderbook_levels(self, levels: List[Dict]) -> List[Dict[str, float]]:
+        """Normalize orderbook levels to numeric {price, size} dicts."""
+        normalized = []
+        if not levels:
+            return normalized
+        for level in levels:
+            if isinstance(level, dict):
+                price = level.get('price')
+                size = level.get('size') if level.get('size') is not None else level.get('quantity')
+            elif isinstance(level, (list, tuple)) and len(level) >= 2:
+                price, size = level[0], level[1]
+            else:
+                continue
+            try:
+                price = float(price)
+                size = float(size)
+            except (TypeError, ValueError):
+                continue
+            normalized.append({'price': price, 'size': size})
+        return normalized
     
     def _get_cached_similarity(self, title1: str, title2: str) -> float:
         """Get similarity score with caching for performance."""
@@ -960,7 +1460,8 @@ class MarketAnalyzer:
                 'yes_asks': [{'price': yes_price + spread/2, 'size': volume}],
                 'yes_bids': [{'price': yes_price - spread/2, 'size': volume}],
                 'no_asks': [{'price': no_price + spread/2, 'size': volume}],
-                'no_bids': [{'price': no_price - spread/2, 'size': volume}]
+                'no_bids': [{'price': no_price - spread/2, 'size': volume}],
+                'is_synthetic': True
             }
             
         except Exception as e:
@@ -1002,7 +1503,8 @@ class MarketAnalyzer:
             
             return {
                 'asks': [{'price': sell_price, 'size': volume}],
-                'bids': [{'price': buy_price, 'size': volume}]
+                'bids': [{'price': buy_price, 'size': volume}],
+                'is_synthetic': True
             }
             
         except Exception as e:
@@ -1215,6 +1717,11 @@ class MarketAnalyzer:
             logger.error(f"Failed to initialize real-time streams: {e}")
             logger.info("Falling back to REST API polling")
             self.realtime_enabled = False
+        try:
+            if self.simulation_engine:
+                await self.simulation_engine.close()
+        except Exception:
+            pass
     
     async def _handle_realtime_price_update(self, message: StreamMessage):
         """Handle real-time price updates from WebSocket streams."""
@@ -1246,6 +1753,13 @@ class MarketAnalyzer:
     
     async def _handle_realtime_trade_update(self, message: StreamMessage):
         """Handle real-time trade updates from WebSocket streams."""
+        self.confirmed_pnl_tracker.ingest_trade_tape_event(
+            platform=message.platform,
+            market_id=message.market_id,
+            data=message.data,
+            timestamp=message.timestamp,
+        )
+
         # Log significant trades
         if message.data.get('count', 0) > 1000:  # Log large trades
             logger.info(f"Large trade on {message.platform}:{message.market_id}: {message.data}")
