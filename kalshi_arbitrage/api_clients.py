@@ -716,9 +716,14 @@ class PolymarketClient:
             added = 0
             offset = 0
             limit = 500
+            refresh_start = time.monotonic()
+            max_refresh_seconds = 120  # 2 minute hard cap
             timeout = aiohttp.ClientTimeout(total=30)
             async with aiohttp.ClientSession(timeout=timeout) as session:
                 while True:
+                    if time.monotonic() - refresh_start > max_refresh_seconds:
+                        logger.warning(f"Polymarket refresh timed out after {max_refresh_seconds}s at offset {offset}")
+                        break
                     params = {"active": "true", "closed": "false", "limit": limit, "offset": offset}
                     try:
                         async with session.get(url, params=params) as response:

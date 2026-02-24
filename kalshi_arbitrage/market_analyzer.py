@@ -196,6 +196,7 @@ class MarketAnalyzer:
     async def run_full_scan(self) -> Dict[str, Any]:
         """Run a comprehensive scan of all markets and find arbitrage opportunities."""
         scan_start_time = datetime.now()
+        scan_start_mono = time.monotonic()
         logger.info(f"Starting full market scan at {scan_start_time}")
 
         # Reset per-scan orderbook counters and REST budgets
@@ -230,7 +231,15 @@ class MarketAnalyzer:
         opportunities = await self._calculate_opportunities(matches)
         
         # Generate scan report with completeness information
-        scan_duration = (datetime.now() - scan_start_time).total_seconds()
+        scan_duration_mono = time.monotonic() - scan_start_mono
+        scan_duration_wall = (datetime.now() - scan_start_time).total_seconds()
+        # Use monotonic time (excludes macOS sleep) as the real duration
+        scan_duration = scan_duration_mono
+        if scan_duration_wall > scan_duration_mono * 2 + 30:
+            logger.warning(
+                f"Process suspension detected: wall={scan_duration_wall:.1f}s, "
+                f"cpu={scan_duration_mono:.1f}s, gap={scan_duration_wall - scan_duration_mono:.0f}s"
+            )
         estimated_completeness = self._calculate_estimated_completeness()
         pnl_summary = self._build_guaranteed_pnl_summary(opportunities, scan_start_time)
         synthetic_orderbook_opportunities = sum(1 for o in opportunities if o.get('uses_synthetic_orderbook'))

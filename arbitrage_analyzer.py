@@ -8,6 +8,7 @@ import asyncio
 import argparse
 import signal
 import sys
+import time
 from datetime import datetime, timedelta
 from kalshi_arbitrage.config import Config
 from kalshi_arbitrage.market_analyzer import MarketAnalyzer
@@ -66,6 +67,7 @@ class ArbitrageAnalysisSystem:
                     break
 
                 cycle_start = datetime.now()
+                cycle_start_mono = time.monotonic()
 
                 # Run full market scan
                 try:
@@ -88,15 +90,25 @@ class ArbitrageAnalysisSystem:
                 except Exception as e:
                     self.logger.error(f"Error during scan cycle: {e}")
 
-                # Calculate sleep time to maintain 30-second intervals
-                cycle_duration = (datetime.now() - cycle_start).total_seconds()
-                sleep_time = max(0, Config.SCAN_INTERVAL_SECONDS - cycle_duration)
+                # Use monotonic time for accurate cycle duration (excludes OS sleep)
+                cycle_duration_mono = time.monotonic() - cycle_start_mono
+                cycle_duration_wall = (datetime.now() - cycle_start).total_seconds()
+
+                # Detect process suspension (wall >> monotonic)
+                if cycle_duration_wall > cycle_duration_mono * 2 + 30:
+                    self.logger.warning(
+                        f"Process was suspended: wall={cycle_duration_wall:.0f}s, "
+                        f"actual={cycle_duration_mono:.1f}s. Starting next scan immediately."
+                    )
+                    continue  # Skip sleep, scan immediately with fresh data
+
+                sleep_time = max(0, Config.SCAN_INTERVAL_SECONDS - cycle_duration_mono)
 
                 if sleep_time > 0:
                     self.logger.info(f"Next scan in {sleep_time:.1f} seconds...")
                     await asyncio.sleep(sleep_time)
                 else:
-                    self.logger.warning(f"Scan took {cycle_duration:.1f}s - longer than {Config.SCAN_INTERVAL_SECONDS}s interval")
+                    self.logger.warning(f"Scan took {cycle_duration_mono:.1f}s - longer than {Config.SCAN_INTERVAL_SECONDS}s interval")
 
         except Exception as e:
             self.logger.error(f"Fatal error in continuous analysis: {e}")
