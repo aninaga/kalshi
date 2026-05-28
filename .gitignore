@@ -109,3 +109,22 @@ market_data/arbitrage_opportunities.json
 
 # Local credentials
 kalshi_private_key.pem
+
+# Research lake parquet shards (regenerable via research/lake/import_cache.py)
+market_data/lake/
+market_data/lake_test/*.parquet
+market_data/lake_test/*/*.parquet
+research/cache/*.parquet
+research/cache/*.csv
+
+# Research reports' regenerable artifacts (markdown is committed, csv/png is not)
+research/reports/*/csv/
+research/reports/*/figures/
+
+# Trial registry (Wave 2; metadata committed, db not)
+market_data/trials.db
+market_data/audit.log
+market_data/budget_ledger.jsonl
+
+# In-tree venv symlink (per-user; points to ~/code/kvenv)
+research/.venv-research
