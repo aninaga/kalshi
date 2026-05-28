@@ -39,8 +39,10 @@ from research.registry.db import connect
 # --------------------------------------------------------------------------- #
 
 # The packet directory. Kept under ``market_data/`` alongside the registry
-# and audit log so all autoresearch artefacts live in one place.
-DEFAULT_PACKET_DIR = Path("market_data/review_packets")
+# and audit log so all autoresearch artefacts live in one place. Anchored to
+# the project root so callers can run from any cwd.
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+DEFAULT_PACKET_DIR = _REPO_ROOT / "market_data" / "review_packets"
 
 # The reviewer prompt is colocated with this module. Resolved at call time so
 # tests can substitute their own (and so the module imports cleanly even if the

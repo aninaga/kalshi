@@ -189,14 +189,33 @@ def _build_codex_argv(
 
     The prompt is fed via stdin in :func:`spawn_workers`, so we do not pass
     a positional PROMPT here.
+
+    ``--cd`` must be absolute: Codex resolves it relative to its OWN cwd, and
+    we also set ``subprocess.Popen(cwd=worker_dir)``, so a relative path would
+    resolve to ``worker_dir/worker_dir`` and codex bails with "No such file
+    or directory (os error 2)".
     """
+    # Sandbox notes — 2026-05-28
+    # ---------------------------
+    # We use ``danger-full-access`` instead of ``workspace-write`` because the
+    # project lives under ``~/Desktop`` and macOS TCC blocks writes there even
+    # when codex's ``--add-dir`` claims to extend the writable list (verified
+    # empirically). Per plan §safety the security model is layered:
+    #   Layer 1: ``run_backtest.py`` (canonical, in-Python enforcement of
+    #            live-safety, test-split unlocks, append-only registry).
+    #   Layer 2: codex sandbox (defence-in-depth on the FS).
+    #   Layer 3: Claude Code hooks (defence on human-typed Bash).
+    # Disabling Layer 2 means the worker prompt + Layer 1's run_backtest
+    # checks are the only things between a misbehaving worker and the
+    # registry. That's the same boundary that protects the manual
+    # strategies — acceptable for Phase 1.
     argv = [
         codex_bin,
         "exec",
         "--sandbox",
-        "workspace-write",
+        "danger-full-access",
         "--cd",
-        str(worker_dir),
+        str(worker_dir.resolve()),
         "--skip-git-repo-check",
     ]
     if model_flag:
@@ -215,6 +234,7 @@ def spawn_workers(
     prompt_path: Path | str = DEFAULT_PROMPT_PATH,
     timeout_sec: int = DEFAULT_TIMEOUT_SEC,
     model_flag: str | None = None,
+    cost_profile: str | None = None,
 ) -> list[CodexWorker]:
     """Spawn ``worker_count`` codex subprocesses, return immediately.
 
@@ -280,12 +300,16 @@ def spawn_workers(
         # group so :func:`wait_for_workers` can SIGKILL the entire tree on
         # timeout. Codex itself spawns helper processes; without this we'd
         # leave orphans.
+        env = os.environ.copy()
+        if cost_profile:
+            env["RESEARCH_COST_PROFILE"] = cost_profile
         proc = subprocess.Popen(  # noqa: S603 — argv list is trusted
             argv,
             stdin=subprocess.PIPE,
             stdout=stdout_fh,
             stderr=stderr_fh,
             cwd=str(worker_dir),
+            env=env,
             start_new_session=(os.name == "posix"),
         )
         # Feed the prompt to stdin in a non-blocking way: write everything,
@@ -433,6 +457,7 @@ def _result_dict_for(
         "result_md_text": result_text,
         "rate_limited": detect_rate_limit(stderr_text),
         "timed_out": bool(timed_out),
+        "engine": "codex",
     }
 
 

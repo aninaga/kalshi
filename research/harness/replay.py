@@ -37,9 +37,11 @@ import math
 from dataclasses import asdict, dataclass, field
 from typing import Iterable, List, Literal, Optional
 
+import numpy as np
 import pandas as pd
 
 from research.features.registry import REGISTRY
+from research.harness.cost_profile import get_active_profile
 from research.harness.realistic_fills import (
     FillResult,
     OrderbookSnapshot,
@@ -113,21 +115,24 @@ def synthesize_orderbook_from_mid(
     mid: float,
     ts_wall: int,
     ts_game_sec: float,
-    spread_bps: int = 100,
+    spread_bps: int | None = None,
     depth_per_level: float = 1000.0,
 ) -> OrderbookSnapshot:
-    """Build a synthetic orderbook with a 1¢ half-spread on either side of ``mid``.
+    """Build a synthetic orderbook with a ``spread_bps`` half-spread around ``mid``.
 
-    Used when the lake only has a mid price (Polymarket REST is mid-only;
-    Kalshi's candle endpoint is mid-only in this cache). 1¢ each side is
-    deliberately conservative — real PM books often quote tighter, but a
-    backtest that assumes a tight book and then fails to fill live is
-    worse than one that overestimates spread by half a cent.
+    When ``spread_bps`` is None (the default), read from the active
+    ``CostProfile``. ``PESSIMISTIC`` profile uses 100 (1¢ half-spread, 2¢
+    round-trip), preserving the pre-2026-05-28 behavior. ``LIVE_PM`` uses 50
+    (0.5¢ half-spread). ``ZERO_COST`` uses 0.
+
+    The fee_rate_bps used by the curve piece of the PM taker fee similarly
+    reads from the active profile.
     """
-    # 100 bps * mid is one variant of "half spread"; this implementation
-    # interprets ``spread_bps`` as a flat probability-points half-spread:
-    # 100 bps -> 1¢, i.e. ±0.005 around the mid.
-    half_spread = spread_bps / 20_000.0
+    profile = get_active_profile()
+    effective_spread_bps = profile.spread_bps if spread_bps is None else spread_bps
+    # ``spread_bps`` is a flat probability-points half-spread:
+    # 100 bps -> 1¢ (i.e. ±0.005 around the mid); 50 bps -> 0.5¢; 0 -> mid.
+    half_spread = effective_spread_bps / 20_000.0
     bid_top = max(0.001, mid - half_spread)
     ask_top = min(0.999, mid + half_spread)
     bids = tuple(
@@ -136,7 +141,7 @@ def synthesize_orderbook_from_mid(
     asks = tuple(
         (min(0.999, ask_top + i * 0.005), depth_per_level) for i in range(3)
     )
-    fee_rate_bps = 1000 if venue == "polymarket" else None
+    fee_rate_bps = profile.pm_curve_fee_rate_bps if venue == "polymarket" else None
     return OrderbookSnapshot(
         venue=venue,  # type: ignore[arg-type]
         side=side,    # type: ignore[arg-type]
@@ -179,6 +184,20 @@ def _build_bars(game: dict, venue: str) -> List[dict]:
     # Force minute_ts to int64; an empty / object-dtype column would
     # propagate to the merge below and crash with a dtype mismatch.
     pbp["minute_ts"] = pbp["minute_ts"].astype("int64")
+
+    # Derived column: signed scoring-run delta over the last 4 game-minutes.
+    # elapsed_game_sec is monotonic non-decreasing within a game; for each row
+    # we find the latest earlier row whose elapsed_game_sec <= (now - 240) and
+    # take margin[now] - margin[then]. NaN when fewer than 240s have elapsed.
+    egs = pbp["elapsed_game_sec"].to_numpy(dtype=float)
+    margin_arr = pd.to_numeric(pbp["margin"], errors="coerce").to_numpy(dtype=float)
+    targets = egs - 240.0
+    k_lookup = np.searchsorted(egs, targets, side="right") - 1
+    recent_run = np.full(len(egs), np.nan)
+    mask = (targets >= 0) & (k_lookup >= 0)
+    if mask.any():
+        recent_run[mask] = margin_arr[mask] - margin_arr[k_lookup[mask]]
+    pbp["recent_run_signed_4m"] = recent_run
 
     # Build per-minute PM home/away mids by pivoting on team. The lake
     # labels only the home winner-token; we synthesize the away token by
@@ -386,16 +405,51 @@ def _resolve_side(
 # --------------------------------------------------------------------------- #
 
 
+def _current_mark(bar: dict, venue: str, side: str) -> Optional[float]:
+    """Return the current mid-price quote for the position's venue+side,
+    used to mark a live position to market.
+
+    For polymarket: pm_home_mid for long_home, pm_away_mid for long_away.
+    For kalshi: kalshi_mid if the kalshi_team matches the position side,
+                else 1 - kalshi_mid (the NO-token complement).
+    Returns None if no usable quote exists at this bar.
+    """
+    if venue == "polymarket":
+        if side == "long_home":
+            v = bar.get("pm_home_mid")
+        elif side == "long_away":
+            v = bar.get("pm_away_mid")
+        else:
+            return None
+    elif venue == "kalshi":
+        kmid = bar.get("kalshi_mid")
+        if kmid is None or (isinstance(kmid, float) and math.isnan(kmid)):
+            return None
+        want_team = "home" if side == "long_home" else "away"
+        kteam = bar.get("kalshi_team")
+        return float(kmid) if kteam == want_team else 1.0 - float(kmid)
+    else:
+        return None
+    if v is None or (isinstance(v, float) and math.isnan(v)):
+        return None
+    return float(v)
+
+
 def _build_context(
     bar: dict,
     position: Optional[dict],
     features: dict,
+    venue: Optional[str] = None,
 ) -> dict:
     """Build the eval-context dict for a single bar.
 
     Position-state keys are present (with None defaults) regardless of
     whether a position is open, so an expression like
     ``pos_side is None`` evaluates safely on every bar.
+
+    ``venue`` is required to mark an open position to market for
+    ``unrealized_pnl_bps``. If omitted (legacy callers), unrealized_pnl_bps
+    falls back to 0 — historically the bug masked all TP/SL exits.
     """
     elapsed = float(bar["elapsed_game_sec"])
     margin = bar.get("margin")
@@ -425,7 +479,13 @@ def _build_context(
             }
         )
     else:
-        cur_mark = features.get("__mark_price__") or position["entry_price"]
+        # Mark to market using the current venue+side mid quote.
+        cur_mark = None
+        if venue is not None:
+            cur_mark = _current_mark(bar, venue, position["side"])
+        if cur_mark is None:
+            # Fall back to entry price (zero unrealized PnL) when no quote.
+            cur_mark = position["entry_price"]
         ctx.update(
             {
                 "pos_side": position["side"],
@@ -524,7 +584,7 @@ def replay_game(
             continue
 
         # ---- Build context, evaluate exit FIRST if open, then entry. ----
-        context = _build_context(bar, position, features)
+        context = _build_context(bar, position, features, venue=venue)
 
         # --- Exit path ---
         if position is not None:

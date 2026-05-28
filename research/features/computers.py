@@ -58,14 +58,24 @@ def compute_pace_ppm(bar: dict, game_clock_sec: float) -> Optional[float]:
 
 
 def compute_recent_run_signed(bar: dict, _game_clock_sec: float) -> Optional[float]:
-    """Signed scoring-run delta over the last ~4 minutes (positive = home).
+    """Signed scoring-run delta over the last 4 game-minutes (positive = home).
 
-    TODO(wave1): a single bar is insufficient to compute a windowed run.
-    The replay engine will need to pass either a rolling window of bars or a
-    pre-computed `recent_run_signed_4m` field. Returning None here keeps the
-    contract honest until that plumbing exists.
+    The replay engine's ``_build_bars`` precomputes ``recent_run_signed_4m`` as
+    a vectorized lookback over the per-game pbp (margin[now] - margin[then]
+    where ``then`` is the latest bar with elapsed_game_sec <= now-240). Bars
+    with fewer than 240s elapsed get NaN, mirroring the registry's
+    ``available_at_offset_sec=240`` guard.
     """
-    return None
+    val = bar.get("recent_run_signed_4m")
+    if val is None:
+        return None
+    try:
+        f = float(val)
+    except (TypeError, ValueError):
+        return None
+    if f != f:  # NaN
+        return None
+    return f
 
 
 def compute_lineup_hash(bar: dict, _game_clock_sec: float) -> Optional[float]:

@@ -52,7 +52,8 @@ def _import_replay():
 # Splits
 # ---------------------------------------------------------------------------
 
-_SPLITS_PATH = Path("market_data/splits.json")
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_SPLITS_PATH = _REPO_ROOT / "market_data" / "splits.json"
 _VALID_SPLITS = frozenset({"train", "val", "test"})
 
 
@@ -116,7 +117,7 @@ def _check_test_guard(
 
 def _burn_test_unlock(spec: StrategySpec) -> None:
     """Append a burn record to market_data/test_unlocks.log."""
-    log_path = Path("market_data/test_unlocks.log")
+    log_path = _REPO_ROOT / "market_data" / "test_unlocks.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
     with log_path.open("a") as fh:
         ts = datetime.now(tz=timezone.utc).isoformat()

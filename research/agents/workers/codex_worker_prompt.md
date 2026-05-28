@@ -130,6 +130,36 @@ Your `./spec.json` MUST be a single JSON object that matches what
 may be `null`). Here are two complete, validated examples — copy the closest
 one and modify.
 
+### Note on exit conditions (post-2026-05-28 bugfix)
+
+Take-profit and stop-loss exits using `unrealized_pnl_bps >= N` (or `<= -N`)
+**now work correctly** — earlier the mark-to-market value was buggy and
+the TP/SL never fired, so all trials silently used time-stop only. With
+the fix, bracketed exits actually close positions when price moves
+favorably or adversely, which lets short-window scalping strategies
+(e.g. enter on signal, take +2c profit or stop -3c loss within 4 game-min)
+function as intended. **Prefer bracketed exits over time-stop-only** for
+any strategy where you have a directional thesis with an expected price
+move size; reserve `exit: True` (time-stop only) for hold-to-settlement
+plays.
+
+### Empirical priors from 173 prior trials (use these to avoid repeats)
+
+- **WORKING** (registry trial id 87 family — halftime continuation): enter
+  in post-halftime window [22:00, 27:00] elapsed when |recent_run_signed| >= 6,
+  side=long_hot, TP+2c / SL-3c, 10-min time-stop. Passes the scorer gate
+  under realistic-cost (live_pm) profile.
+- **CONFIRMED DEAD ENDS** — don't waste a trial on these:
+  - Pace-fade strategies (`pace_ppm >= 2.5` + fade lead/trailer) — negative
+    edge even at zero cost.
+  - Star-cold-reversal / cold-rebound — negative edge at zero cost.
+  - Q1 fade strategies — all returns strongly negative pre-cost.
+  - Cross-market arbitrage that requires `kalshi_implied_wp` — cache has
+    no Kalshi NBA data; these will be zero-trade.
+- **MARGINAL** (positive pre-cost but doesn't survive realistic cost):
+  - `star_adv_trailer_v1` / `home_star_imbalance_micro_v1` — small edge,
+    needs either lower cost or tighter entry conditions to flip.
+
 ### Example A — simple `long_trailing` halftime-deficit spec, hold to settle
 
 ```json

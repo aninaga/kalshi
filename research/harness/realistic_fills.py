@@ -40,6 +40,8 @@ from dataclasses import dataclass, field
 from decimal import Decimal, ROUND_HALF_UP, ROUND_UP
 from typing import Literal, Optional, Sequence
 
+from research.harness.cost_profile import get_active_profile
+
 
 # ---------------------------------------------------------------------------
 # Dataclasses
@@ -121,13 +123,14 @@ def _kalshi_taker_fee(price: float, size: float) -> float:
     """Kalshi's exact taker fee: `ceil(0.07 * size * price * (1-price) * 100) / 100`.
 
     Non-linear; highest at price=0.5. Identical formula to
-    `kalshi_arbitrage.mock_execution.FeeModel.kalshi_taker_fee`.
+    `kalshi_arbitrage.mock_execution.FeeModel.kalshi_taker_fee`. Scaled by the
+    active CostProfile's ``kalshi_taker_multiplier`` (default 1.0).
     """
     p = Decimal(str(price))
     c = Decimal(str(size))
     raw = Decimal("0.07") * c * p * (Decimal("1") - p)
     fee = (raw * 100).to_integral_value(rounding=ROUND_UP) / Decimal("100")
-    return float(fee)
+    return float(fee) * get_active_profile().kalshi_taker_multiplier
 
 
 def _polymarket_curve_fee(price: float, size: float, fee_rate_bps: int) -> float:
@@ -167,15 +170,18 @@ def _polymarket_taker_fee(
     size: float,
     fee_rate_bps: Optional[int] = None,
 ) -> float:
-    """Polymarket's full taker fee: curve piece + 2% flat-on-notional piece.
+    """Polymarket's full taker fee: curve piece + flat-on-notional piece.
 
-    The 2% flat piece is documented PM behavior; the curve piece is the
-    extra schedule that scales with `price * (1-price)^2`. Both apply to
-    every taker fill. Returns USDC dollars.
+    Both the curve piece's ``fee_rate_bps`` and the flat-rate ``%-of-notional``
+    are read from the active CostProfile when not overridden. The pre-profile
+    defaults (1000 bps curve, 2% flat) live in :data:`PESSIMISTIC`.
+
+    Returns USDC dollars.
     """
-    rate = POLYMARKET_DEFAULT_FEE_RATE_BPS if fee_rate_bps is None else fee_rate_bps
+    profile = get_active_profile()
+    rate = profile.pm_curve_fee_rate_bps if fee_rate_bps is None else fee_rate_bps
     curve = _polymarket_curve_fee(price, size, rate)
-    flat = POLYMARKET_FLAT_TAKER_RATE * price * size
+    flat = profile.pm_flat_taker_rate * price * size
     return curve + flat
 
 

@@ -38,7 +38,7 @@ class KalshiClient:
             value = float(value)
         except (TypeError, ValueError):
             return default
-        return value / 100.0 if value > 1 else value
+        return value / 100.0 if value >= 1 else value
 
     def _safe_float(self, value: Any) -> Optional[float]:
         """Parse float safely."""
@@ -278,11 +278,115 @@ class KalshiClient:
                         }
                 
                 logger.info(f"Cached {len(self.markets_cache)} Kalshi markets from REST discovery")
-                
+
+                # --- Phase 2: event-based discovery for individual markets ---
+                # The default listing is dominated by multi-leg parlays.
+                # Discover individual markets by iterating through events.
+                await self._discover_individual_markets_via_events(session)
+
         except Exception as e:
             logger.error(f"Failed to discover Kalshi markets via REST: {e}")
             # Continue with empty cache - WebSocket might still provide some data
-    
+
+    async def _discover_individual_markets_via_events(self, session):
+        """Discover individual (non-parlay) markets by querying open events.
+
+        The default /markets listing is dominated by MULTIGAME parlays.
+        This method fetches events, extracts unique series tickers, then
+        queries markets per series to find individual matchable markets.
+        """
+        import aiohttp
+
+        try:
+            # Step 1: Fetch all open events (paginated)
+            all_events = []
+            cursor = None
+            timeout = aiohttp.ClientTimeout(total=15)
+            for _ in range(10):
+                params = {'limit': 200, 'status': 'open'}
+                if cursor:
+                    params['cursor'] = cursor
+                async with session.get(
+                    f"{Config.KALSHI_API_BASE}/events", params=params, timeout=timeout
+                ) as resp:
+                    if resp.status != 200:
+                        break
+                    data = await resp.json()
+                    events = data.get('events', [])
+                    if not events:
+                        break
+                    all_events.extend(events)
+                    cursor = data.get('cursor')
+                    if not cursor:
+                        break
+
+            logger.info(f"Event-based discovery: found {len(all_events)} open events")
+
+            # Step 2: Extract unique series prefixes (first segment of event_ticker)
+            series_set = set()
+            for e in all_events:
+                et = e.get('event_ticker', '')
+                if not et or 'MULTIGAME' in et.upper():
+                    continue
+                series_prefix = et.split('-')[0]
+                series_set.add(series_prefix)
+
+            logger.info(f"Event-based discovery: {len(series_set)} unique series to query")
+
+            # Step 3: For each series, fetch one page of markets (limit=200)
+            new_count = 0
+            rate_limit_backoff = 0.3  # seconds between requests
+            for series in sorted(series_set):
+                try:
+                    params = {'limit': 200, 'series_ticker': series}
+                    async with session.get(
+                        f"{Config.KALSHI_API_BASE}/markets",
+                        params=params, timeout=timeout,
+                    ) as resp:
+                        if resp.status == 429:
+                            await asyncio.sleep(2)
+                            continue
+                        if resp.status != 200:
+                            continue
+                        data = await resp.json()
+                        markets = data.get('markets', [])
+                        for market in markets:
+                            ticker = market.get('ticker', '')
+                            if not ticker or 'MULTIGAME' in ticker.upper():
+                                continue
+                            if ticker in self.markets_cache:
+                                continue  # already have it
+                            self.discovered_tickers.append(ticker)
+                            self._rest_discovered_tickers.add(ticker)
+                            self.markets_cache[ticker] = {
+                                'id': market.get('id'),
+                                'ticker': ticker,
+                                'title': market.get('title', ticker),
+                                'platform': 'kalshi',
+                                'status': market.get('status', 'active'),
+                                'close_time': market.get('close_time'),
+                                'clean_title': self._clean_title(
+                                    market.get('title', ticker)
+                                ),
+                                'raw_data': market,
+                                'source': 'rest_event',
+                                'last_updated': time.time(),
+                            }
+                            new_count += 1
+                except asyncio.TimeoutError:
+                    continue
+                except Exception as e:
+                    logger.debug(f"Error fetching series {series}: {e}")
+                    continue
+                await asyncio.sleep(rate_limit_backoff)
+
+            logger.info(
+                f"Event-based discovery added {new_count} individual markets "
+                f"(total cache: {len(self.markets_cache)})"
+            )
+        except Exception as e:
+            logger.warning(f"Event-based discovery failed (non-fatal): {e}")
+
     async def _handle_orderbook_update(self, message):
         """Handle real-time orderbook updates."""
         market_id = message.market_id
@@ -387,14 +491,29 @@ class KalshiClient:
                         if resp.status == 200:
                             data = await resp.json()
                             orderbook = data.get('orderbook', data)
-                            # Normalize to standard format (yes/no may be None)
-                            yes_side = orderbook.get('yes') or {}
-                            no_side = orderbook.get('no') or {}
+                            # Kalshi REST format: yes/no are flat arrays [[price_cents, qty], ...]
+                            # yes = resting bids for YES (ascending price)
+                            # no  = resting bids for NO  (ascending price)
+                            # A NO bid at X cents == YES ask at (100-X) cents
+                            yes_raw = orderbook.get('yes')  # may be list or None
+                            no_raw = orderbook.get('no')    # may be list or None
+
+                            yes_bids = self._normalize_kalshi_levels(yes_raw if isinstance(yes_raw, list) else [])
+                            no_bids = self._normalize_kalshi_levels(no_raw if isinstance(no_raw, list) else [])
+
+                            # Derive YES asks from NO bids: NO bid at X → YES ask at (1-X)
+                            yes_asks = [{'price': round(1.0 - lvl['price'], 4), 'size': lvl['size']}
+                                        for lvl in no_bids if lvl['price'] > 0.0]
+
+                            # Derive NO asks from YES bids: YES bid at X → NO ask at (1-X)
+                            no_asks = [{'price': round(1.0 - lvl['price'], 4), 'size': lvl['size']}
+                                       for lvl in yes_bids if lvl['price'] > 0.0]
+
                             normalized = {
-                                'yes_asks': self._normalize_kalshi_levels(yes_side.get('asks') if isinstance(yes_side, dict) else orderbook.get('yes_asks', [])),
-                                'yes_bids': self._normalize_kalshi_levels(yes_side.get('bids') if isinstance(yes_side, dict) else orderbook.get('yes_bids', [])),
-                                'no_asks': self._normalize_kalshi_levels(no_side.get('asks') if isinstance(no_side, dict) else orderbook.get('no_asks', [])),
-                                'no_bids': self._normalize_kalshi_levels(no_side.get('bids') if isinstance(no_side, dict) else orderbook.get('no_bids', [])),
+                                'yes_asks': yes_asks,
+                                'yes_bids': yes_bids,
+                                'no_asks': no_asks,
+                                'no_bids': no_bids,
                                 'timestamp': time.time(),
                                 'source': 'rest_fallback'
                             }

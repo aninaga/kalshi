@@ -53,6 +53,7 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 
 from research.features.registry import REGISTRY
+from research.harness.cost_profile import set_active_profile
 from research.harness.strategy_spec import StrategySpec
 
 
@@ -60,9 +61,10 @@ from research.harness.strategy_spec import StrategySpec
 # Defaults
 # --------------------------------------------------------------------------- #
 
-DEFAULT_REGISTRY_DB = Path("market_data/trials.db")
-DEFAULT_AUDIT_LOG = Path("market_data/audit.log")
-DEFAULT_UNLOCK_LOG = Path("market_data/test_unlocks.log")
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+DEFAULT_REGISTRY_DB = _REPO_ROOT / "market_data" / "trials.db"
+DEFAULT_AUDIT_LOG = _REPO_ROOT / "market_data" / "audit.log"
+DEFAULT_UNLOCK_LOG = _REPO_ROOT / "market_data" / "test_unlocks.log"
 
 # Per plan §gate: lifetime budget of 5 test-set unlocks across the project.
 TEST_UNLOCK_BUDGET = 5
@@ -313,6 +315,13 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Validate inputs but skip replay, scoring, and registry write.",
     )
+    p.add_argument(
+        "--cost-profile",
+        default=None,
+        choices=("pessimistic", "live_pm", "zero"),
+        help="Override the active fill cost profile. If omitted, reads "
+        "$RESEARCH_COST_PROFILE; if that is also unset, uses pessimistic.",
+    )
     return p
 
 
@@ -375,6 +384,22 @@ def run(argv: Optional[List[str]] = None) -> int:
     audit_path = Path(args.audit_log)
     registry_db = args.registry_db  # str ok for sqlite3
     unlock_log = Path(args.unlock_log)
+
+    # ---- Cost profile resolution: CLI arg > env var > default (pessimistic) ----
+    profile_name = args.cost_profile or os.environ.get("RESEARCH_COST_PROFILE")
+    if profile_name:
+        try:
+            set_active_profile(profile_name)
+        except (ValueError, TypeError) as exc:
+            return _refuse(
+                error="invalid_cost_profile",
+                reason=f"{type(exc).__name__}: {exc}",
+                audit_path=audit_path,
+                agent_id=args.agent_id,
+                spec_hash=None,
+                split=args.split,
+                argv=command_argv,
+            )
 
     # ---- Step 1: spec-file existence ----
     spec_path = Path(args.spec_file)

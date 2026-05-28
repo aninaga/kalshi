@@ -61,11 +61,8 @@ from research.agents.orchestrator.budget import (
     TOKENS_PER_REVIEWER_CALL,
     Budget,
 )
-from research.agents.orchestrator.codex_dispatcher import (
-    DEFAULT_TIMEOUT_SEC,
-    spawn_workers,
-    wait_for_workers,
-)
+from research.agents.orchestrator import claude_dispatcher, codex_dispatcher
+from research.agents.orchestrator.codex_dispatcher import DEFAULT_TIMEOUT_SEC
 
 
 # --------------------------------------------------------------------------- #
@@ -73,9 +70,10 @@ from research.agents.orchestrator.codex_dispatcher import (
 # --------------------------------------------------------------------------- #
 
 
-DEFAULT_PHASE1_GATE_SCRIPT = Path("research/scripts/check_phase1_gates.sh")
-DEFAULT_STATE_PATH = Path("market_data/orchestrator_state.json")
-DEFAULT_REPORT_BASE = Path("research/reports")
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+DEFAULT_PHASE1_GATE_SCRIPT = _REPO_ROOT / "research" / "scripts" / "check_phase1_gates.sh"
+DEFAULT_STATE_PATH = _REPO_ROOT / "market_data" / "orchestrator_state.json"
+DEFAULT_REPORT_BASE = _REPO_ROOT / "research" / "reports"
 RATE_LIMIT_PAUSE_SEC = 600  # 10 minutes per plan v2 §codex_dispatcher
 
 
@@ -129,6 +127,96 @@ DIRECTION_ROTATION: list[dict[str, str]] = [
             "where the implied probability of the trailing side may be too "
             "low. Be cautious: high concentration risk, small ``n_trades``. "
             "Propose tight entry filters and a clear exit rule."
+        ),
+    },
+    {
+        "name": "halftime_continuation_variants",
+        "blurb": (
+            "**Promotion candidate already exists in this theme** — "
+            "`halftime_v2_window_wide` (window [1320, 1740], |run|>=6, "
+            "long_hot, TP +2c / SL -3c, 10-min time-stop) passes the full "
+            "scorer gate under live_pm: n_trades=400, block_bootstrap "
+            "CI=[+3.9%, +8.3%], season + parity stable. Hunt for VARIANTS "
+            "in the same theme that improve on it. Suggestions: try "
+            "different lookback windows (recent_run_signed magnitude over "
+            "the last 2-6 game-minutes), different TP/SL ratios, narrower "
+            "or wider time windows, pair with `pm_implied_wp` filters "
+            "(e.g. only fire when implied prob of the hot side is below "
+            "0.55 — there's room for the market to reprice). The mechanism "
+            "is post-halftime momentum continuation; don't propose fade "
+            "variants in this direction (those are confirmed losers — "
+            "see registry rejection record)."
+        ),
+    },
+    {
+        "name": "deep_underdog_value",
+        "blurb": (
+            "Hunt for **deep-underdog mispricing**: when ``pm_implied_wp`` "
+            "is in the long tail (e.g. < 0.10 for home or > 0.90 implying "
+            "< 0.10 for away) but `margin` plus `time_remaining` suggest a "
+            "non-trivial comeback probability. Markets often round these to "
+            "zero. High variance but potentially high edge — propose tight "
+            "filters and short holds so cost doesn't dominate."
+        ),
+    },
+    {
+        "name": "endgame_microstructure",
+        "blurb": (
+            "Hunt for **clock-boundary microstructure**: final 3-4 minutes "
+            "of regulation when `time_remaining <= 240` and orderbook is "
+            "thin. Either fade overreactions on a single possession or "
+            "exploit late-stage calibration drift. Short holds; mind the "
+            "fee asymmetry."
+        ),
+    },
+    {
+        "name": "pace_regime",
+        "blurb": (
+            "Hunt for **pace-regime effects**: high-pace games (``pace_ppm`` "
+            "above ~2.5) have noisier in-game probabilities; low-pace games "
+            "(``pace_ppm`` below ~2.0) calcify earlier. Propose a spec keyed "
+            "off `pace_ppm` thresholds combined with a margin / WP signal. "
+            "Justify the regime split in `writeup.md`."
+        ),
+    },
+    {
+        "name": "price_lag_after_score",
+        "blurb": (
+            "Hunt for **price-lag-after-score**: the market should reprice "
+            "promptly when margin changes, but the cache has 5s+ ESPN PBP "
+            "latency vs faster PM ticks (or vice versa). When `margin` and "
+            "`pm_implied_wp` disagree in direction, propose a spec that "
+            "fires on the disagreement and exits on convergence."
+        ),
+    },
+    {
+        "name": "lineup_change_microedge",
+        "blurb": (
+            "Hunt for **lineup-change reactions**: substitutions that change "
+            "`home_stars_on` or `away_stars_on` can be slow-priced. Propose "
+            "an entry that fires shortly after a star check-in or check-out "
+            "and exits within 1-3 game-minutes. Mention the failure mode "
+            "where star quality is not differentiated."
+        ),
+    },
+    {
+        "name": "close_game_clutch",
+        "blurb": (
+            "Hunt for **late close-game edges**: Q4 (`elapsed_game_sec >= "
+            "2160`) with `abs(margin) <= 3`. Win probability is most "
+            "sensitive to information here; if the market lags by even one "
+            "possession, the edge is biggest. Be specific about what "
+            "in-game state predicts the next swing."
+        ),
+    },
+    {
+        "name": "early_overreaction_fade",
+        "blurb": (
+            "Hunt for **Q1 overreaction**: large margin movements in the "
+            "first ~12 minutes (`elapsed_game_sec <= 720`) often don't "
+            "predict the rest of the game. Try fading a large `margin` or "
+            "`recent_run_signed` early. Hold longer (settle-style with "
+            "`time_stop_sec=7200`) so cost is amortised."
         ),
     },
 ]
@@ -527,6 +615,7 @@ class LoopConfig:
     duration_hours: float
     max_trials: int
     codex_workers: int
+    claude_workers: int
     dry_run: bool
     phase1_gate_script: Path
     skip_gate: bool
@@ -534,7 +623,11 @@ class LoopConfig:
     state_path: Path
     weekly_cap_pct: float
     codex_timeout_sec: int
+    claude_timeout_sec: int
     experiments_base: Path
+    creative_every: int  # creative-mode on iteration if iter % creative_every == 0
+    claude_model: str | None = None
+    cost_profile: str | None = None
 
 
 def run_loop(cfg: LoopConfig, logger: logging.Logger) -> int:
@@ -588,7 +681,13 @@ def run_loop(cfg: LoopConfig, logger: logging.Logger) -> int:
     pending_packets: list[str] = []
     direction_log: list[str] = []
     exit_reason = "completed"
-    current_codex_workers = max(1, int(cfg.codex_workers))
+    current_codex_workers = max(0, int(cfg.codex_workers))
+    current_claude_workers = max(0, int(cfg.claude_workers))
+    iteration_idx = 0
+
+    if current_codex_workers + current_claude_workers < 1:
+        logger.error("no workers configured (both pools at 0); refusing to run")
+        return 1
 
     while True:
         # Stop checks at top of loop so an exhausted-on-entry config exits cleanly.
@@ -614,17 +713,30 @@ def run_loop(cfg: LoopConfig, logger: logging.Logger) -> int:
             )
             break
 
-        # --- Pick direction ---
+        # --- Pick direction (creative mode every Nth iteration) ---
         direction = _pick_direction(state)
         _save_state(cfg.state_path, state)
-        direction_log.append(direction["name"])
+        creative_now = (
+            cfg.creative_every > 0
+            and iteration_idx > 0
+            and (iteration_idx % cfg.creative_every == 0)
+        )
+        direction_log.append(
+            f"{direction['name']}{' [creative]' if creative_now else ''}"
+        )
         registry_summary = _safe_registry_summary(logger)
-        direction_md = _compose_direction_md(direction, registry_summary)
+        direction_md = _compose_direction_md(
+            direction, registry_summary, creative_mode=creative_now
+        )
 
         logger.info(
-            "iteration: direction=%s codex_workers=%d trial_count=%d",
+            "iteration %d: direction=%s codex_workers=%d claude_workers=%d "
+            "creative=%s trial_count=%d",
+            iteration_idx,
             direction["name"],
             current_codex_workers,
+            current_claude_workers,
+            creative_now,
             trial_count,
         )
 
@@ -633,38 +745,83 @@ def run_loop(cfg: LoopConfig, logger: logging.Logger) -> int:
         if cfg.dry_run:
             worker_results = _spawn_dry_run_workers(
                 direction_md=direction_md,
-                worker_count=current_codex_workers,
+                worker_count=current_codex_workers + current_claude_workers,
                 base_dir=cfg.experiments_base,
             )
         else:
-            try:
-                workers = spawn_workers(
-                    direction=direction_md,
-                    worker_count=current_codex_workers,
-                    base_dir=cfg.experiments_base,
-                    timeout_sec=cfg.codex_timeout_sec,
+            codex_handles: list = []
+            claude_handles: list = []
+            spawn_error: str | None = None
+
+            if current_codex_workers > 0:
+                try:
+                    codex_handles = codex_dispatcher.spawn_workers(
+                        direction=direction_md,
+                        worker_count=current_codex_workers,
+                        base_dir=cfg.experiments_base,
+                        timeout_sec=cfg.codex_timeout_sec,
+                        cost_profile=cfg.cost_profile,
+                    )
+                except FileNotFoundError as exc:
+                    logger.error("cannot spawn codex workers: %r", exc)
+                    spawn_error = "codex_unavailable"
+                except Exception as exc:  # noqa: BLE001
+                    logger.error("codex spawn_workers raised %r", exc)
+                    spawn_error = "spawn_error"
+
+            if current_claude_workers > 0 and spawn_error is None:
+                try:
+                    claude_handles = claude_dispatcher.spawn_workers(
+                        direction=direction_md,
+                        worker_count=current_claude_workers,
+                        base_dir=cfg.experiments_base,
+                        timeout_sec=cfg.claude_timeout_sec,
+                        model=cfg.claude_model,
+                        cost_profile=cfg.cost_profile,
+                    )
+                except FileNotFoundError as exc:
+                    logger.warning(
+                        "cannot spawn claude workers: %r — continuing with "
+                        "codex-only", exc
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "claude spawn_workers raised %r — continuing with "
+                        "codex-only", exc
+                    )
+
+            if spawn_error is not None and not codex_handles and not claude_handles:
+                exit_reason = spawn_error
+                break
+
+            codex_results = (
+                codex_dispatcher.wait_for_workers(
+                    codex_handles, timeout_sec=cfg.codex_timeout_sec
                 )
-            except FileNotFoundError as exc:
-                logger.error("cannot spawn codex workers: %r — aborting loop", exc)
-                exit_reason = "codex_unavailable"
-                break
-            except Exception as exc:  # noqa: BLE001
-                logger.error("spawn_workers raised %r — aborting loop", exc)
-                exit_reason = "spawn_error"
-                break
-            worker_results = wait_for_workers(
-                workers, timeout_sec=cfg.codex_timeout_sec
+                if codex_handles
+                else []
             )
+            claude_results = (
+                claude_dispatcher.wait_for_workers(
+                    claude_handles, timeout_sec=cfg.claude_timeout_sec
+                )
+                if claude_handles
+                else []
+            )
+            worker_results = codex_results + claude_results
 
         # --- Parse results, enqueue reviews ---
         batch_gate_passed = 0
-        batch_rate_limited = False
+        codex_rate_limited = False
+        claude_rate_limited = False
         for res in worker_results:
             trial_count += 1
             parsed = _parse_result_md(res.get("result_md_text"))
+            engine = res.get("engine", "?")
             logger.info(
-                "  worker=%s exit=%s timed_out=%s rate_limited=%s gate_passed=%s "
-                "spec_hash=%s trial_id=%s",
+                "  worker[%s]=%s exit=%s timed_out=%s rate_limited=%s "
+                "gate_passed=%s spec_hash=%s trial_id=%s",
+                engine,
                 res["worker_id"],
                 res["exit_code"],
                 res["timed_out"],
@@ -674,7 +831,10 @@ def run_loop(cfg: LoopConfig, logger: logging.Logger) -> int:
                 parsed.trial_id,
             )
             if res["rate_limited"]:
-                batch_rate_limited = True
+                if engine == "codex":
+                    codex_rate_limited = True
+                elif engine == "claude":
+                    claude_rate_limited = True
             if parsed.gate_passed and parsed.spec_hash:
                 batch_gate_passed += 1
                 gate_passed_count += 1
@@ -682,6 +842,7 @@ def run_loop(cfg: LoopConfig, logger: logging.Logger) -> int:
                 if pkt:
                     pending_packets.append(pkt)
                     logger.info("  enqueued review packet: %s", pkt)
+        batch_rate_limited = codex_rate_limited or claude_rate_limited
 
         # --- Budget bookkeeping ---
         # Charge: per-trial overhead for every worker that returned; one
@@ -700,25 +861,56 @@ def run_loop(cfg: LoopConfig, logger: logging.Logger) -> int:
         # --- Per-iteration log line ---
         iso = datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         logger.info(
-            "%s trial_count=%d worker_returns=%d passed=%d rate_limited=%s",
+            "%s trial_count=%d worker_returns=%d passed=%d "
+            "codex_rate_limit=%s claude_rate_limit=%s",
             iso,
             trial_count,
             len(worker_results),
             batch_gate_passed,
-            batch_rate_limited,
+            codex_rate_limited,
+            claude_rate_limited,
         )
 
-        # --- Rate-limit backoff ---
+        # --- Rate-limit backoff (PER-ENGINE) ---
+        # codex (ChatGPT Pro) and claude (Max-20x) have independent quotas;
+        # a rate-limit on one must NOT throttle the other. The unaffected
+        # pool keeps running at full concurrency — that's the asymmetric
+        # fallback ("if claude caps, lean harder on codex" and vice versa).
+        # We still take a global 10-min pause to let the throttled engine
+        # cool off, but ONLY if at least one engine actually flagged it.
         if batch_rate_limited and not cfg.dry_run:
+            new_codex = current_codex_workers
+            new_claude = current_claude_workers
+            if codex_rate_limited:
+                new_codex = max(0, current_codex_workers - 1)
+            if claude_rate_limited:
+                new_claude = max(0, current_claude_workers - 1)
+            # Keep at least one worker per pool that started with >0 — but
+            # only if THAT pool wasn't the one rate-limited. The rate-limited
+            # pool is allowed to go to 0 (the other pool keeps producing).
+            if current_codex_workers > 0 and not codex_rate_limited:
+                new_codex = max(1, new_codex)
+            if current_claude_workers > 0 and not claude_rate_limited:
+                new_claude = max(1, new_claude)
             logger.warning(
-                "rate-limit detected in worker stderr; sleeping %ds and "
-                "reducing concurrency from %d to %d",
+                "rate-limit: codex_hit=%s claude_hit=%s — sleeping %ds, "
+                "codex %d->%d, claude %d->%d",
+                codex_rate_limited, claude_rate_limited,
                 RATE_LIMIT_PAUSE_SEC,
-                current_codex_workers,
-                max(1, current_codex_workers - 1),
+                current_codex_workers, new_codex,
+                current_claude_workers, new_claude,
             )
             time.sleep(RATE_LIMIT_PAUSE_SEC)
-            current_codex_workers = max(1, current_codex_workers - 1)
+            current_codex_workers = new_codex
+            current_claude_workers = new_claude
+            if current_codex_workers + current_claude_workers < 1:
+                logger.error(
+                    "both worker pools throttled to 0 — exiting loop cleanly"
+                )
+                exit_reason = "both_pools_throttled_to_zero"
+                break
+
+        iteration_idx += 1
 
     # --- Write summary -----------------------------------------------------
     ended_at = time.time()
@@ -753,11 +945,14 @@ def run_loop(cfg: LoopConfig, logger: logging.Logger) -> int:
 def _compose_direction_md(
     direction: dict[str, str],
     registry_summary: dict[str, Any],
+    creative_mode: bool = False,
 ) -> str:
-    """Compose the markdown that each Codex worker reads from direction.md.
+    """Compose the markdown that each worker reads from direction.md.
 
     Includes a short snapshot of registry state so the worker has multiple-
-    testing awareness baked into its proposal step.
+    testing awareness baked into its proposal step. When ``creative_mode`` is
+    True, an additional block invites the worker to step outside the most
+    obvious framing of the direction — used to broaden the search.
     """
     parts: list[str] = []
     parts.append(f"# Research direction: {direction['name']}\n\n")
@@ -776,6 +971,27 @@ def _compose_direction_md(
             )
     else:
         parts.append("- registry is empty or has no scored specs yet.\n")
+
+    if creative_mode:
+        parts.append("\n## Creative mode\n\n")
+        parts.append(
+            "- This iteration is in **creative mode**. The default proposal "
+            "shape (single-feature entry on the obvious side) has been "
+            "well-sampled. Now: propose something **unusual but defensible**. "
+            "Options that count as creative:\n"
+            "  * **Inverted side** for this direction (e.g. `long_cold` "
+            "instead of `long_hot`).\n"
+            "  * **Multi-signal confluence** — combine TWO live-safe features "
+            "in `entry_condition` (still simple, but not single-feature). "
+            "Each clause must be mechanistically justified in `writeup.md`.\n"
+            "  * **Unusual hold horizon** — very short (60-180s) or very "
+            "long (settle-style with `time_stop_sec=7200`).\n"
+            "  * **Threshold extremes** — fire only at the tails of a feature "
+            "distribution (e.g. `pm_implied_wp < 0.10` or `> 0.90`).\n"
+            "- Still: ONE entry condition, well-formed JSON, all features "
+            "live-safe, validate before backtest. Be bold in design but "
+            "honest in `writeup.md` about why and how it could fail.\n"
+        )
 
     parts.append("\n## Scope rules\n\n")
     parts.append(
@@ -815,7 +1031,29 @@ def build_argparser() -> argparse.ArgumentParser:
         type=int,
         default=2,
         help="Concurrent codex workers per iteration (default: 2). "
-        "Auto-reduces on rate-limit detection (floor 1).",
+        "Auto-reduces on rate-limit detection. Set to 0 to disable codex pool.",
+    )
+    p.add_argument(
+        "--claude-workers",
+        type=int,
+        default=0,
+        help="Concurrent claude (headless `claude -p`) workers per iteration "
+        "(default: 0 = disabled). When > 0, runs in parallel with the codex "
+        "pool — both engines propose specs against the same direction.md.",
+    )
+    p.add_argument(
+        "--claude-model",
+        type=str,
+        default=None,
+        help="Optional --model override for claude workers (e.g. "
+        "claude-opus-4-7). Default: user's configured model.",
+    )
+    p.add_argument(
+        "--creative-every",
+        type=int,
+        default=3,
+        help="Inject a 'creative mode' framing into direction.md on every "
+        "Nth iteration (default: 3). Set 0 to disable.",
     )
     p.add_argument(
         "--dry-run",
@@ -856,13 +1094,28 @@ def build_argparser() -> argparse.ArgumentParser:
         "--codex-timeout-sec",
         type=int,
         default=DEFAULT_TIMEOUT_SEC,
-        help="Per-worker timeout in seconds (default: %(default)d).",
+        help="Per-codex-worker timeout in seconds (default: %(default)d).",
+    )
+    p.add_argument(
+        "--claude-timeout-sec",
+        type=int,
+        default=DEFAULT_TIMEOUT_SEC,
+        help="Per-claude-worker timeout in seconds (default: %(default)d).",
     )
     p.add_argument(
         "--experiments-base",
         type=Path,
         default=Path("research/experiments"),
         help="Where per-worker scratch directories live.",
+    )
+    p.add_argument(
+        "--cost-profile",
+        type=str,
+        default=None,
+        choices=("pessimistic", "live_pm", "zero"),
+        help="Cost profile passed to every spawned worker via "
+        "RESEARCH_COST_PROFILE env var. Default: each worker's own default "
+        "(pessimistic). Use 'live_pm' for realistic Polymarket cost.",
     )
     return p
 
@@ -877,6 +1130,7 @@ def main(argv: list[str] | None = None) -> int:
         duration_hours=float(args.duration_hours),
         max_trials=int(args.max_trials),
         codex_workers=int(args.codex_workers),
+        claude_workers=int(args.claude_workers),
         dry_run=bool(args.dry_run),
         phase1_gate_script=Path(args.phase1_gate_script),
         skip_gate=bool(args.skip_gate),
@@ -884,14 +1138,22 @@ def main(argv: list[str] | None = None) -> int:
         state_path=Path(args.state_path),
         weekly_cap_pct=float(args.weekly_cap_pct),
         codex_timeout_sec=int(args.codex_timeout_sec),
+        claude_timeout_sec=int(args.claude_timeout_sec),
         experiments_base=Path(args.experiments_base),
+        creative_every=int(args.creative_every),
+        claude_model=args.claude_model,
+        cost_profile=args.cost_profile,
     )
     logger.info(
         "starting orchestrator: duration=%.1fh max_trials=%d codex_workers=%d "
+        "claude_workers=%d creative_every=%d cost_profile=%s "
         "dry_run=%s skip_gate=%s",
         cfg.duration_hours,
         cfg.max_trials,
         cfg.codex_workers,
+        cfg.claude_workers,
+        cfg.creative_every,
+        cfg.cost_profile or "(default)",
         cfg.dry_run,
         cfg.skip_gate,
     )

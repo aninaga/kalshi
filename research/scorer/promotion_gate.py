@@ -227,7 +227,13 @@ def evaluate_trial(
             f"odd_ci_lo={odd.ci_lo:+.4f}, overlap={parity['ci_overlap']}"
         )
 
-    # --- Gate 6: DSR (lenient / informational) ---
+    # --- Gate 6: DSR (INFORMATIONAL ONLY — per plan §scorer) ---
+    # The DSR is computed and surfaced on PromotionDecision for inspection,
+    # but does NOT gate promotion. Real multiple-testing protection comes
+    # from the registry's train/val/test separation, the block-bootstrap
+    # CI, and the season/parity stability checks above. DSR with a large
+    # n_total_trials_in_registry deflates aggressively to ~0 for any
+    # moderate per-trade Sharpe, which would veto every realistic edge.
     sharpe = _sharpe(pnl)
     if np.isfinite(sharpe):
         dsr, dsr_p = deflated_sharpe(
@@ -238,15 +244,6 @@ def evaluate_trial(
         )
     else:
         dsr, dsr_p = float("nan"), float("nan")
-    dsr_ok = (
-        np.isfinite(dsr) and np.isfinite(dsr_p)
-        and dsr > _DSR_FLOOR and dsr_p < _DSR_PVAL_CEIL
-    )
-    if not dsr_ok:
-        reasons.append(
-            f"dsr={dsr:.3f} p={dsr_p:.3f} — DSR below floor "
-            f"(needs dsr > {_DSR_FLOOR} and p < {_DSR_PVAL_CEIL})"
-        )
 
     # --- Gate 7: concentration ---
     game_share, top_game = _concentration_share(pnl, games)

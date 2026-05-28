@@ -23,8 +23,10 @@ import sqlite3
 from pathlib import Path
 
 
-# The canonical database path, relative to the project root (cwd at runtime).
-DEFAULT_DB_PATH = Path("market_data/trials.db")
+# The canonical database path, anchored to the project root so callers can run
+# from any cwd (e.g. codex workers running inside their scratch dir).
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_DB_PATH = _REPO_ROOT / "market_data" / "trials.db"
 
 
 # --------------------------------------------------------------------------- #

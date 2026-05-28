@@ -10,7 +10,7 @@ class Config:
     
     # Analysis Parameters
     MIN_PROFIT_THRESHOLD = 0.02  # 2% minimum profit threshold
-    SIMILARITY_THRESHOLD = 0.55  # 55% similarity for market matching
+    SIMILARITY_THRESHOLD = 0.85  # 85% similarity for market matching
     
     # API Configuration
     KALSHI_API_BASE = "https://api.elections.kalshi.com/trade-api/v2"
@@ -86,7 +86,7 @@ class Config:
 
     # Fee Structure for analysis (more accurate rates)
     KALSHI_FEE_RATE = 0.00  # Kalshi has no trading fees
-    POLYMARKET_FEE_RATE = 0.02  # ~2% gas + protocol fees (average estimate)
+    POLYMARKET_FEE_RATE = 0.01  # ~1% conservative fallback (BPS model handles real calculations)
     POLYMARKET_GAS_FEE = 0.005  # ~0.5% typical gas fee
     POLYMARKET_PROTOCOL_FEE = 0.01  # ~1% protocol fee
     POLYMARKET_SLIPPAGE_TOLERANCE = 0.005  # 0.5% slippage tolerance
@@ -141,6 +141,17 @@ class Config:
     # Default completeness level
     DEFAULT_COMPLETENESS_LEVEL = 'BALANCED'
     
+    # --- Execution settings ---
+    EXECUTION_ENABLED = False  # Master kill switch — must explicitly enable
+    EXECUTION_MODE = "paper"   # "paper" (log only) | "live" (real orders)
+    KALSHI_ORDER_TTL_SECONDS = 5  # Short-lived limit order = pseudo-IOC
+    POLYMARKET_ORDER_TYPE = "FOK"  # Fill-or-Kill
+    MAX_POSITION_SIZE_USD = 100.0  # Per-leg capital cap
+    MAX_DAILY_LOSS_USD = 50.0  # Stop trading after this cumulative loss
+    EXECUTION_TIMEOUT_SECONDS = 10  # Max wait for order API response
+    HEDGE_ENABLED = True  # Auto-hedge on partial fill (unwind filled leg)
+    MIN_PROFIT_AFTER_FEES_USD = 0.50  # Re-verify profit before firing orders
+
     # Data Storage
     DATA_DIR = "market_data"
     OPPORTUNITIES_FILE = "arbitrage_opportunities.json"

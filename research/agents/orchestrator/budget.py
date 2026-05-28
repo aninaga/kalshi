@@ -48,7 +48,8 @@ from pathlib import Path
 # --------------------------------------------------------------------------- #
 
 
-DEFAULT_LEDGER_PATH = Path("market_data/budget_ledger.jsonl")
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+DEFAULT_LEDGER_PATH = _REPO_ROOT / "market_data" / "budget_ledger.jsonl"
 
 # Conservative assumption about Max-20x weekly token budget. The user can
 # override by passing ``weekly_max_budget_tokens`` to :class:`Budget` if their

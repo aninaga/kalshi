@@ -128,3 +128,21 @@ market_data/budget_ledger.jsonl
 
 # In-tree venv symlink (per-user; points to ~/code/kvenv)
 research/.venv-research
+
+# Per-run autoresearch artifacts (regenerable from registry + spec_hash)
+research/experiments/
+research/reports/
+
+# Per-run orchestrator rotation state
+market_data/orchestrator_state*.json
+
+# Large run outputs (24h simulations, study sweeps, US account exports)
+market_data/run_24h_*/
+market_data/nba_studies/
+market_data/sim_24h_*.json
+market_data/backtest_results.json
+market_data/pnl_analysis.json
+market_data/live_*.json
+market_data/polymarket_us_*.json
+market_data/polymarket_us_*.csv
+market_data/polymarket_anirudh_*.csv

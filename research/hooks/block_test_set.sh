@@ -127,11 +127,17 @@ is_allowlisted() {
     local cmd="$command_str"
     local fw="$first_word"
 
-    # 1. run_backtest.py via any python
+    # 1. run_backtest via any python — both .py path form AND `-m` module form
     if echo "$cmd" | grep -qE '(python[0-9.]?|python3)[[:space:]].*research/agents/tools/run_backtest\.py'; then
         return 0
     fi
-    if echo "$cmd" | grep -qE 'kvenv/bin/python3[[:space:]].*research/agents/tools/run_backtest\.py'; then
+    if echo "$cmd" | grep -qE 'kvenv/bin/python3?[[:space:]].*research/agents/tools/run_backtest\.py'; then
+        return 0
+    fi
+    if echo "$cmd" | grep -qE '(python[0-9.]?|python3)[[:space:]]+-m[[:space:]]+research\.agents\.tools\.run_backtest\b'; then
+        return 0
+    fi
+    if echo "$cmd" | grep -qE 'kvenv/bin/python3?[[:space:]]+-m[[:space:]]+research\.agents\.tools\.run_backtest\b'; then
         return 0
     fi
 

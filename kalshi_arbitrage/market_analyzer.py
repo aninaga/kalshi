@@ -10,11 +10,12 @@ from concurrent.futures import ThreadPoolExecutor
 from collections import defaultdict
 import heapq
 from .api_clients import KalshiClient, PolymarketClient
-from .utils import clean_title, get_similarity_score
+from .utils import clean_title, get_similarity_score, extract_stat_types, thresholds_compatible
 from .config import Config
 from .mock_execution import MockExecutionEngine, FeeModel
 from .confirmed_pnl import ConfirmedPnLTracker
 from .websocket_client import RealTimeDataManager, StreamMessage
+from .arbitrage_executor import ArbitrageExecutor
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +64,9 @@ class MarketAnalyzer:
         self.confirmed_pnl_tracker = ConfirmedPnLTracker(
             allow_simulated_confirmed=Config.CONFIRMED_PNL_INCLUDE_SIMULATION
         )
+
+        # Real execution
+        self.executor = ArbitrageExecutor(pnl_tracker=self.confirmed_pnl_tracker)
 
         # Real-time data streaming (Phase 2)
         self.realtime_manager = None
@@ -199,9 +203,10 @@ class MarketAnalyzer:
         scan_start_mono = time.monotonic()
         logger.info(f"Starting full market scan at {scan_start_time}")
 
-        # Reset per-scan orderbook counters and REST budgets
+        # Reset per-scan orderbook counters, REST budgets, and nearest-miss tracker
         self._scan_orderbook_hits = {'kalshi': 0, 'polymarket': 0}
         self._scan_orderbook_misses = {'kalshi': 0, 'polymarket': 0}
+        self._nearest_misses = []  # Track best rejected margins for diagnostics
         self.kalshi_client.reset_rest_budget()
         self.polymarket_client._orderbook_rest_budget = Config.ORDERBOOK_REST_BUDGET_PER_SCAN
         
@@ -312,13 +317,32 @@ class MarketAnalyzer:
                 'capital': sim_capital,
                 'roi': (sim_profit / sim_capital) if sim_capital else 0
             }
+        # Nearest-miss diagnostics
+        nearest_misses_sorted = []
+        if hasattr(self, '_nearest_misses') and self._nearest_misses:
+            # Extract from heap (stored as (-margin, idx, miss_dict))
+            raw = sorted(self._nearest_misses, key=lambda x: x[0])
+            nearest_misses_sorted = [item[2] for item in raw]
+        scan_report['nearest_misses'] = nearest_misses_sorted[:10]
+
+        if not opportunities and nearest_misses_sorted:
+            logger.info("=== NEAREST MISSES (0 opportunities found) ===")
+            for i, miss in enumerate(nearest_misses_sorted[:5]):
+                logger.info(
+                    f"  #{i+1} {miss['strategy']}: margin={miss['best_margin']:.4%}, "
+                    f"gap={miss['gap_to_threshold']:.4%}, "
+                    f"{'combined_cost='+format(miss.get('combined_cost', 0), '.4f') if 'combined_cost' in miss else 'ask='+format(miss.get('best_ask', 0), '.4f')+' bid='+format(miss.get('best_bid', 0), '.4f')} | "
+                    f"Kalshi: {miss.get('kalshi_title', '')[:40]} ↔ Poly: {miss.get('polymarket_title', '')[:40]}"
+                )
+            logger.info("=== END NEAREST MISSES ===")
+
         # Store results
         await self._save_scan_results(scan_report)
         self.last_scan_time = scan_start_time
-        
+
         # Periodic cache cleanup
         await self._cleanup_expired_caches()
-        
+
         # Log orderbook availability summary
         k_hits = self._scan_orderbook_hits['kalshi']
         k_misses = self._scan_orderbook_misses['kalshi']
@@ -766,7 +790,21 @@ class MarketAnalyzer:
                 
                 if overlap_score < 0.3:  # Quick filter - need at least 30% term overlap
                     continue
-                
+
+                # --- Stat-type mismatch filter ---
+                # Reject same-player, different-stat matches (e.g. assists vs rebounds)
+                k_stats = extract_stat_types(k_market['clean_title'])
+                p_stats = extract_stat_types(p_market['clean_title'])
+                if k_stats and p_stats and not (k_stats & p_stats):
+                    continue
+
+                # --- Threshold compatibility filter ---
+                # Reject same-player same-stat but different line (e.g. 8+ vs O/U 4.5)
+                k_raw = k_market.get('title', '')
+                p_raw = p_market.get('title', '')
+                if k_stats and p_stats and not thresholds_compatible(k_raw, p_raw):
+                    continue
+
                 # Only calculate expensive similarity for promising candidates
                 similarity_key = (k_market['clean_title'], p_market['clean_title'])
                 
@@ -822,20 +860,30 @@ class MarketAnalyzer:
     def _prefilter_markets(self, markets: List[Dict]) -> List[Dict]:
         """Pre-filter markets to reduce comparison space."""
         filtered = []
-        
+        parlays_skipped = 0
+
         for market in markets:
             title = market.get('clean_title', '')
             if not title:
                 continue
-            
+
+            # Skip multi-leg parlay markets (contain commas = multiple outcomes)
+            raw_title = market.get('title', '')
+            ticker = market.get('id', '') or ''
+            if ',' in raw_title or 'MULTIGAME' in ticker.upper():
+                parlays_skipped += 1
+                continue
+
             # Extract key terms (names, places, events)
             key_terms = self._extract_key_terms(title)
-            
+
             # Only include markets with meaningful terms
             if len(key_terms) >= 2:
                 market['key_terms'] = key_terms
                 filtered.append(market)
-        
+
+        if parlays_skipped:
+            logger.info(f"Skipped {parlays_skipped} multi-leg parlay markets")
         return filtered
     
     def _extract_key_terms(self, title: str) -> set:
@@ -877,6 +925,10 @@ class MarketAnalyzer:
         try:
             if not self.simulation_enabled:
                 return None
+
+            # Complementary strategies need a different simulation model
+            if opportunity.get('strategy_type') == 'complementary':
+                return {'skipped_reason': 'complementary_simulation_not_yet_implemented'}
 
             await asyncio.sleep(self.simulation_latency_ms / 1000.0)
 
@@ -1127,34 +1179,51 @@ class MarketAnalyzer:
     
     async def _find_best_arbitrage(self, kalshi_market: Dict, polymarket_market: Dict,
                                   polymarket_prices: Dict, match: Dict) -> Optional[Dict]:
-        """Find the best arbitrage opportunity with accurate volume and slippage calculations."""
+        """Find the best arbitrage opportunity with accurate volume and slippage calculations.
+
+        Evaluates 4 strategies:
+          1. Buy Kalshi YES + Sell Polymarket YES (same-outcome cross-exchange)
+          2. Buy Polymarket YES + Sell Kalshi YES (same-outcome cross-exchange)
+          3. Buy Kalshi YES + Buy Polymarket NO → guaranteed $1 (complementary)
+          4. Buy Polymarket YES + Buy Kalshi NO → guaranteed $1 (complementary)
+        """
         best_opportunity = None
         best_total_profit = 0
-        
+
         # Get Kalshi order book data with caching
         kalshi_orderbook = await self._get_cached_orderbook(kalshi_market['id'], 'kalshi')
         if not kalshi_orderbook:
             return None
-            
-        # Check each Polymarket token for arbitrage opportunities
+
+        # Phase 1: Collect YES and NO token orderbooks from Polymarket
+        yes_token_id = None
+        yes_orderbook = None
+        no_token_id = None
+        no_orderbook = None
+
         for token_id, price_data in polymarket_prices.items():
             if not price_data:
                 continue
             outcome_name = str(price_data.get('outcome', '')).lower()
-            if outcome_name and outcome_name not in {'yes', 'true', '1'}:
-                continue
-                
-            # Get Polymarket order book with caching
-            polymarket_orderbook = await self._get_cached_orderbook(polymarket_market['id'], 'polymarket', token_id)
-            if not polymarket_orderbook:
-                continue
+            if outcome_name in {'yes', 'true', '1'}:
+                ob = await self._get_cached_orderbook(polymarket_market['id'], 'polymarket', token_id)
+                if ob:
+                    yes_token_id = token_id
+                    yes_orderbook = ob
+            elif outcome_name in {'no', 'false', '0'}:
+                ob = await self._get_cached_orderbook(polymarket_market['id'], 'polymarket', token_id)
+                if ob:
+                    no_token_id = token_id
+                    no_orderbook = ob
 
-            uses_synthetic_orderbook = bool(kalshi_orderbook.get('is_synthetic')) or bool(polymarket_orderbook.get('is_synthetic'))
+        # Phase 2: Same-outcome strategies (existing logic, using YES orderbooks)
+        if yes_orderbook:
+            uses_synthetic = bool(kalshi_orderbook.get('is_synthetic')) or bool(yes_orderbook.get('is_synthetic'))
 
-            # Strategy 1: Buy Kalshi YES, Sell Polymarket
+            # Strategy 1: Buy Kalshi YES, Sell Polymarket YES
             opportunity_1 = await self._calculate_accurate_arbitrage(
                 buy_orderbook=kalshi_orderbook['yes_asks'],
-                sell_orderbook=polymarket_orderbook['bids'],
+                sell_orderbook=yes_orderbook['bids'],
                 buy_platform='kalshi',
                 sell_platform='polymarket',
                 buy_fee_rate=Config.KALSHI_FEE_RATE,
@@ -1162,20 +1231,21 @@ class MarketAnalyzer:
                 strategy='Buy Kalshi YES → Sell Polymarket',
                 kalshi_market=kalshi_market,
                 polymarket_market=polymarket_market,
-                polymarket_token=token_id,
-                match_data=match
+                polymarket_token=yes_token_id,
+                match_data=match,
+                is_synthetic=uses_synthetic
             )
-            
+
             if opportunity_1:
-                opportunity_1['uses_synthetic_orderbook'] = uses_synthetic_orderbook
+                opportunity_1['uses_synthetic_orderbook'] = uses_synthetic
 
             if opportunity_1 and opportunity_1['total_profit'] > best_total_profit:
                 best_opportunity = opportunity_1
                 best_total_profit = opportunity_1['total_profit']
-            
-            # Strategy 2: Buy Polymarket, Sell Kalshi YES
+
+            # Strategy 2: Buy Polymarket YES, Sell Kalshi YES
             opportunity_2 = await self._calculate_accurate_arbitrage(
-                buy_orderbook=polymarket_orderbook['asks'],
+                buy_orderbook=yes_orderbook['asks'],
                 sell_orderbook=kalshi_orderbook['yes_bids'],
                 buy_platform='polymarket',
                 sell_platform='kalshi',
@@ -1184,18 +1254,96 @@ class MarketAnalyzer:
                 strategy='Buy Polymarket → Sell Kalshi YES',
                 kalshi_market=kalshi_market,
                 polymarket_market=polymarket_market,
-                polymarket_token=token_id,
-                match_data=match
+                polymarket_token=yes_token_id,
+                match_data=match,
+                is_synthetic=uses_synthetic
             )
-            
+
             if opportunity_2:
-                opportunity_2['uses_synthetic_orderbook'] = uses_synthetic_orderbook
+                opportunity_2['uses_synthetic_orderbook'] = uses_synthetic
 
             if opportunity_2 and opportunity_2['total_profit'] > best_total_profit:
                 best_opportunity = opportunity_2
                 best_total_profit = opportunity_2['total_profit']
-        
-        if best_opportunity and self.simulation_enabled:
+
+        # Phase 3: Complementary strategies (buy YES on one + NO on the other → $1)
+        # Strategy 3: Buy Kalshi YES + Buy Polymarket NO
+        if no_orderbook:
+            uses_synthetic_3 = bool(kalshi_orderbook.get('is_synthetic')) or bool(no_orderbook.get('is_synthetic'))
+
+            opportunity_3 = await self._calculate_complementary_arbitrage(
+                ask_book_a=kalshi_orderbook['yes_asks'],
+                ask_book_b=no_orderbook['asks'],
+                platform_a='kalshi',
+                platform_b='polymarket',
+                fee_rate_a=Config.KALSHI_FEE_RATE,
+                fee_rate_b=Config.POLYMARKET_FEE_RATE,
+                strategy='Buy Kalshi YES + Buy Polymarket NO → $1',
+                kalshi_market=kalshi_market,
+                polymarket_market=polymarket_market,
+                polymarket_token=no_token_id,
+                match_data=match,
+                is_synthetic=uses_synthetic_3
+            )
+
+            if opportunity_3:
+                opportunity_3['uses_synthetic_orderbook'] = uses_synthetic_3
+
+            if opportunity_3 and opportunity_3['total_profit'] > best_total_profit:
+                best_opportunity = opportunity_3
+                best_total_profit = opportunity_3['total_profit']
+
+        # Strategy 4: Buy Polymarket YES + Buy Kalshi NO
+        if yes_orderbook and kalshi_orderbook.get('no_asks'):
+            uses_synthetic_4 = bool(kalshi_orderbook.get('is_synthetic')) or bool(yes_orderbook.get('is_synthetic'))
+
+            opportunity_4 = await self._calculate_complementary_arbitrage(
+                ask_book_a=yes_orderbook['asks'],
+                ask_book_b=kalshi_orderbook['no_asks'],
+                platform_a='polymarket',
+                platform_b='kalshi',
+                fee_rate_a=Config.POLYMARKET_FEE_RATE,
+                fee_rate_b=Config.KALSHI_FEE_RATE,
+                strategy='Buy Polymarket YES + Buy Kalshi NO → $1',
+                kalshi_market=kalshi_market,
+                polymarket_market=polymarket_market,
+                polymarket_token=yes_token_id,
+                match_data=match,
+                is_synthetic=uses_synthetic_4
+            )
+
+            if opportunity_4:
+                opportunity_4['uses_synthetic_orderbook'] = uses_synthetic_4
+
+            if opportunity_4 and opportunity_4['total_profit'] > best_total_profit:
+                best_opportunity = opportunity_4
+                best_total_profit = opportunity_4['total_profit']
+
+        if best_opportunity and Config.EXECUTION_ENABLED:
+            # Real or paper execution via ArbitrageExecutor
+            result = await self.executor.execute_arbitrage(best_opportunity)
+            if result:
+                best_opportunity['simulated_execution'] = {
+                    'execution_id': result.execution_id,
+                    'avg_buy_price': result.avg_buy_price,
+                    'avg_sell_price': result.avg_sell_price,
+                    'filled_volume': result.filled_volume,
+                    'buy_fees': result.buy_fees,
+                    'sell_fees': result.sell_fees,
+                    'net_profit': result.net_profit,
+                    'gross_profit': result.gross_profit,
+                    'skipped_reason': result.skipped_reason,
+                    'buy_order_id': result.buy_order_id,
+                    'sell_order_id': result.sell_order_id,
+                    'confirmation_source': result.confirmation_source,
+                    'timestamp': result.timestamp,
+                }
+                if not result.skipped_reason:
+                    confirmed_execution_id = self._record_execution_receipt(
+                        best_opportunity, best_opportunity['simulated_execution'])
+                    if confirmed_execution_id:
+                        best_opportunity['confirmed_execution_id'] = confirmed_execution_id
+        elif best_opportunity and self.simulation_enabled:
             sim = await self._simulate_opportunity(best_opportunity)
             if sim:
                 best_opportunity['simulated_execution'] = sim
@@ -1203,8 +1351,48 @@ class MarketAnalyzer:
                     confirmed_execution_id = self._record_execution_receipt(best_opportunity, sim)
                     if confirmed_execution_id:
                         best_opportunity['confirmed_execution_id'] = confirmed_execution_id
+
+        # Track nearest miss when no opportunity found (for diagnostics)
+        if not best_opportunity:
+            kalshi_title = kalshi_market.get('title', kalshi_market.get('id', ''))
+            poly_title = polymarket_market.get('title', polymarket_market.get('id', ''))
+            best_miss = None
+
+            # Check all 4 strategies for best margin
+            if yes_orderbook:
+                for name, asks, bids in [
+                    ('Buy Kalshi YES → Sell Polymarket', kalshi_orderbook.get('yes_asks', []), yes_orderbook.get('bids', [])),
+                    ('Buy Polymarket → Sell Kalshi YES', yes_orderbook.get('asks', []), kalshi_orderbook.get('yes_bids', [])),
+                ]:
+                    m = self._compute_best_margin(name, asks, sell_book=bids)
+                    if m and (best_miss is None or m['best_margin'] > best_miss['best_margin']):
+                        best_miss = m
+
+            if no_orderbook:
+                m = self._compute_best_margin(
+                    'Buy Kalshi YES + Buy Polymarket NO → $1',
+                    kalshi_orderbook.get('yes_asks', []),
+                    no_orderbook.get('asks', []),
+                    is_complementary=True
+                )
+                if m and (best_miss is None or m['best_margin'] > best_miss['best_margin']):
+                    best_miss = m
+
+            if yes_orderbook and kalshi_orderbook.get('no_asks'):
+                m = self._compute_best_margin(
+                    'Buy Polymarket YES + Buy Kalshi NO → $1',
+                    yes_orderbook.get('asks', []),
+                    kalshi_orderbook.get('no_asks', []),
+                    is_complementary=True
+                )
+                if m and (best_miss is None or m['best_margin'] > best_miss['best_margin']):
+                    best_miss = m
+
+            if best_miss:
+                self._track_nearest_miss(best_miss, kalshi_title, poly_title)
+
         return best_opportunity
-    
+
     async def _get_cached_market_prices(self, market_id: str) -> Optional[Dict]:
         """Get market prices from WebSocket streams only."""
         try:
@@ -1260,7 +1448,8 @@ class MarketAnalyzer:
                                           buy_platform: str, sell_platform: str,
                                           buy_fee_rate: float, sell_fee_rate: float,
                                           strategy: str, kalshi_market: Dict, polymarket_market: Dict,
-                                          polymarket_token: str, match_data: Dict) -> Optional[Dict]:
+                                          polymarket_token: str, match_data: Dict,
+                                          is_synthetic: bool = True) -> Optional[Dict]:
         """Calculate accurate arbitrage profit with volume overlap and slippage."""
         if not buy_orderbook or not sell_orderbook:
             return None
@@ -1272,7 +1461,8 @@ class MarketAnalyzer:
             buy_platform,
             sell_platform,
             buy_fee_rate,
-            sell_fee_rate
+            sell_fee_rate,
+            is_synthetic=is_synthetic
         )
         
         if not overlapping_trades:
@@ -1309,6 +1499,211 @@ class MarketAnalyzer:
             'sell_price': weighted_avg_sell_price
         }
     
+    def _calculate_complementary_volume(self, ask_book_a: List[Dict], ask_book_b: List[Dict],
+                                       platform_a: str, platform_b: str,
+                                       fee_rate_a: float, fee_rate_b: float,
+                                       is_synthetic: bool = True) -> List[Dict]:
+        """Walk two ASK books simultaneously for complementary arbitrage.
+
+        Math: profit = $1 - ask_a - ask_b - fees per share.
+        Both books sorted ascending, so we break when combined cost >= $1.
+        """
+        if not ask_book_a or not ask_book_b:
+            return []
+
+        asks_a = self._normalize_orderbook_levels(ask_book_a)
+        asks_b = self._normalize_orderbook_levels(ask_book_b)
+        if not asks_a or not asks_b:
+            return []
+        asks_a = sorted(asks_a, key=lambda x: x['price'])
+        asks_b = sorted(asks_b, key=lambda x: x['price'])
+
+        profitable_trades = []
+        idx_a = 0
+        idx_b = 0
+
+        adaptive_limits = self.get_adaptive_limits()
+        max_trades = adaptive_limits['max_trades']
+
+        while (idx_a < len(asks_a) and idx_b < len(asks_b) and
+               len(profitable_trades) < max_trades):
+
+            order_a = asks_a[idx_a].copy()
+            order_b = asks_b[idx_b].copy()
+
+            price_a = order_a['price']
+            price_b = order_b['price']
+
+            # Quick check: combined cost must be < $1 before fees
+            combined_cost = price_a + price_b
+            if combined_cost >= 1.0:
+                break  # All remaining combos are worse (both sorted ascending)
+
+            tradeable_volume = min(order_a['size'], order_b['size'])
+            if tradeable_volume < Config.MIN_TRADEABLE_VOLUME:
+                if order_a['size'] <= order_b['size']:
+                    idx_a += 1
+                else:
+                    idx_b += 1
+                continue
+
+            # Slippage only on synthetic orderbooks
+            if is_synthetic:
+                volume_ratio = tradeable_volume / max(order_a['size'], order_b['size'], 1)
+                slippage_adjustment = Config.BASE_SLIPPAGE_RATE + volume_ratio * Config.SLIPPAGE_IMPACT_FACTOR
+                slippage_adjustment = min(slippage_adjustment, Config.MAX_SLIPPAGE_RATE)
+            else:
+                slippage_adjustment = 0.0
+
+            slipped_price_a = price_a * (1 + slippage_adjustment)
+            slipped_price_b = price_b * (1 + slippage_adjustment)
+
+            fee_a = self._estimate_trade_fee(platform_a, slipped_price_a, tradeable_volume, fee_rate_a)
+            fee_b = self._estimate_trade_fee(platform_b, slipped_price_b, tradeable_volume, fee_rate_b)
+
+            # Profit = $1 payout - cost_a - cost_b - fees (per-share * volume)
+            total_cost = (slipped_price_a + slipped_price_b) * tradeable_volume
+            gross_profit = (1.0 * tradeable_volume) - total_cost
+            net_profit = gross_profit - fee_a - fee_b
+
+            if net_profit > 0:
+                profitable_trades.append({
+                    'buy_price_a': slipped_price_a,
+                    'buy_price_b': slipped_price_b,
+                    'buy_price': slipped_price_a,  # Legacy compat
+                    'sell_price': 1.0,  # Guaranteed payout
+                    'volume': tradeable_volume,
+                    'gross_profit': gross_profit,
+                    'net_profit': net_profit,
+                    'slippage_impact': slippage_adjustment,
+                    'buy_fee': fee_a,
+                    'sell_fee': fee_b,
+                    'combined_cost_per_share': slipped_price_a + slipped_price_b
+                })
+
+            # Consume volume
+            order_a['size'] -= tradeable_volume
+            order_b['size'] -= tradeable_volume
+            asks_a[idx_a] = order_a
+            asks_b[idx_b] = order_b
+
+            if order_a['size'] <= 0:
+                idx_a += 1
+            if order_b['size'] <= 0:
+                idx_b += 1
+
+        return profitable_trades
+
+    async def _calculate_complementary_arbitrage(self, ask_book_a: List[Dict], ask_book_b: List[Dict],
+                                                  platform_a: str, platform_b: str,
+                                                  fee_rate_a: float, fee_rate_b: float,
+                                                  strategy: str, kalshi_market: Dict, polymarket_market: Dict,
+                                                  polymarket_token: str, match_data: Dict,
+                                                  is_synthetic: bool = True) -> Optional[Dict]:
+        """Calculate complementary arbitrage: buy YES on one + NO on other → guaranteed $1 payout."""
+        trades = self._calculate_complementary_volume(
+            ask_book_a, ask_book_b,
+            platform_a, platform_b,
+            fee_rate_a, fee_rate_b,
+            is_synthetic=is_synthetic
+        )
+
+        if not trades:
+            return None
+
+        total_profit = sum(t['net_profit'] for t in trades)
+        total_volume = sum(t['volume'] for t in trades)
+        total_cost = sum((t['buy_price_a'] + t['buy_price_b']) * t['volume'] for t in trades)
+        profit_margin = total_profit / total_cost if total_cost > 0 else 0
+
+        if profit_margin < Config.MIN_PROFIT_THRESHOLD:
+            return None
+
+        weighted_cost_a = sum(t['buy_price_a'] * t['volume'] for t in trades) / total_volume
+        weighted_cost_b = sum(t['buy_price_b'] * t['volume'] for t in trades) / total_volume
+
+        return {
+            'strategy': strategy,
+            'strategy_type': 'complementary',
+            'buy_platform': platform_a,
+            'sell_platform': platform_b,
+            'total_profit': total_profit,
+            'profit_margin': profit_margin,
+            'max_tradeable_volume': total_volume,
+            'weighted_avg_buy_price': weighted_cost_a,
+            'weighted_avg_sell_price': 1.0,  # Guaranteed $1 payout
+            'weighted_avg_buy_price_b': weighted_cost_b,
+            'combined_cost_per_share': weighted_cost_a + weighted_cost_b,
+            'guaranteed_payout_per_share': 1.0,
+            'num_trades': len(trades),
+            'trade_breakdown': trades,
+            'match_data': match_data,
+            'polymarket_token': polymarket_token,
+            'opportunity_id': f"{kalshi_market['id']}_{polymarket_market['id']}_{polymarket_token}_{strategy.replace(' ', '_')}",
+            'timestamp': datetime.now().isoformat(),
+            # Legacy fields
+            'buy_price': weighted_cost_a,
+            'sell_price': 1.0
+        }
+
+    def _compute_best_margin(self, strategy_name: str, ask_book_a: List[Dict], ask_book_b: List[Dict] = None,
+                             is_complementary: bool = False,
+                             sell_book: List[Dict] = None) -> Optional[Dict]:
+        """Compute best possible margin for a strategy without threshold filtering.
+
+        For complementary: margin = (1 - best_ask_a - best_ask_b) / (best_ask_a + best_ask_b)
+        For same-outcome: margin = (best_bid - best_ask) / best_ask
+        Returns dict with strategy info and margin, or None if no data.
+        """
+        if is_complementary:
+            asks_a = self._normalize_orderbook_levels(ask_book_a)
+            asks_b = self._normalize_orderbook_levels(ask_book_b)
+            if not asks_a or not asks_b:
+                return None
+            best_ask_a = min(l['price'] for l in asks_a)
+            best_ask_b = min(l['price'] for l in asks_b)
+            combined = best_ask_a + best_ask_b
+            if combined <= 0:
+                return None
+            margin = (1.0 - combined) / combined
+            return {
+                'strategy': strategy_name,
+                'best_margin': margin,
+                'gap_to_threshold': Config.MIN_PROFIT_THRESHOLD - margin,
+                'price_a': best_ask_a,
+                'price_b': best_ask_b,
+                'combined_cost': combined,
+            }
+        else:
+            # Same-outcome: buy asks, sell bids
+            asks = self._normalize_orderbook_levels(ask_book_a)
+            bids = self._normalize_orderbook_levels(sell_book) if sell_book else []
+            if not asks or not bids:
+                return None
+            best_ask = min(l['price'] for l in asks)
+            best_bid = max(l['price'] for l in bids)
+            if best_ask <= 0:
+                return None
+            margin = (best_bid - best_ask) / best_ask
+            return {
+                'strategy': strategy_name,
+                'best_margin': margin,
+                'gap_to_threshold': Config.MIN_PROFIT_THRESHOLD - margin,
+                'best_ask': best_ask,
+                'best_bid': best_bid,
+            }
+
+    def _track_nearest_miss(self, miss: Dict, kalshi_title: str, poly_title: str):
+        """Track a nearest miss, keeping only top 10 by margin."""
+        miss['kalshi_title'] = kalshi_title
+        miss['polymarket_title'] = poly_title
+        if not hasattr(self, '_nearest_misses'):
+            self._nearest_misses = []
+        heapq.heappush(self._nearest_misses, (-miss['best_margin'], len(self._nearest_misses), miss))
+        # Keep only top 10
+        while len(self._nearest_misses) > 10:
+            heapq.heappop(self._nearest_misses)
+
     def _estimate_trade_fee(self, platform: str, price: float, volume: float, fallback_fee_rate: float) -> float:
         """Estimate platform fee for one trade level using venue-aware formulas."""
         price = max(float(price), 0.0)
@@ -1333,7 +1728,8 @@ class MarketAnalyzer:
 
     def _calculate_overlapping_volume(self, buy_orderbook: List[Dict], sell_orderbook: List[Dict],
                                     buy_platform: str, sell_platform: str,
-                                    buy_fee_rate: float, sell_fee_rate: float) -> List[Dict]:
+                                    buy_fee_rate: float, sell_fee_rate: float,
+                                    is_synthetic: bool = True) -> List[Dict]:
         """Optimized calculation of overlapping tradeable volume at profitable prices."""
         if not buy_orderbook or not sell_orderbook:
             return []
@@ -1389,10 +1785,13 @@ class MarketAnalyzer:
                     sell_index += 1
                 continue
 
-            # Optimize slippage calculation - use simplified model for speed
-            volume_ratio = tradeable_volume / max(buy_order['size'], sell_order['size'], 1)
-            slippage_adjustment = Config.BASE_SLIPPAGE_RATE + volume_ratio * Config.SLIPPAGE_IMPACT_FACTOR
-            slippage_adjustment = min(slippage_adjustment, Config.MAX_SLIPPAGE_RATE)
+            # Skip slippage for real orderbooks (prices already reflect available liquidity)
+            if is_synthetic:
+                volume_ratio = tradeable_volume / max(buy_order['size'], sell_order['size'], 1)
+                slippage_adjustment = Config.BASE_SLIPPAGE_RATE + volume_ratio * Config.SLIPPAGE_IMPACT_FACTOR
+                slippage_adjustment = min(slippage_adjustment, Config.MAX_SLIPPAGE_RATE)
+            else:
+                slippage_adjustment = 0.0
 
             # Apply slippage first, then venue-aware fee models
             slipped_buy_price = buy_price * (1 + slippage_adjustment)
