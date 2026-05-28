@@ -628,11 +628,63 @@ def query_promotable_candidates(
     return [_row_to_trial(r) for r in rows]
 
 
+def query_pending_promotion(
+    db_path: Path | str | None = None,
+    limit: int = 50,
+) -> list[TrialRow]:
+    """Trials that passed the scorer gate, have a Claude review, and have
+    NOT yet been promoted to test (test_pnl_net IS NULL).
+
+    These are the candidates the promotion CLI ``--list`` shows: the human
+    reviewer has already seen Opus's adversarial verdict and must decide
+    whether to burn a test-set unlock.
+
+    Ordered by val_sharpe_net DESC so the most promising candidates surface
+    first.
+    """
+    sql = (
+        f"SELECT {_TRIAL_ROW_SELECT} FROM trials "
+        "WHERE scorer_promotion_gate_passed = 1 "
+        "  AND claude_review IS NOT NULL "
+        "  AND test_pnl_net IS NULL "
+        "ORDER BY val_sharpe_net DESC, id DESC LIMIT ?"
+    )
+    conn = connect(db_path)
+    try:
+        rows = conn.execute(sql, (int(limit),)).fetchall()
+    finally:
+        conn.close()
+    return [_row_to_trial(r) for r in rows]
+
+
+def query_promoted(
+    db_path: Path | str | None = None,
+    limit: int = 200,
+) -> list[TrialRow]:
+    """Trials that have been promoted to the test set (test_pnl_net IS NOT NULL).
+
+    Ordered by ts_created DESC. Used by the ``--history`` subcommand.
+    """
+    sql = (
+        f"SELECT {_TRIAL_ROW_SELECT} FROM trials "
+        "WHERE test_pnl_net IS NOT NULL "
+        "ORDER BY ts_created DESC, id DESC LIMIT ?"
+    )
+    conn = connect(db_path)
+    try:
+        rows = conn.execute(sql, (int(limit),)).fetchall()
+    finally:
+        conn.close()
+    return [_row_to_trial(r) for r in rows]
+
+
 __all__ = [
     "TrialRow",
     "count_total_trials",
     "query",
+    "query_pending_promotion",
     "query_promotable_candidates",
+    "query_promoted",
     "record_claude_review",
     "record_trial",
 ]
