@@ -420,14 +420,18 @@ class TestExplicitExit(unittest.TestCase, _FakeLakeMixin):
 
 class TestNoLookahead(unittest.TestCase, _FakeLakeMixin):
     """Verify (a) entry decisions only see data up through bar t, and
-    (b) the exit price comes from bar t+1's orderbook."""
+    (b) BOTH entry and exit fills come from bar t+1's orderbook (symmetric
+    1-bar execution latency — see the 2026-05-28 latency-asymmetry fix)."""
 
     def setUp(self) -> None:
         self.lake = self._setup_fake_lake()
         pbp = _make_pbp_df(GAME_ID, n_bars=15)
         # Construct a PM mid pattern that's distinctive per-bar so we can
         # tell whether the exit price came from bar t+1 (next minute) or t.
-        mid_pattern = [0.40 + 0.01 * i for i in range(15)]
+        # 0.03/bar step: distinctive per-bar AND larger than the 1¢ half-spread,
+        # so the exit-price check can't be confounded by spread when entry and
+        # exit fill bars are only one apart (symmetric-latency semantics).
+        mid_pattern = [0.40 + 0.03 * i for i in range(15)]
         pm = _make_pm_df(GAME_ID, pbp, mid_pattern=mid_pattern)
         games = _make_games_df(
             GAME_ID,
@@ -437,11 +441,12 @@ class TestNoLookahead(unittest.TestCase, _FakeLakeMixin):
         _write_fake_lake(self.lake, GAME_ID, pbp, pm, games)
 
     def test_replay_no_lookahead(self) -> None:
-        # exit_expr=True so the exit condition fires on the FIRST bar after
-        # entry. The execution price comes from THAT bar's t+1 (one more
-        # bar of latency), so total gap = 2 bars = 120s for mid-game trades.
-        # End-of-game trades (last bar has no t+1) are excluded from the
-        # gap check because they mark-to-market at the current bar's mid.
+        # exit_expr=True so the exit condition fires on the first bar the
+        # position exists. With symmetric 1-bar entry+exit latency the entry
+        # fill bar and exit fill bar are adjacent -> gap = 1 bar = 60s for
+        # mid-game trades. End-of-game trades (last bar has no t+1) are
+        # excluded from the gap check because they mark-to-market at the
+        # current bar's mid.
         spec = _spec_buy_trailing(time_stop_sec=7200, exit_expr="True")
         result = replay_game(spec, GAME_ID)
         self.assertGreater(result.n_trades, 0)
@@ -463,32 +468,34 @@ class TestNoLookahead(unittest.TestCase, _FakeLakeMixin):
                 t.exit_ts_wall, t.entry_ts_wall,
                 "exit wall-clock must follow entry wall-clock",
             )
-            # Entry at bar e, exit-condition fires at bar e+1, execution
-            # uses bar e+2's orderbook -> 120s.
+            # Symmetric 1-bar execution latency (fixed 2026-05-28): entries now
+            # also fill one bar AFTER their signal, exactly like exits. With
+            # exit_expr=True the exit fires on the first bar the position
+            # exists and executes one bar later, so the entry-fill bar and the
+            # exit-fill bar are adjacent -> gap = 1 bar = 60s.
             self.assertEqual(
-                t.exit_ts_wall - t.entry_ts_wall, 120,
+                t.exit_ts_wall - t.entry_ts_wall, 60,
                 "in-game exit should execute one bar after the exit-"
-                "condition fires (bar e+2)",
+                "condition fires (symmetric t+1 latency)",
             )
-            # Verify the exit price comes from bar e+2 (not e), i.e. the
-            # mid-pattern at index (e+2) - 5 (because the first 5 bars
-            # have NaN game-clock and were dropped). Since the spec is
-            # long_trailing and home is trailing, side resolved to long_home;
-            # entry_price ≈ home_mid + half-spread; exit_price ≈ home_mid
-            # at bar e+2 - half-spread.
+            # Verify the exit price comes from the bar AFTER the entry-fill bar
+            # (one bar of exit latency), not the entry-fill bar itself. The
+            # spec is long_trailing and home is trailing, so side resolved to
+            # long_home; entry_price ≈ home_mid + half-spread, exit_price ≈
+            # home_mid at the exit bar - half-spread.
             entry_mid_idx = (t.entry_ts_wall - 1_700_000_000) // 60
-            exit_mid_idx = entry_mid_idx + 2
-            expected_exit_home_mid = 0.40 + 0.01 * exit_mid_idx
+            exit_mid_idx = entry_mid_idx + 1
+            expected_exit_home_mid = 0.40 + 0.03 * exit_mid_idx
             # Allow 1¢ for the bid/ask spread modeling.
             self.assertAlmostEqual(
                 t.exit_price, expected_exit_home_mid, delta=0.012,
                 msg=(
-                    f"exit price {t.exit_price:.4f} should reflect bar e+2's "
-                    f"home mid ~ {expected_exit_home_mid:.4f}; pattern leak"
+                    f"exit price {t.exit_price:.4f} should reflect the exit "
+                    f"bar's home mid ~ {expected_exit_home_mid:.4f}; pattern leak"
                 ),
             )
-            # And NOT the entry bar's mid.
-            expected_entry_home_mid = 0.40 + 0.01 * entry_mid_idx
+            # And NOT the entry-fill bar's mid.
+            expected_entry_home_mid = 0.40 + 0.03 * entry_mid_idx
             self.assertGreater(
                 abs(t.exit_price - expected_entry_home_mid), 0.005,
                 msg=(

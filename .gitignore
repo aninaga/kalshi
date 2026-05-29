@@ -123,6 +123,7 @@ research/reports/*/figures/
 
 # Trial registry (Wave 2; metadata committed, db not)
 market_data/trials.db
+/trials.db
 market_data/audit.log
 market_data/budget_ledger.jsonl
 

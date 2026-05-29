@@ -659,10 +659,20 @@ def replay_game(
                 )
                 continue
 
-            snap, synthetic = _make_orderbook(venue, resolved_side, bar)
+            # Entry executes at bar i+1's orderbook — ONE bar of execution
+            # latency, SYMMETRIC with the exit path (which already fills at
+            # bar i+1). The signal is *detected* on bar i; filling at bar i's
+            # own price gave entries a free 1-bar head-start that exits never
+            # got, which manufactured a spurious short-horizon momentum edge
+            # (see adversarial review 2026-05-28: id=174 +$24.26 -> -$3.62 once
+            # entry latency is charged symmetrically). bars[i+1] is guaranteed
+            # to exist here because the `i == last_bar_idx` guard above skips
+            # the final bar.
+            entry_bar = bars[i + 1]
+            snap, synthetic = _make_orderbook(venue, resolved_side, entry_bar)
             if snap is None:
                 skipped.append(
-                    f"bar@{int(bar['minute_ts'])}: no {venue} quote for {resolved_side}"
+                    f"bar@{int(bar['minute_ts'])}: no {venue} quote for {resolved_side} at t+1"
                 )
                 continue
             synthetic_used = synthetic_used or synthetic
@@ -673,9 +683,9 @@ def replay_game(
                 size=spec.sizing.value,
                 latency_ms=250,
                 stale_threshold_sec=float("inf"),
-                # Determinism: pin now_wall to the bar's minute_ts so
+                # Determinism: pin now_wall to the fill bar's minute_ts so
                 # FillResult.ts_wall doesn't drift between identical replays.
-                now_wall=float(bar["minute_ts"]),
+                now_wall=float(entry_bar["minute_ts"]),
             )
 
             if fill.kill_reason is not None or not fill.filled:
@@ -690,8 +700,8 @@ def replay_game(
                 "size": fill.filled_size,
                 "entry_price": fill.avg_price,
                 "entry_fill": fill,
-                "entry_wall": int(bar["minute_ts"]),
-                "entry_game_sec": game_clock,
+                "entry_wall": int(entry_bar["minute_ts"]),
+                "entry_game_sec": float(entry_bar["elapsed_game_sec"]),
             }
 
     # ---- End-of-iteration: if a position is still open, settle. ----

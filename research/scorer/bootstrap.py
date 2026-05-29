@@ -23,6 +23,7 @@ dependence structure.
 """
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from typing import Iterable
 
@@ -287,7 +288,14 @@ def stability_by_home_team_parity(
             "sharpe_late": float("nan"),
         }
 
-    parity = np.array([hash(str(t)) & 1 for t in teams])
+    # Stable, process-independent parity. Python's built-in hash() is salted
+    # per-process (PYTHONHASHSEED), which made this DECISIVE stability gate
+    # non-reproducible: the same spec could pass or fail across runs purely on
+    # the interpreter's hash seed (review 2026-05-28). sha256 is deterministic.
+    parity = np.array([
+        int.from_bytes(hashlib.sha256(str(t).encode("utf-8")).digest()[:8], "big") & 1
+        for t in teams
+    ])
     even_mask = parity == 0
     odd_mask = ~even_mask
 

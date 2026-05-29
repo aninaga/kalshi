@@ -27,6 +27,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
 
+from research.harness.cost_profile import get_active_profile, set_active_profile
 from research.harness.strategy_spec import StrategySpec
 
 logger = logging.getLogger(__name__)
@@ -294,8 +295,17 @@ def _run_one_game(args: tuple) -> object:
 
     Returns either a TrialResult or a (game_id, Exception) stub.
     """
-    spec_json, game_id, seed, allow_test = args
+    spec_json, game_id, seed, allow_test, cost_profile = args
     try:
+        # Re-establish the active cost profile in this worker. On macOS the
+        # multiprocessing start method is 'spawn', so a child re-imports
+        # cost_profile.py with the PESSIMISTIC default and would otherwise
+        # silently mis-cost every fill — the parent's use_profile()/
+        # set_active_profile() does NOT propagate across the process boundary
+        # (review 2026-05-28 footgun). Passing the profile in the task tuple
+        # makes parallel runs match serial runs exactly.
+        if cost_profile is not None:
+            set_active_profile(cost_profile)
         replay_game, _ = _import_replay()
         spec = StrategySpec.from_json(spec_json)
         return replay_game(spec, game_id, rng_seed=seed, allow_test=allow_test)
@@ -358,9 +368,11 @@ def run_batch(
     allow_test = split == "test"
     spec_json = spec.to_json()
 
-    # Build task args list
+    # Build task args list. Capture the parent's active cost profile and pass
+    # it to each worker so spawned children don't fall back to PESSIMISTIC.
+    active_profile = get_active_profile()
     task_args = [
-        (spec_json, game_id, _game_rng_seed(rng_seed, game_id), allow_test)
+        (spec_json, game_id, _game_rng_seed(rng_seed, game_id), allow_test, active_profile)
         for game_id in game_ids
     ]
 
