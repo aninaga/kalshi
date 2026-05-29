@@ -256,6 +256,15 @@ class KalshiClient:
                         logger.warning(f"Error fetching page {page_count + 1}: {e}, continuing...")
                         break
                 
+                # No silent caps: warn if we stopped at the page cap with more
+                # data still pending (discovery TRUNCATED), so it's visible.
+                if page_count >= max_pages and cursor:
+                    logger.warning(
+                        "Kalshi markets pagination hit the %d-page cap (%d markets) "
+                        "with a cursor still pending — discovery is TRUNCATED; "
+                        "raise max_pages to capture the tail.",
+                        max_pages, len(all_markets),
+                    )
                 logger.info(f"Discovered {len(all_markets)} total Kalshi markets via REST")
                 
                 # Process and cache the discovered markets

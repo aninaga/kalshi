@@ -46,28 +46,81 @@ def datecode(date: str) -> str:
 
 
 def _money(d: dict, key: str):
+    """Read a price field's close from a candlestick, in dollars.
+
+    Live candles expose ``close_dollars`` (numeric cents-as-dollars); the
+    HISTORICAL-tier candles expose ``close`` as a string-dollars value
+    (e.g. "0.4400"). Handle both — reading only ``close_dollars`` left every
+    backfilled (historical) candle price null, making the recovered Kalshi
+    shards price-hollow (found + fixed 2026-05-29).
+    """
     try:
-        v = float(d.get(key, {}).get("close_dollars"))
+        node = d.get(key) or {}
+        v = node.get("close_dollars")
+        if v is None:
+            v = node.get("close")
+        if v is None:
+            return None
+        v = float(v)
         return v if v > 0 else None
     except (TypeError, ValueError):
         return None
 
 
+def _event_markets(series: str, dc: str, away_tri: str, home_tri: str) -> list[dict]:
+    """Find a game's markets for one series.
+
+    Tries the LIVE event endpoint first and falls back to the HISTORICAL tier
+    for settled games whose live nested-markets array has gone empty — that
+    empty array (not data loss) is the root cause of the ~97% Kalshi coverage
+    gap (verified 2026-05-29; see research/lake/RECOVERY_NOTES.md). Markets
+    settled before the dynamic /historical/cutoff live only under
+    /historical/markets.
+    """
+    orderings = ((away_tri, home_tri), (home_tri, away_tri))
+    # Live tier first (cheapest; covers post-cutoff games).
+    for a, b in orderings:
+        d = _get(f"/events/{series}-{dc}{a}{b}", {"with_nested_markets": "true"})
+        ms = (d or {}).get("markets") or (d or {}).get("event", {}).get("markets") or []
+        if ms:
+            return ms
+    # Historical tier (settled markets moved out of the live endpoint).
+    for a, b in orderings:
+        d = _get("/historical/markets", {"event_ticker": f"{series}-{dc}{a}{b}"})
+        ms = (d or {}).get("markets") or []
+        if ms:
+            return ms
+    return []
+
+
+def _winner_team_from_ticker(ticker, away_tri: str, home_tri: str):
+    """KXNBAGAME winner tickers end in the yes-token's team tri (e.g. ...-LAL).
+
+    Use it to orient the yes side robustly even when a historical market dict
+    omits yes_sub_title.
+    """
+    if not ticker:
+        return None
+    suffix = str(ticker).rsplit("-", 1)[-1].upper()
+    if suffix == home_tri.upper():
+        return home_tri
+    if suffix == away_tri.upper():
+        return away_tri
+    return None
+
+
 def enumerate_markets(date: str, away_tri: str, home_tri: str) -> list[dict]:
-    """Return market descriptors for every Kalshi market covering this game."""
+    """Return market descriptors for every Kalshi market covering this game.
+
+    Resolves markets via the live endpoint with a historical-tier fallback
+    (see _event_markets). yes_team is taken from yes_sub_title when present,
+    else derived from the winner-market ticker suffix.
+    """
     dc = datecode(date)
     out = []
     for series, kind in SERIES.items():
-        event = None
-        for a, b in ((away_tri, home_tri), (home_tri, away_tri)):
-            d = _get(f"/events/{series}-{dc}{a}{b}", {"with_nested_markets": "true"})
-            if d:
-                event = d
-                break
-        if not event:
-            continue
-        markets = event.get("markets") or event.get("event", {}).get("markets") or []
-        for m in markets:
+        for m in _event_markets(series, dc, away_tri, home_tri):
+            ticker = m.get("ticker")
             sub = m.get("yes_sub_title") or ""
             yes_team = None
             strike = None
@@ -75,6 +128,8 @@ def enumerate_markets(date: str, away_tri: str, home_tri: str) -> list[dict]:
                 for tri in (home_tri, away_tri):
                     if teams.location(tri).lower() in sub.lower():
                         yes_team = tri
+                if yes_team is None:
+                    yes_team = _winner_team_from_ticker(ticker, away_tri, home_tri)
             else:
                 nums = _NUM_RE.findall(sub) or _NUM_RE.findall(m.get("title") or "")
                 strike = float(nums[0]) if nums else None
@@ -82,7 +137,7 @@ def enumerate_markets(date: str, away_tri: str, home_tri: str) -> list[dict]:
                 "platform": "kalshi",
                 "kind": kind,
                 "series": series,
-                "ticker": m.get("ticker"),
+                "ticker": ticker,
                 "label": sub or m.get("title"),
                 "yes_team": yes_team,
                 "strike": strike,
@@ -91,13 +146,20 @@ def enumerate_markets(date: str, away_tri: str, home_tri: str) -> list[dict]:
 
 
 def fetch_candles(series: str, ticker: str, start_ts: int, end_ts: int, period: int = 1) -> list[dict]:
-    """1-minute price history: list of {ts, yes_bid, yes_ask, mid, last}."""
-    d = _get(
-        f"/series/{series}/markets/{ticker}/candlesticks",
-        {"start_ts": start_ts, "end_ts": end_ts, "period_interval": period},
-    )
+    """1-minute price history: list of {ts, yes_bid, yes_ask, mid, last}.
+
+    Tries the live series/candlesticks endpoint, then the historical-tier
+    candlesticks endpoint — settled markets 404 on the live path but return
+    full history under /historical/markets/{ticker}/candlesticks.
+    """
+    params = {"start_ts": start_ts, "end_ts": end_ts, "period_interval": period}
+    d = _get(f"/series/{series}/markets/{ticker}/candlesticks", params)
+    cs = (d or {}).get("candlesticks", [])
+    if not cs:
+        d = _get(f"/historical/markets/{ticker}/candlesticks", params)
+        cs = (d or {}).get("candlesticks", [])
     rows = []
-    for c in (d or {}).get("candlesticks", []):
+    for c in cs:
         bid = _money(c, "yes_bid")
         ask = _money(c, "yes_ask")
         last = _money(c, "price")

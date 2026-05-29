@@ -48,6 +48,11 @@ class CostProfile:
     kalshi_taker_multiplier : float
         Multiplier on the Kalshi taker fee formula (1.0 = full fee, 0.0 = no
         fee). Useful for paper-trading what-ifs without rewriting the formula.
+    depth_per_level : float
+        Resting size assumed at each synthesized order-book level. The legacy
+        value (1000) was fabricated and ~35x the median real clip, which made
+        the price-impact model a no-op and flattered thin-market strategies;
+        CALIBRATED_PM sets this from real executed-trade data (WS3).
     """
 
     name: str
@@ -55,6 +60,7 @@ class CostProfile:
     pm_curve_fee_rate_bps: int
     pm_flat_taker_rate: float
     kalshi_taker_multiplier: float = 1.0
+    depth_per_level: float = 1000.0
 
 
 # ---------------------------------------------------------------------------
@@ -85,10 +91,41 @@ ZERO_COST = CostProfile(
     kalshi_taker_multiplier=0.0,
 )
 
+
+def _load_calibrated_depth(default: float = 28.26) -> float:
+    """Read the median-clip depth from market_data/cost_calibration.json.
+
+    Falls back to ``default`` (the 25-game median observed 2026-05-29) when the
+    calibration artifact is absent, so the profile is always constructible.
+    """
+    import json
+    from pathlib import Path
+
+    p = Path(__file__).resolve().parents[2] / "market_data" / "cost_calibration.json"
+    try:
+        v = float(json.loads(p.read_text()).get("depth_per_level"))
+        return v if v > 0 else default
+    except Exception:  # noqa: BLE001
+        return default
+
+
+# Honest Polymarket profile: realistic round-trip cost AND realistic depth
+# (from real executed trades), so the price-impact model actually bites and
+# thin-market strategies are no longer flattered. This is the profile honest
+# evaluations and the promotion screen should use.
+CALIBRATED_PM = CostProfile(
+    name="calibrated_pm",
+    spread_bps=100,                 # 1¢ half-spread (2¢ round-trip)
+    pm_curve_fee_rate_bps=200,
+    pm_flat_taker_rate=0.005,
+    depth_per_level=_load_calibrated_depth(),
+)
+
 _BUILTIN: dict[str, CostProfile] = {
     "pessimistic": PESSIMISTIC,
     "live_pm": LIVE_PM,
     "zero": ZERO_COST,
+    "calibrated_pm": CALIBRATED_PM,
 }
 
 
@@ -149,6 +186,7 @@ __all__ = [
     "PESSIMISTIC",
     "LIVE_PM",
     "ZERO_COST",
+    "CALIBRATED_PM",
     "get_active_profile",
     "set_active_profile",
     "use_profile",

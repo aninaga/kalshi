@@ -111,19 +111,30 @@ class FeeModel:
 
     @staticmethod
     def polymarket_taker_fee(price: float, size: float, fee_rate_bps: int) -> float:
-        if fee_rate_bps <= 0:
-            return 0.0
+        """Polymarket taker fee = curve piece + flat-on-notional piece.
+
+        The flat 2% taker fee applies to EVERY taker fill regardless of the
+        per-token curve rate. Omitting it (the prior behaviour, which also
+        early-returned 0 when fee_rate_bps<=0) understated PM cost by ~an order
+        of magnitude and contradicted the Phase-−1 "C fails at 4¢ PM-honest"
+        finding. Mirrors research.harness.realistic_fills._polymarket_taker_fee.
+        """
         p = Decimal(str(price))
         c = Decimal(str(size))
         trade_value = p * c
 
-        # Fee curve matches Polymarket fee table for fee_rate_bps=1000
-        fee_rate = Decimal(fee_rate_bps) / Decimal('4000')
-        exponent = Decimal('2')
-        fee = trade_value * fee_rate * (p * (Decimal('1') - p)) ** exponent
+        # Curve piece (per-token rate; matches the Polymarket fee table at 1000 bps).
+        curve = Decimal('0')
+        if fee_rate_bps and fee_rate_bps > 0:
+            fee_rate = Decimal(fee_rate_bps) / Decimal('4000')
+            curve = trade_value * fee_rate * (p * (Decimal('1') - p)) ** Decimal('2')
+
+        # Flat taker piece — applies to ALL taker fills, independent of the curve.
+        flat_rate = Decimal(str(getattr(Config, 'POLYMARKET_FLAT_TAKER_RATE', 0.02)))
+        flat = trade_value * flat_rate
 
         # Minimum fee precision is 0.0001 USDC
-        fee = fee.quantize(Decimal('0.0001'), rounding=ROUND_HALF_UP)
+        fee = (curve + flat).quantize(Decimal('0.0001'), rounding=ROUND_HALF_UP)
         return float(fee)
 
 

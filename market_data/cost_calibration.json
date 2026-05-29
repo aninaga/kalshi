@@ -1,0 +1,16 @@
+{
+  "source": "polymarket data-api executed trades",
+  "n_games_sampled": 25,
+  "n_games_with_trades": 25,
+  "n_trades": 50000,
+  "trade_size_pct": {
+    "10": 2.21,
+    "25": 6.818,
+    "50": 28.26,
+    "75": 150.0,
+    "90": 720.037
+  },
+  "median_trades_per_game": 2000.0,
+  "depth_per_level": 28.26,
+  "depth_per_level_rationale": "median executed clip size per level; a trade is a lower bound on resting depth so the median clip understates true depth -> a conservative honest estimate (over-charges impact, never under)."
+}

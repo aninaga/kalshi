@@ -144,11 +144,14 @@ def build_subs_shard(subs_for_game: pd.DataFrame) -> pd.DataFrame:
 
 
 def fetch_kalshi_ticks(date: str, away_tri: str, home_tri: str,
-                       first_ts: int, last_ts: int, game_id: str) -> pd.DataFrame:
+                       first_ts: int, last_ts: int, game_id: str,
+                       winner_only: bool = False) -> pd.DataFrame:
     """Re-fetch Kalshi candles for the game; preserve yes_bid / yes_ask.
 
     Returns an empty DataFrame (with the right columns) if no markets were
-    found or no candles were returned.
+    found or no candles were returned. ``winner_only`` restricts to the
+    moneyline (KXNBAGAME winner) markets — the only ones the research features
+    consume — making a full-season backfill ~3x faster.
     """
     cols = column_names("kalshi_ticks")
     start = first_ts - PRE_GAME_SEC
@@ -159,6 +162,8 @@ def fetch_kalshi_ticks(date: str, away_tri: str, home_tri: str,
     except Exception as e:
         LOG.warning("kalshi enumerate_markets failed for %s: %s", game_id, e)
         return pd.DataFrame(columns=cols)
+    if winner_only:
+        markets = [m for m in markets if m.get("kind") == "winner"]
     for m in markets:
         try:
             candles = kalshi_hist.fetch_candles(m["series"], m["ticker"], start, end)
@@ -233,10 +238,17 @@ def fetch_polymarket_ticks(date: str, away_tri: str, home_tri: str,
 def import_one(game_row: pd.Series,
                minutes_for_game: pd.DataFrame,
                subs_for_game: pd.DataFrame,
-               rebuild: bool) -> dict:
+               rebuild: bool,
+               refetch_empty_kalshi: bool = False,
+               kalshi_winner_only: bool = False) -> dict:
     """Build all five lake shards for one game.
 
     Returns a dict ``{table: 'written' | 'skipped' | 'failed'}``.
+
+    ``refetch_empty_kalshi``: when True, an existing but EMPTY kalshi shard is
+    re-fetched (via the historical-tier fallback) instead of being skipped —
+    the surgical way to backfill the ~97% of games whose original live
+    enumeration returned nothing, without rebuilding PM/pbp/subs.
     """
     game_id = game_row["game_id"]
     status: dict[str, str] = {}
@@ -265,13 +277,28 @@ def import_one(game_row: pd.Series,
 
     # --- kalshi / polymarket require network — only fetch if shard missing ---
     kalshi_shard = table_dir("kalshi_ticks") / f"{game_id}.parquet"
-    if kalshi_shard.exists() and not rebuild:
+    kalshi_rows = -1
+    if kalshi_shard.exists():
+        try:
+            kalshi_rows = len(pd.read_parquet(kalshi_shard, columns=["minute_ts"]))
+        except Exception:
+            kalshi_rows = -1
+    # Skip only when a NON-EMPTY shard already exists (and we're not
+    # rebuilding). An existing EMPTY shard is re-fetched when
+    # refetch_empty_kalshi is set, so the historical-tier recovery can backfill
+    # games whose original live enumeration returned nothing.
+    skip_kalshi = (
+        kalshi_shard.exists() and not rebuild
+        and (kalshi_rows > 0 or not refetch_empty_kalshi)
+    )
+    if skip_kalshi:
         status["kalshi_ticks"] = "skipped"
     else:
         try:
             df = fetch_kalshi_ticks(
                 game_row["date"], game_row["away_tri"], game_row["home_tri"],
                 int(game_row["first_ts"]), int(game_row["last_ts"]), game_id,
+                winner_only=kalshi_winner_only,
             )
             _write_shard("kalshi_ticks", game_id, df, rebuild=True)
             status["kalshi_ticks"] = f"written ({len(df)} rows)"
@@ -297,7 +324,9 @@ def import_one(game_row: pd.Series,
     return status
 
 
-def run(limit: int | None = None, rebuild: bool = False) -> dict:
+def run(limit: int | None = None, rebuild: bool = False,
+        refetch_empty_kalshi: bool = False,
+        kalshi_winner_only: bool = False) -> dict:
     """Import games into the lake. Returns a summary dict for logging."""
     t0 = time.time()
 
@@ -330,7 +359,8 @@ def run(limit: int | None = None, rebuild: bool = False) -> dict:
             LOG.warning("%s has no minutes; skipping (cache_io missed it)", gid)
             summary["errors"].append({"game_id": gid, "err": "no minutes"})
             continue
-        status = import_one(row, minutes_g, subs_g, rebuild)
+        status = import_one(row, minutes_g, subs_g, rebuild,
+                            refetch_empty_kalshi, kalshi_winner_only)
         summary["n_games"] += 1
         k = status.get("kalshi_ticks", "")
         p = status.get("polymarket_ticks", "")
@@ -361,6 +391,12 @@ def main() -> None:
                     help="Process only the first N games (chronological).")
     ap.add_argument("--rebuild", action="store_true",
                     help="Overwrite existing parquet shards instead of skipping.")
+    ap.add_argument("--refetch-empty-kalshi", action="store_true",
+                    help="Re-fetch kalshi shards that exist but are EMPTY (uses "
+                         "the historical-tier fallback to backfill recovery).")
+    ap.add_argument("--kalshi-winner-only", action="store_true",
+                    help="Fetch only the moneyline (KXNBAGAME winner) Kalshi "
+                         "markets — the ones the research features use; ~3x faster.")
     ap.add_argument("--log-level", default="INFO",
                     help="Logging level (default INFO).")
     args = ap.parse_args()
@@ -371,7 +407,9 @@ def main() -> None:
         datefmt="%H:%M:%S",
     )
 
-    run(limit=args.limit, rebuild=args.rebuild)
+    run(limit=args.limit, rebuild=args.rebuild,
+        refetch_empty_kalshi=args.refetch_empty_kalshi,
+        kalshi_winner_only=args.kalshi_winner_only)
 
 
 if __name__ == "__main__":

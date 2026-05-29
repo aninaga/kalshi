@@ -33,6 +33,8 @@ invariants this module enforces (in order of importance):
 
 from __future__ import annotations
 
+import bisect
+import hashlib
 import math
 from dataclasses import asdict, dataclass, field
 from typing import Iterable, List, Literal, Optional
@@ -53,6 +55,14 @@ from research.harness.strategy_spec import (
     eval_condition,
 )
 from research.lake.reader import load_game
+
+# Max forward-fill age for a quote merged onto a bar. Beyond this the quote is
+# dropped to NaN rather than presented as the current price. Set from measured
+# data (research/scripts/measure_staleness.py, 2026-05-29): PM quotes are
+# essentially always fresh (>300s in only ~0.16% of bars) while ~11% of Kalshi
+# bars would otherwise forward-fill a quote HOURS (up to ~24h) old. 300s keeps
+# every fresh quote and kills the stale tail. (WS4)
+STALENESS_BOUND_SEC = 300
 
 
 # --------------------------------------------------------------------------- #
@@ -84,6 +94,7 @@ class Trade:
         "end_of_game",
         "settle_at_zero",
         "settle_at_one",
+        "unknown_outcome_marked",
     ]
 
 
@@ -116,7 +127,7 @@ def synthesize_orderbook_from_mid(
     ts_wall: int,
     ts_game_sec: float,
     spread_bps: int | None = None,
-    depth_per_level: float = 1000.0,
+    depth_per_level: float | None = None,
 ) -> OrderbookSnapshot:
     """Build a synthetic orderbook with a ``spread_bps`` half-spread around ``mid``.
 
@@ -125,21 +136,28 @@ def synthesize_orderbook_from_mid(
     round-trip), preserving the pre-2026-05-28 behavior. ``LIVE_PM`` uses 50
     (0.5¢ half-spread). ``ZERO_COST`` uses 0.
 
-    The fee_rate_bps used by the curve piece of the PM taker fee similarly
-    reads from the active profile.
+    ``depth_per_level`` similarly defaults to the active profile's value.
+    ``CALIBRATED_PM`` sets it from real executed-trade data (~median clip);
+    the legacy default (1000) was fabricated and made the impact model a no-op.
+    The fee_rate_bps used by the curve piece of the PM taker fee also reads
+    from the active profile.
     """
     profile = get_active_profile()
     effective_spread_bps = profile.spread_bps if spread_bps is None else spread_bps
+    eff_depth = (
+        getattr(profile, "depth_per_level", 1000.0)
+        if depth_per_level is None else depth_per_level
+    )
     # ``spread_bps`` is a flat probability-points half-spread:
     # 100 bps -> 1¢ (i.e. ±0.005 around the mid); 50 bps -> 0.5¢; 0 -> mid.
     half_spread = effective_spread_bps / 20_000.0
     bid_top = max(0.001, mid - half_spread)
     ask_top = min(0.999, mid + half_spread)
     bids = tuple(
-        (max(0.001, bid_top - i * 0.005), depth_per_level) for i in range(3)
+        (max(0.001, bid_top - i * 0.005), eff_depth) for i in range(3)
     )
     asks = tuple(
-        (min(0.999, ask_top + i * 0.005), depth_per_level) for i in range(3)
+        (min(0.999, ask_top + i * 0.005), eff_depth) for i in range(3)
     )
     fee_rate_bps = profile.pm_curve_fee_rate_bps if venue == "polymarket" else None
     return OrderbookSnapshot(
@@ -151,6 +169,126 @@ def synthesize_orderbook_from_mid(
         ts_game_sec=ts_game_sec,
         fee_rate_bps=fee_rate_bps,
     )
+
+
+# --------------------------------------------------------------------------- #
+# On-court lineup reconstruction + winner-orientation helpers (Wave-1 data-
+# quality fixes C1/C3). All derive from REAL lake data (subs table, starters
+# metadata, the winner-market mid) — nothing is fabricated.
+# --------------------------------------------------------------------------- #
+
+
+def _split_names(value) -> List[str]:
+    """Parse a ``;``-separated player-name string from ``games`` metadata.
+
+    Returns an empty list for None / NaN / empty so callers can detect
+    "starters unknown" and emit None rather than a fabricated lineup.
+    """
+    if value is None:
+        return []
+    if isinstance(value, float) and math.isnan(value):
+        return []
+    s = str(value).strip()
+    if not s or s.lower() == "nan":
+        return []
+    return [p.strip() for p in s.split(";") if p.strip()]
+
+
+def _oncourt_timeline(subs, meta, home_tri: Optional[str], away_tri: Optional[str]):
+    """Reconstruct the on-court 5-man units per minute from starters + subs.
+
+    Returns ``(minutes, states)`` where ``states[i] == (frozenset_home,
+    frozenset_away)`` is the on-court lineup valid from floored-unix-minute
+    ``minutes[i]`` onward. ``minutes`` is sorted ascending and begins with
+    ``-inf`` (the tip-off starters). Returns ``([], [])`` when starters are
+    missing for either side — the caller then emits ``lineup_sig=None`` rather
+    than guessing.
+
+    Point-in-time safe: a substitution at wall-clock ``ts`` only affects bars
+    whose ``minute_ts >= floor(ts)``, so a bar never sees a future sub.
+    """
+    if meta is None:
+        return [], []
+    starters_home = _split_names(meta.get("starters_home"))
+    starters_away = _split_names(meta.get("starters_away"))
+    if not starters_home or not starters_away:
+        return [], []
+
+    on_home = set(starters_home)
+    on_away = set(starters_away)
+    minutes: List[float] = [float("-inf")]
+    states: List[tuple] = [(frozenset(on_home), frozenset(on_away))]
+
+    if subs is not None and len(subs) > 0:
+        sdf = subs.sort_values("ts")
+        for r in sdf.itertuples(index=False):
+            team = getattr(r, "team", None)
+            pin = getattr(r, "player_in", None)
+            pout = getattr(r, "player_out", None)
+            tgt = on_home if team == home_tri else (
+                on_away if team == away_tri else None
+            )
+            if tgt is not None:
+                if isinstance(pout, str) and pout in tgt:
+                    tgt.discard(pout)
+                if isinstance(pin, str) and pin:
+                    tgt.add(pin)
+            try:
+                m = float(int(getattr(r, "ts")) // 60 * 60)
+            except (TypeError, ValueError):
+                continue
+            minutes.append(m)
+            states.append((frozenset(on_home), frozenset(on_away)))
+    return minutes, states
+
+
+def _lineup_sig_at(minute_ts: int, minutes: List[float], states: List[tuple]) -> Optional[float]:
+    """Stable signature of the on-court lineup at ``minute_ts``.
+
+    Uses a hashlib digest (NOT Python's builtin ``hash()``, which is salted
+    per-process and would break the determinism gate) so identical lineups map
+    to identical signatures across runs. None when the lineup is unknown.
+    """
+    if not minutes:
+        return None
+    idx = bisect.bisect_right(minutes, float(minute_ts)) - 1
+    if idx < 0:
+        return None
+    fh, fa = states[idx]
+    canon = "|".join(sorted(fh)) + "#" + "|".join(sorted(fa))
+    return float(int(hashlib.sha256(canon.encode("utf-8")).hexdigest()[:12], 16))
+
+
+def _kalshi_home_wp(mid, team, home_tri: Optional[str], away_tri: Optional[str]) -> Optional[float]:
+    """Orient a Kalshi winner-market mid to a HOME win probability.
+
+    The yes-token's ``team`` says which side it pays; if it's the home team the
+    mid IS the home win prob, if it's the away team it's ``1 - mid``. None when
+    the mid is missing or the team can't be matched (fixes C1: the key
+    ``bar['kalshi_home_winprob']`` had no producer before).
+    """
+    if mid is None or (isinstance(mid, float) and math.isnan(mid)):
+        return None
+    try:
+        m = float(mid)
+    except (TypeError, ValueError):
+        return None
+    if team == home_tri:
+        return m
+    if team == away_tri:
+        return 1.0 - m
+    return None
+
+
+def _quote_age(minute_ts, tick_ts) -> Optional[int]:
+    """Forward-fill age (seconds) of a merged quote; None when no in-bound
+    quote was matched (the merge tolerance dropped a stale one)."""
+    if tick_ts is None or (isinstance(tick_ts, float) and math.isnan(tick_ts)):
+        return None
+    try:
+        return int(minute_ts) - int(tick_ts)
+    except (TypeError, ValueError):
+        return None
 
 
 # --------------------------------------------------------------------------- #
@@ -175,6 +313,8 @@ def _build_bars(game: dict, venue: str) -> List[dict]:
     pbp = game["pbp"].sort_values("minute_ts").reset_index(drop=True)
     pm = game["polymarket"]
     kalshi = game["kalshi"]
+    subs = game.get("subs")
+    meta = game.get("meta")
 
     # Filter to rows with a real game clock; this drops pre-tip warm-up bars.
     pbp = pbp[pbp["elapsed_game_sec"].notna()].reset_index(drop=True)
@@ -199,6 +339,17 @@ def _build_bars(game: dict, venue: str) -> List[dict]:
         recent_run[mask] = margin_arr[mask] - margin_arr[k_lookup[mask]]
     pbp["recent_run_signed_4m"] = recent_run
 
+    # Derived column: TRUE cumulative lead changes from tip-off through each
+    # bar. The lake's ``lead_changes`` is a PER-MINUTE count (value_counts of
+    # lead-change timestamps binned to the minute); the registry feature
+    # ``lead_changes_cum`` is contractually cumulative, so we cumsum here —
+    # the same load-time-derivation pattern as recent_run_signed_4m. Fixes C2.
+    if "lead_changes" in pbp.columns:
+        _lc = pd.to_numeric(pbp["lead_changes"], errors="coerce").fillna(0.0)
+        pbp["lead_changes_cum"] = _lc.cumsum()
+    else:
+        pbp["lead_changes_cum"] = np.nan
+
     # Build per-minute PM home/away mids by pivoting on team. The lake
     # labels only the home winner-token; we synthesize the away token by
     # mid_away = 1 - mid_home (binary market complement). Empty PM frames
@@ -219,6 +370,10 @@ def _build_bars(game: dict, venue: str) -> List[dict]:
         )
     else:
         pm_home["minute_ts"] = pm_home["minute_ts"].astype("int64")
+    # Carry the matched quote's own timestamp so per-bar forward-fill age is
+    # observable, and bound the fill (tolerance) so a stale quote drops to NaN
+    # rather than masquerading as the current price (WS4).
+    pm_home["pm_tick_ts"] = pm_home["minute_ts"]
     pm_home = pm_home.sort_values("minute_ts").reset_index(drop=True)
 
     # Kalshi side: usually empty in this cache; merge_asof on an empty
@@ -228,7 +383,16 @@ def _build_bars(game: dict, venue: str) -> List[dict]:
         pm_home,
         on="minute_ts",
         direction="backward",
+        tolerance=STALENESS_BOUND_SEC,
     )
+    # Restrict Kalshi to the WINNER market (series KXNBAGAME) so the merged
+    # kalshi_* columns are the moneyline book, not a spread/total market that
+    # merge_asof would otherwise grab arbitrarily per minute. This makes the
+    # kalshi_home_winprob producer correct (C1) and keeps kalshi-venue fills on
+    # the moneyline book. (No-op for the PM-only games where kalshi is empty.)
+    if not kalshi.empty and "series" in kalshi.columns:
+        _kw = kalshi[kalshi["series"] == "KXNBAGAME"]
+        kalshi = _kw if not _kw.empty else kalshi
     if not kalshi.empty:
         k_subset = (
             kalshi[["minute_ts", "team", "yes_bid", "yes_ask", "mid"]]
@@ -242,12 +406,16 @@ def _build_bars(game: dict, venue: str) -> List[dict]:
             )
         )
         k_subset["minute_ts"] = k_subset["minute_ts"].astype("int64")
+        k_subset["kalshi_tick_ts"] = k_subset["minute_ts"]
         k_subset = k_subset.sort_values("minute_ts").reset_index(drop=True)
+        # Bound the fill: ~11% of Kalshi bars would otherwise forward-fill a
+        # quote hours old (measured 2026-05-29). Stale quotes drop to NaN.
         merged = pd.merge_asof(
             merged.sort_values("minute_ts"),
             k_subset,
             on="minute_ts",
             direction="backward",
+            tolerance=STALENESS_BOUND_SEC,
         )
     else:
         for col in (
@@ -255,11 +423,20 @@ def _build_bars(game: dict, venue: str) -> List[dict]:
             "kalshi_yes_bid",
             "kalshi_yes_ask",
             "kalshi_mid",
+            "kalshi_tick_ts",
         ):
             merged[col] = None
 
     # Convert to a list of plain dicts so downstream code never sees a
     # pandas Series (subtle bool/NaN comparison footguns).
+    # On-court lineup reconstruction for a TRUE lineup signature (fixes C3 — the
+    # old lineup_hash was a stub over star COUNTS). Built once per game from the
+    # real starters + subs; bars index into it by minute. Stable-hashed so the
+    # determinism gate holds.
+    home_tri = str(meta.get("home_tri")) if meta is not None and meta.get("home_tri") is not None else None
+    away_tri = str(meta.get("away_tri")) if meta is not None and meta.get("away_tri") is not None else None
+    _lin_minutes, _lin_states = _oncourt_timeline(subs, meta, home_tri, away_tri)
+
     bars: List[dict] = []
     for _, row in merged.iterrows():
         d = row.to_dict()
@@ -272,6 +449,16 @@ def _build_bars(game: dict, venue: str) -> List[dict]:
         else:
             d["pm_away_mid"] = None
             d["pm_home_mid"] = None
+        # Kalshi-implied HOME win prob from the winner-market mid (fixes C1:
+        # this key had no producer, so compute_kalshi_implied_wp was always None).
+        d["kalshi_home_winprob"] = _kalshi_home_wp(
+            d.get("kalshi_mid"), d.get("kalshi_team"), home_tri, away_tri
+        )
+        # Real on-court lineup signature (None when starters/subs insufficient).
+        d["lineup_sig"] = _lineup_sig_at(int(d["minute_ts"]), _lin_minutes, _lin_states)
+        # Quote freshness (forward-fill age); None when no in-bound quote (WS4).
+        d["pm_quote_age_sec"] = _quote_age(d["minute_ts"], d.get("pm_tick_ts"))
+        d["kalshi_quote_age_sec"] = _quote_age(d["minute_ts"], d.get("kalshi_tick_ts"))
         bars.append(d)
 
     return bars
@@ -483,9 +670,18 @@ def _build_context(
         cur_mark = None
         if venue is not None:
             cur_mark = _current_mark(bar, venue, position["side"])
+        # When no quote exists this bar we genuinely do NOT know the mark, so
+        # emit unrealized_pnl_bps=None (NOT a fabricated 0 via the entry price).
+        # A PnL-based TP/SL must not "see" break-even on a data-gap bar; the
+        # exit loop treats a None mark as "cannot evaluate -> hold" (fixes C6).
         if cur_mark is None:
-            # Fall back to entry price (zero unrealized PnL) when no quote.
-            cur_mark = position["entry_price"]
+            unrealized_pnl_bps = None
+        else:
+            unrealized_pnl_bps = (
+                (cur_mark - position["entry_price"])
+                / max(position["entry_price"], 1e-6)
+                * 10_000.0
+            )
         ctx.update(
             {
                 "pos_side": position["side"],
@@ -493,11 +689,7 @@ def _build_context(
                 "pos_entry_elapsed": position["entry_game_sec"],
                 "pos_size": position["size"],
                 "minutes_since_entry": (elapsed - position["entry_game_sec"]) / 60.0,
-                "unrealized_pnl_bps": (
-                    (cur_mark - position["entry_price"])
-                    / max(position["entry_price"], 1e-6)
-                    * 10_000.0
-                ),
+                "unrealized_pnl_bps": unrealized_pnl_bps,
             }
         )
 
@@ -592,15 +784,22 @@ def replay_game(
                 game_clock - position["entry_game_sec"] >= spec.time_stop_sec
             )
             explicit_exit = False
-            try:
-                for cond in spec.exit_conditions:
+            for cond in spec.exit_conditions:
+                try:
                     if eval_condition(cond, context):
                         explicit_exit = True
                         break
-            except Exception as exc:
-                skipped.append(
-                    f"bar@{int(bar['minute_ts'])}: exit-condition eval failed ({exc})"
-                )
+                except TypeError:
+                    # A condition referenced a None mark (no quote this bar):
+                    # a PnL-based exit cannot be evaluated on a data-gap bar, so
+                    # treat it as not-fired (hold) instead of faking 0 PnL or
+                    # aborting the remaining conditions. Part of C6.
+                    continue
+                except Exception as exc:
+                    skipped.append(
+                        f"bar@{int(bar['minute_ts'])}: exit-condition eval failed ({exc})"
+                    )
+                    break
 
             if explicit_exit or time_stop_fired:
                 exit_reason: str = (
@@ -885,7 +1084,10 @@ def _settle_position(
             mid = position["entry_price"]
         exit_price = float(mid)
         settle_value = None
-        exit_reason = forced_reason or "end_of_game"
+        # Outcome genuinely unknown -> mark honestly under a DISTINCT reason so
+        # it is auditable and never mistaken for a real 0/1 settlement. (In this
+        # cache home_won is present for all 1310 games, so this path is latent.)
+        exit_reason = forced_reason or "unknown_outcome_marked"
     else:
         won = home_won if position["side"] == "long_home" else (not home_won)
         exit_price = 1.0 if won else 0.0

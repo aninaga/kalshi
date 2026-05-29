@@ -79,19 +79,18 @@ def compute_recent_run_signed(bar: dict, _game_clock_sec: float) -> Optional[flo
 
 
 def compute_lineup_hash(bar: dict, _game_clock_sec: float) -> Optional[float]:
-    """Stable hash of the current on-court lineup state.
+    """Stable signature of the actual on-court 5-man units (home + away).
 
-    Wave 0 placeholder: derived from the home/away stars-on flags so that any
-    sub event that flips a star produces a different hash. Wave 1 will replace
-    this with a real lineup hash computed from the subs table.
+    The replay engine's ``_build_bars`` reconstructs the real on-court lineup
+    per minute from the ``starters_*`` metadata + the ``subs`` table and emits
+    it as ``lineup_sig`` (a STABLE hashlib digest — not Python's salted
+    ``hash()`` — so identical lineups map to identical signatures across
+    processes and the determinism gate holds). Returns None when the lineup
+    can't be reconstructed (starters/subs missing), so a strategy sees
+    "unknown" rather than a fabricated star-count collision. Replaces the
+    Wave-0 star-count stub (fixes C3).
     """
-    home_stars = bar.get("home_stars_on", 0)
-    away_stars = bar.get("away_stars_on", 0)
-    try:
-        key = (int(home_stars or 0), int(away_stars or 0))
-    except (TypeError, ValueError):
-        key = (0, 0)
-    return float(hash(key) & 0xFFFFFFFF)
+    return _to_float(bar.get("lineup_sig"))
 
 
 def compute_home_stars_on(bar: dict, _game_clock_sec: float) -> Optional[float]:
@@ -110,13 +109,27 @@ def compute_kalshi_implied_wp(bar: dict, _game_clock_sec: float) -> Optional[flo
 
 
 def compute_pm_implied_wp(bar: dict, _game_clock_sec: float) -> Optional[float]:
-    """Polymarket-implied home win probability (mid of yes_bid/yes_ask)."""
-    return _to_float(bar.get("pm_home_winprob"))
+    """Polymarket-implied home win probability.
+
+    The PM YES-token mid IS the implied home win probability. `_build_bars`
+    emits this as ``pm_home_mid`` (never ``pm_home_winprob`` — that key has no
+    producer anywhere in the repo), so reading the old key made this feature
+    PERMANENTLY None and silently broke every price-LEVEL gate (buy-cheap /
+    sell-rich / calcification). Fixed 2026-05-28.
+    """
+    return _to_float(bar.get("pm_home_mid"))
 
 
 def compute_lead_changes_cum(bar: dict, _game_clock_sec: float) -> Optional[float]:
-    """Cumulative lead changes from tip-off through the current bar."""
-    return _to_float(bar.get("lead_changes"))
+    """Cumulative lead changes from tip-off through the current bar.
+
+    Reads ``lead_changes_cum`` — the running total the replay engine derives in
+    ``_build_bars`` (cumsum of the lake's PER-MINUTE ``lead_changes`` column).
+    Reading the raw per-minute ``lead_changes`` (the old behaviour) made this
+    contractually-cumulative feature report only the current minute's count,
+    so any "total lead changes so far" gate was wrong (fixes C2).
+    """
+    return _to_float(bar.get("lead_changes_cum"))
 
 
 def compute_espn_home_winprob(bar: dict, _game_clock_sec: float) -> Optional[float]:

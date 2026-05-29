@@ -254,6 +254,16 @@ g4_rc=$?
 gate_result "live_safety_validator" "$g4_rc"
 
 # ---------------------------------------------------------------------------
+# Gate 5 — data quality (WS6): lake==cache, split⊆lake, feature coverage,
+# staleness bound holds, no forward leak in the frame.
+# ---------------------------------------------------------------------------
+echo ""
+echo "Gate 5: data quality"
+g5_rc=0
+"${PY}" -m research.scripts.check_data_quality --n-games 20 || g5_rc=$?
+gate_result "data_quality" "$g5_rc"
+
+# ---------------------------------------------------------------------------
 # Final
 # ---------------------------------------------------------------------------
 echo ""
