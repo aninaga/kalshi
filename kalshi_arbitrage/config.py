@@ -40,6 +40,12 @@ class Config:
     POLYMARKET_ESTIMATED_FEE_RATE_BPS = 1000
     POLYMARKET_PRICE_MIN = 0.0
     POLYMARKET_PRICE_MAX = 1.0
+    # (B3) Drop a cached book older than this from the ESTIMATED-opportunity path
+    # (the simulation path uses SIMULATION_MAX_ORDERBOOK_AGE_SECONDS separately).
+    ESTIMATED_MAX_ORDERBOOK_AGE_SECONDS = 30
+    # (B13) Reject a cross-venue pairing whose two books' timestamps differ by
+    # more than this, so both legs reflect a coherent as-of snapshot.
+    MAX_CROSS_VENUE_SKEW_SECONDS = 5
 
     # Stream subscription coverage (bounded to avoid overwhelming feeds)
     KALSHI_STREAM_SUBSCRIPTION_LIMIT = 100

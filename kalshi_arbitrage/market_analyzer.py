@@ -256,6 +256,10 @@ class MarketAnalyzer:
             'duration_seconds': scan_duration,
             'kalshi_markets_count': len(kalshi_markets),
             'polymarket_markets_count': len(polymarket_markets),
+            'catalog_status': {  # (B8) partial vs complete market-universe discovery
+                'kalshi_complete': not getattr(self.kalshi_client, 'catalog_truncated', False),
+                'kalshi_pages_fetched': getattr(self.kalshi_client, 'catalog_pages_fetched', None),
+            },
             'potential_matches': len(matches),
             'arbitrage_opportunities': len(opportunities),
             'synthetic_orderbook_opportunities': synthetic_orderbook_opportunities,
@@ -913,12 +917,15 @@ class MarketAnalyzer:
         for word in words:
             # Remove punctuation
             word = word.strip('.,!?()[]{}"\':;')
-            
-            # Keep meaningful terms (length > 2, not stop words, not numbers)
-            if (len(word) > 2 and 
-                word not in stop_words and 
-                not word.isdigit() and 
-                word.isalpha()):
+            if not word or word in stop_words:
+                continue
+            # (A8) KEEP numeric/alphanumeric tokens — years, dates, thresholds,
+            # strikes, percentages DEFINE the event. Dropping them (the old
+            # `not isdigit() and isalpha()` filter) let markets that differ only
+            # by a number (e.g. "2024" vs "2028", "above 3%" vs "5%") over-match.
+            if any(ch.isdigit() for ch in word):
+                key_terms.add(word)
+            elif len(word) > 2 and word.isalpha():
                 key_terms.add(word)
         
         # Cache the result
@@ -1221,6 +1228,28 @@ class MarketAnalyzer:
                     no_token_id = token_id
                     no_orderbook = ob
 
+        # Cross-venue as-of coherence (B13): both legs must reflect roughly the
+        # same instant. Drop a PM book whose timestamp is too far from the Kalshi
+        # book's so we never combine a Kalshi quote with a seconds-stale PM quote.
+        # (Books lacking a timestamp aren't over-rejected.)
+        _k_ts = kalshi_orderbook.get('timestamp')
+        _max_skew = getattr(Config, 'MAX_CROSS_VENUE_SKEW_SECONDS', 5)
+
+        def _skew_ok(book) -> bool:
+            if book is None:
+                return True
+            _b_ts = book.get('timestamp')
+            if _k_ts is None or _b_ts is None:
+                return True
+            return abs(float(_k_ts) - float(_b_ts)) <= _max_skew
+
+        if yes_orderbook is not None and not _skew_ok(yes_orderbook):
+            self.completeness_stats['data_staleness_warnings'] += 1
+            yes_token_id = yes_orderbook = None
+        if no_orderbook is not None and not _skew_ok(no_orderbook):
+            self.completeness_stats['data_staleness_warnings'] += 1
+            no_token_id = no_orderbook = None
+
         # Phase 2: Same-outcome strategies (existing logic, using YES orderbooks)
         if yes_orderbook:
             uses_synthetic = bool(kalshi_orderbook.get('is_synthetic')) or bool(yes_orderbook.get('is_synthetic'))
@@ -1324,6 +1353,15 @@ class MarketAnalyzer:
                 best_opportunity = opportunity_4
                 best_total_profit = opportunity_4['total_profit']
 
+        # (B16) Stamp per-opportunity data lineage (book source + age per leg) so
+        # consumers can distinguish a fresh-WS opportunity from a REST-fallback or
+        # synthetic one (the synthetic flag + match similarity are already present).
+        if best_opportunity is not None:
+            _pm_tok = best_opportunity.get('polymarket_token')
+            _pm_book = yes_orderbook if _pm_tok == yes_token_id else (
+                no_orderbook if _pm_tok == no_token_id else (yes_orderbook or no_orderbook))
+            best_opportunity['data_lineage'] = self._book_lineage(kalshi_orderbook, _pm_book)
+
         if best_opportunity and Config.EXECUTION_ENABLED:
             # Real or paper execution via ArbitrageExecutor
             result = await self.executor.execute_arbitrage(best_opportunity)
@@ -1424,11 +1462,20 @@ class MarketAnalyzer:
                 orderbook = await self.polymarket_client.get_market_orderbook(market_id, token_id)
 
             if orderbook:
-                self.completeness_stats['cache_hits'] += 1
-                self._scan_orderbook_hits[platform] = self._scan_orderbook_hits.get(platform, 0) + 1
-                orderbook_copy = dict(orderbook)
-                orderbook_copy.setdefault('is_synthetic', False)
-                return orderbook_copy
+                # Freshness gate (B3): a real cached book older than the
+                # estimated-path bound must NOT feed opportunity PnL — the sim
+                # path already enforces a max age; the estimated path did not.
+                # Books without a timestamp are treated as fresh (fixtures/legacy).
+                ts = orderbook.get('timestamp')
+                max_age = getattr(Config, 'ESTIMATED_MAX_ORDERBOOK_AGE_SECONDS', 30)
+                if ts is None or (time.time() - float(ts)) <= max_age:
+                    self.completeness_stats['cache_hits'] += 1
+                    self._scan_orderbook_hits[platform] = self._scan_orderbook_hits.get(platform, 0) + 1
+                    orderbook_copy = dict(orderbook)
+                    orderbook_copy.setdefault('is_synthetic', False)
+                    return orderbook_copy
+                # Stale -> unusable; count as a staleness-driven miss and fall through.
+                self.completeness_stats['data_staleness_warnings'] += 1
 
             self.completeness_stats['cache_misses'] += 1
             self._scan_orderbook_misses[platform] = self._scan_orderbook_misses.get(platform, 0) + 1
@@ -2120,10 +2167,19 @@ class MarketAnalyzer:
         )
         confidence += similarity * 0.6  # 60% weight for title similarity
         
-        # Time proximity (markets that close around the same time are more likely to be equivalent)
-        if kalshi_market.get('close_time') and polymarket_market.get('close_time'):
-            # Add logic to compare close times
-            confidence += 0.2  # Placeholder
+        # Time proximity: only boost when the two markets actually close near the
+        # same time, and PENALIZE a large gap (different settlement windows) — the
+        # old code added a flat +0.2 whenever both had a close_time. (B10)
+        k_close = self._parse_close_time(kalshi_market.get('close_time'))
+        p_close = self._parse_close_time(polymarket_market.get('close_time'))
+        if k_close is not None and p_close is not None:
+            gap_hours = abs((k_close - p_close).total_seconds()) / 3600.0
+            if gap_hours <= 1:
+                confidence += 0.2
+            elif gap_hours <= 24:
+                confidence += 0.1
+            else:
+                confidence -= 0.2
         
         # Volume and liquidity indicators
         k_volume = self._safe_float(kalshi_market.get('volume', 0))
@@ -2132,7 +2188,36 @@ class MarketAnalyzer:
             confidence += 0.2
         
         return min(confidence, 1.0)
-    
+
+    def _parse_close_time(self, value):
+        """Parse an ISO-8601 close time to a tz-aware datetime; None on failure. (B10)"""
+        if not value or not isinstance(value, str):
+            return None
+        try:
+            dt = datetime.fromisoformat(value.replace('Z', '+00:00'))
+        except (ValueError, TypeError):
+            return None
+        if dt.tzinfo is None:
+            from datetime import timezone
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+
+    def _book_lineage(self, kalshi_book: Dict, pm_book: Dict) -> Dict:
+        """Per-opportunity data lineage: source + age (s) for each leg's book. (B16)"""
+        now = time.time()
+
+        def _meta(b):
+            if not b:
+                return {'source': None, 'age_s': None, 'synthetic': None}
+            ts = b.get('timestamp')
+            return {
+                'source': b.get('source') or ('synthetic' if b.get('is_synthetic') else 'ws'),
+                'age_s': (round(now - float(ts), 2) if ts is not None else None),
+                'synthetic': bool(b.get('is_synthetic')),
+            }
+
+        return {'kalshi_book': _meta(kalshi_book), 'polymarket_book': _meta(pm_book)}
+
     def _safe_float(self, value) -> float:
         """Safely convert a value to float, handling strings and None."""
         if value is None:

@@ -215,8 +215,9 @@ _BOILERPLATE = frozenset({
     'reserve', 'gdp', 'growth', 'real', 'upper', 'bound',
     # Sports
     'championship', 'conference', 'game', 'match', 'season',
-    # Time
-    '2024', '2025', '2026', '2027', '2028', '2029', '2030',
+    # NOTE (A8): years are intentionally NOT boilerplate — a year (2024 vs 2028)
+    # DEFINES the event, so it must count as a distinguishing term that can
+    # penalize a divergent match rather than being ignored.
 })
 
 
