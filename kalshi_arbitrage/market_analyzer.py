@@ -2031,8 +2031,12 @@ class MarketAnalyzer:
     async def _create_synthetic_polymarket_orderbook(self, token_id: str) -> Optional[Dict]:
         """Create synthetic orderbook from WebSocket price data if detailed orderbook unavailable."""
         try:
-            # Get price from WebSocket cache
-            price_data = await self.polymarket_client.get_market_prices(token_id)
+            # (A9) get_market_prices is keyed by MARKET id, not token id — resolve
+            # the parent market first, else this returned {} and defaulted to
+            # 0.5/0.5 even when real cached prices existed.
+            market_id = self.polymarket_client.token_to_market.get(token_id)
+            price_data = (await self.polymarket_client.get_market_prices(market_id)
+                          if market_id else None)
             if not price_data or token_id not in price_data:
                 # Default prices if no data available
                 buy_price = 0.5
