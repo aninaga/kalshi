@@ -1,6 +1,12 @@
 """
 Redis-based caching layer for high-performance real-time data management.
 Provides fast access to market data, orderbooks, and arbitrage opportunities.
+
+NOTE (B5): this module is EXPERIMENTAL and currently OFF the active analyzer
+path — MarketAnalyzer uses the per-client in-memory caches, not CacheManager.
+It is retained for a future canonical caching layer. Migrated from the
+unmaintained ``aioredis`` to ``redis.asyncio`` (redis-py 4.2+) so it imports on
+Python 3.12+ (aioredis pulls the removed ``distutils`` and no longer installs).
 """
 
 import asyncio
@@ -10,7 +16,7 @@ import time
 from typing import Dict, List, Optional, Any, Union, Set, Tuple
 from datetime import datetime, timedelta
 from decimal import Decimal
-import aioredis
+import redis.asyncio as aioredis  # (B5) redis.asyncio replaces unmaintained aioredis
 from dataclasses import asdict
 import msgpack
 
@@ -137,12 +143,14 @@ class RedisCache:
     async def connect(self):
         """Establish Redis connection."""
         try:
-            self.redis = await aioredis.create_redis_pool(
+            # (B5) redis.asyncio (redis-py 4.2+) replaces aioredis.create_redis_pool.
+            # from_url returns a client backed by a connection pool (lazy connect,
+            # so no await); binary mode (decode_responses=False) for msgpack values.
+            self.redis = aioredis.from_url(
                 self.redis_url,
                 db=self.db,
-                minsize=5,
-                maxsize=self.max_connections,
-                encoding=None  # Use binary mode for msgpack
+                max_connections=self.max_connections,
+                decode_responses=False,
             )
             self._connected = True
             logger.info("Connected to Redis cache")

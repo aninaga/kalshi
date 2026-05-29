@@ -14,7 +14,7 @@ from .utils import clean_title, get_similarity_score, extract_stat_types, thresh
 from .config import Config
 from .mock_execution import MockExecutionEngine, FeeModel
 from .confirmed_pnl import ConfirmedPnLTracker
-from .websocket_client import RealTimeDataManager, StreamMessage
+from .websocket_client import StreamMessage
 from .arbitrage_executor import ArbitrageExecutor
 
 logger = logging.getLogger(__name__)
@@ -98,9 +98,16 @@ class MarketAnalyzer:
         # Load cached data if available
         await self._load_cache()
         
-        # Initialize real-time data streams (always enabled in WebSocket-only mode)
-        await self._initialize_realtime_streams()
-        
+        # (A5) Single WebSocket source of truth: the per-client websocket clients
+        # initialized above own the live caches the opportunity calc reads. Route
+        # the trade tape through them too (its only consumer was confirmed-PnL)
+        # instead of opening a SECOND, redundant RealTimeDataManager connection set
+        # whose price/orderbook cache the calc never read.
+        for _client in (self.kalshi_client, self.polymarket_client):
+            _ws = getattr(_client, 'websocket_client', None)
+            if _ws is not None and hasattr(_ws, 'add_message_handler'):
+                _ws.add_message_handler('trade', self._handle_realtime_trade_update)
+
         logger.info(f"Market Analyzer initialized successfully with {self.completeness_level} completeness level")
     
     async def shutdown(self):
@@ -2272,70 +2279,6 @@ class MarketAnalyzer:
         except Exception as e:
             logger.error(f"Error loading cache: {e}")
     
-    async def _initialize_realtime_streams(self):
-        """Initialize real-time WebSocket data streams (Phase 2)."""
-        try:
-            logger.info("Initializing real-time data streams...")
-            
-            # Create real-time data manager with config
-            kalshi_config = Config.WEBSOCKET_CONFIG['kalshi']
-            polymarket_config = Config.WEBSOCKET_CONFIG['polymarket']
-            
-            if kalshi_config.get('enabled') or polymarket_config.get('enabled'):
-                # Pass Kalshi auth token if available
-                kalshi_token = getattr(self.kalshi_client, 'auth_token', None)
-                self.realtime_manager = RealTimeDataManager(kalshi_config, polymarket_config, kalshi_token)
-                
-                # Set up data handlers for live updates
-                self.realtime_manager.add_data_handler('price_update', self._handle_realtime_price_update)
-                self.realtime_manager.add_data_handler('orderbook_update', self._handle_realtime_orderbook_update)
-                self.realtime_manager.add_data_handler('trade_update', self._handle_realtime_trade_update)
-                
-                # Start the real-time connections
-                await self.realtime_manager.start()
-                
-                logger.info("Real-time data streams initialized successfully")
-            else:
-                logger.info("Real-time streams disabled in configuration")
-                
-        except Exception as e:
-            logger.error(f"Failed to initialize real-time streams: {e}")
-            logger.info("Falling back to REST API polling")
-            self.realtime_enabled = False
-        try:
-            if self.simulation_engine:
-                await self.simulation_engine.close()
-        except Exception:
-            pass
-    
-    async def _handle_realtime_price_update(self, message: StreamMessage):
-        """Handle real-time price updates from WebSocket streams."""
-        market_key = f"{message.platform}:{message.market_id}"
-        
-        # Update live price cache
-        self.stream_data_cache['live_prices'][market_key] = message.data
-        self.stream_data_cache['update_times'][market_key] = message.timestamp
-        
-        # Log high-frequency updates at debug level
-        logger.debug(f"Price update for {market_key}: {message.data}")
-        
-        # Update completeness stats
-        self.completeness_stats['cache_hits'] += 1
-    
-    async def _handle_realtime_orderbook_update(self, message: StreamMessage):
-        """Handle real-time orderbook updates from WebSocket streams."""
-        market_key = f"{message.platform}:{message.market_id}"
-        
-        # Update live orderbook cache
-        self.stream_data_cache['live_orderbooks'][market_key] = message.data
-        self.stream_data_cache['update_times'][market_key] = message.timestamp
-        
-        # Log orderbook updates at debug level
-        logger.debug(f"Orderbook update for {market_key}")
-        
-        # Update completeness stats
-        self.completeness_stats['cache_hits'] += 1
-    
     async def _handle_realtime_trade_update(self, message: StreamMessage):
         """Handle real-time trade updates from WebSocket streams."""
         self.confirmed_pnl_tracker.ingest_trade_tape_event(
@@ -2348,108 +2291,3 @@ class MarketAnalyzer:
         # Log significant trades
         if message.data.get('count', 0) > 1000:  # Log large trades
             logger.info(f"Large trade on {message.platform}:{message.market_id}: {message.data}")
-    
-    def _get_live_data_freshness(self, platform: str, market_id: str) -> float:
-        """Get seconds since last live data update for a market."""
-        market_key = f"{platform}:{market_id}"
-        last_update = self.stream_data_cache['update_times'].get(market_key)
-        if last_update:
-            return datetime.now().timestamp() - last_update
-        return float('inf')
-    
-    def _is_live_data_fresh(self, platform: str, market_id: str) -> bool:
-        """Check if live data is fresh enough to use."""
-        freshness = self._get_live_data_freshness(platform, market_id)
-        return freshness <= Config.STREAM_FRESHNESS_THRESHOLD
-    
-    async def _get_market_prices_realtime(self, platform: str, market_id: str) -> Optional[Dict]:
-        """Get market prices from real-time stream if available and fresh."""
-        if not self.realtime_enabled or not self.realtime_manager:
-            return None
-        
-        market_key = f"{platform}:{market_id}"
-        
-        # Check if we have fresh live data
-        if self._is_live_data_fresh(platform, market_id):
-            live_data = self.stream_data_cache['live_prices'].get(market_key)
-            if live_data:
-                self.completeness_stats['cache_hits'] += 1
-                return live_data
-        
-        # Data is stale, increment staleness warning
-        if market_key in self.stream_data_cache['update_times']:
-            self.completeness_stats['data_staleness_warnings'] += 1
-            
-        return None
-    
-    def _convert_realtime_orderbook_format(self, realtime_data: Dict, platform: str) -> Dict:
-        """Convert real-time orderbook data to standard format."""
-        if platform == 'kalshi':
-            # Convert Kalshi real-time format to standard format
-            return {
-                'yes': {
-                    'asks': realtime_data.get('yes_asks', []),
-                    'bids': realtime_data.get('yes_bids', [])
-                },
-                'no': {
-                    'asks': realtime_data.get('no_asks', []),
-                    'bids': realtime_data.get('no_bids', [])
-                }
-            }
-        elif platform == 'polymarket':
-            # Convert Polymarket real-time format to standard format
-            outcome = realtime_data.get('outcome', 'yes')
-            return {
-                outcome: {
-                    'asks': realtime_data.get('asks', []),
-                    'bids': realtime_data.get('bids', [])
-                }
-            }
-        
-        return realtime_data
-    
-    async def _get_market_orderbook_realtime(self, platform: str, market_id: str) -> Optional[Dict]:
-        """Get market orderbook from real-time stream if available and fresh."""
-        if not self.realtime_enabled or not self.realtime_manager:
-            return None
-        
-        market_key = f"{platform}:{market_id}"
-        
-        # Check if we have fresh live data
-        if self._is_live_data_fresh(platform, market_id):
-            live_data = self.stream_data_cache['live_orderbooks'].get(market_key)
-            if live_data:
-                self.completeness_stats['cache_hits'] += 1
-                return live_data
-        
-        # Data is stale, increment staleness warning
-        if market_key in self.stream_data_cache['update_times']:
-            self.completeness_stats['data_staleness_warnings'] += 1
-            
-        return None
-    
-    def _convert_realtime_orderbook_format(self, realtime_data: Dict, platform: str) -> Dict:
-        """Convert real-time orderbook data to standard format."""
-        if platform == 'kalshi':
-            # Convert Kalshi real-time format to standard format
-            return {
-                'yes': {
-                    'asks': realtime_data.get('yes_asks', []),
-                    'bids': realtime_data.get('yes_bids', [])
-                },
-                'no': {
-                    'asks': realtime_data.get('no_asks', []),
-                    'bids': realtime_data.get('no_bids', [])
-                }
-            }
-        elif platform == 'polymarket':
-            # Convert Polymarket real-time format to standard format
-            outcome = realtime_data.get('outcome', 'yes')
-            return {
-                outcome: {
-                    'asks': realtime_data.get('asks', []),
-                    'bids': realtime_data.get('bids', [])
-                }
-            }
-        
-        return realtime_data

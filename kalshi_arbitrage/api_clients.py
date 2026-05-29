@@ -405,15 +405,25 @@ class KalshiClient:
             logger.warning(f"Event-based discovery failed (non-fatal): {e}")
 
     async def _handle_orderbook_update(self, message):
-        """Handle real-time orderbook updates."""
-        market_id = message.market_id
-        self.orderbook_cache[market_id] = {
-            'yes_asks': self._normalize_kalshi_levels(message.data.get('yes_asks', [])),
-            'yes_bids': self._normalize_kalshi_levels(message.data.get('yes_bids', [])),
-            'no_asks': self._normalize_kalshi_levels(message.data.get('no_asks', [])),
-            'no_bids': self._normalize_kalshi_levels(message.data.get('no_bids', [])),
-            'timestamp': message.timestamp
-        }
+        """Handle real-time Kalshi orderbook messages.
+
+        (B2) SAFETY: Kalshi's 'orderbook_delta' channel sends an initial snapshot
+        then INCREMENTAL deltas, and this client has no snapshot baseline /
+        sequence-application logic. Treating a delta as a full book (the previous
+        behavior — it overwrote the entire cached book from one delta message)
+        produced corrupted best bid/ask and false arbitrage. Until a proper
+        snapshot + sequenced-delta state machine exists, we do NOT overwrite the
+        executable orderbook cache from these messages; the opportunity path uses
+        the REST orderbook fallback (a real, complete book) gated by the B3
+        freshness check instead.
+        """
+        self._orderbook_delta_dropped = getattr(self, '_orderbook_delta_dropped', 0) + 1
+        if self._orderbook_delta_dropped <= 3 or self._orderbook_delta_dropped % 500 == 0:
+            logger.debug(
+                "Kalshi orderbook_delta for %s (seq=%s) not applied as a full book "
+                "(no snapshot/seq reconstruction); REST fallback supplies the book.",
+                message.market_id, getattr(message, 'sequence', None),
+            )
     
     async def get_all_markets(self) -> List[Dict[str, Any]]:
         """Get all markets from REST discovery + WebSocket data."""
