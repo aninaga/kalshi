@@ -436,14 +436,13 @@ class KalshiClient:
             market = self.markets_cache.get(market_ticker)
             if not market:
                 return None
-            
-            market_id = market.get('id')
-            if not market_id:
-                return None
-            
+
             async with aiohttp.ClientSession() as session:
-                # Get market data including current prices
-                url = f"{Config.KALSHI_API_BASE}/markets/{market_id}"
+                # Kalshi addresses markets by TICKER (our cache key), not the
+                # internal numeric id — mirror the orderbook REST fallback below.
+                # Using market.get('id') previously suppressed this fallback
+                # whenever id was absent and hit the wrong path segment. (A7)
+                url = f"{Config.KALSHI_API_BASE}/markets/{market_ticker}"
                 async with session.get(url) as response:
                     if response.status == 200:
                         data = await response.json()
@@ -915,6 +914,7 @@ class PolymarketClient:
         if Config.ORDERBOOK_REST_FALLBACK and self._orderbook_rest_budget > 0 and market_data:
             clob_ids = market_data.get('clob_token_ids', [])
             if clob_ids:
+                self._orderbook_rest_budget -= 1  # (A6) decrement like the token-specific path
                 return await self._fetch_orderbook_rest(clob_ids[0])
         return market_orderbooks
 

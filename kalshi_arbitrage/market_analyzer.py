@@ -207,6 +207,7 @@ class MarketAnalyzer:
         self._scan_orderbook_hits = {'kalshi': 0, 'polymarket': 0}
         self._scan_orderbook_misses = {'kalshi': 0, 'polymarket': 0}
         self._nearest_misses = []  # Track best rejected margins for diagnostics
+        self.reset_completeness_stats()  # (B14) per-scan; else the scan report shows LIFETIME totals
         self.kalshi_client.reset_rest_budget()
         self.polymarket_client._orderbook_rest_budget = Config.ORDERBOOK_REST_BUDGET_PER_SCAN
         
@@ -597,8 +598,12 @@ class MarketAnalyzer:
                     'raw_data': market
                 }
                 
-                # Only include markets with basic data
-                if processed_market['id'] and processed_market['title']:
+                # Only include ACTIVE markets with basic data — closed/settled/
+                # finalized Kalshi markets must not enter matching/pricing
+                # (mirrors the Polymarket active-status guard). (B6)
+                status = str(processed_market.get('status') or 'active').lower()
+                if (processed_market['id'] and processed_market['title']
+                        and status in {'active', 'open'}):
                     processed.append(processed_market)
                     
             except Exception as e:
@@ -2055,8 +2060,19 @@ class MarketAnalyzer:
         if total_cache_requests > 0:
             staleness_ratio = self.completeness_stats['data_staleness_warnings'] / total_cache_requests
             staleness_penalty = min(0.02, staleness_ratio * 0.1)
-        
-        estimated_completeness = max(0.5, base_completeness - truncation_penalty - staleness_penalty)
+
+        # Penalty for orderbook/cache MISSES — markets evaluated with no usable
+        # live book are the dominant real completeness loss, so more misses must
+        # strictly LOWER completeness (previously ignored, so misses could even
+        # raise it via the staleness-ratio denominator). (B15)
+        miss_penalty = 0.0
+        if total_cache_requests > 0:
+            miss_ratio = self.completeness_stats['cache_misses'] / total_cache_requests
+            miss_penalty = min(0.25, miss_ratio * 0.5)
+
+        estimated_completeness = max(
+            0.5, base_completeness - truncation_penalty - staleness_penalty - miss_penalty
+        )
         
         # Update estimated missed opportunities
         if estimated_completeness < 1.0:

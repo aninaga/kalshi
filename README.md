@@ -127,17 +127,12 @@ kalshi/
 │   ├── config.py                  # Configuration management
 │   ├── utils.py                   # Utility functions
 │   └── websocket_client.py        # Real-time streaming
-├── debug/                         # Debugging utilities
-│   ├── debug_arbitrage.py         # Comprehensive debugging tool
-│   ├── check_specific_prices.py   # Price verification utilities
-│   ├── check_polymarket_fields.py # API field inspection
-│   └── test_polymarket_api.py     # API exploration
-├── tests/                         # Test suites
-│   ├── test_all_methods.py        # Comprehensive system tests
-│   ├── test_lossless.py           # Phase 1 completeness testing
-│   └── test_phase2_realtime.py    # Phase 2 WebSocket testing
-├── demos/                         # Demonstration scripts
-│   └── demo_lossless_complete.py  # Full system demo
+├── tests/                         # Test suites (pytest; async via pytest-asyncio)
+│   ├── test_polymarket_websocket_parsing.py  # WS payload parsing
+│   ├── test_polymarket_data_quality.py       # price/orderbook validation
+│   ├── test_orderbook_quality_controls.py    # synthetic vs real orderbook gating
+│   ├── test_confirmed_pnl_tracker.py         # confirmed-PnL tracking
+│   └── test_enhanced_infrastructure.py       # risk engine / circuit breaker / monitoring
 ├── tools/                         # Analysis utilities
 │   ├── detailed_search.py         # Market search tool
 │   └── search_markets.py          # Data analysis utility
@@ -197,13 +192,17 @@ options:
 cp .env.example .env
 ```
 
-2. Add your Kalshi credentials:
+2. (Optional) Add Kalshi API credentials for the live WebSocket feed:
 ```
-KALSHI_EMAIL=your_email@example.com
-KALSHI_PASSWORD=your_password
+KALSHI_API_KEY=your_access_key_id
+KALSHI_PRIVATE_KEY_PATH=/absolute/path/to/kalshi_private_key.pem
 ```
+The bot signs WebSocket requests with an API key id + an RSA private key
+(RSA-PSS), **not** an email/password. The key may also live at the repo root
+as `kalshi_private_key.pem`.
 
-3. Without authentication, the system uses public endpoints (limited data)
+3. Without these, the client runs **REST-only**: public REST market data still
+   works, but there is no live Kalshi WebSocket feed.
 
 ## 📜 Legal & Compliance
 

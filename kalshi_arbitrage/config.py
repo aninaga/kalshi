@@ -14,7 +14,9 @@ class Config:
     
     # API Configuration
     KALSHI_API_BASE = "https://api.elections.kalshi.com/trade-api/v2"
-    # Note: Using public endpoints only - no credentials needed for read-only arbitrage detection
+    # Public REST market data needs no credentials. The live Kalshi WebSocket feed
+    # DOES require KALSHI_API_KEY + an RSA key (KALSHI_PRIVATE_KEY_PATH or a repo-root
+    # kalshi_private_key.pem); without them KalshiClient silently runs REST-only.
     
     POLYMARKET_GAMMA_BASE = "https://gamma-api.polymarket.com"
     POLYMARKET_CLOB_BASE = "https://clob.polymarket.com"
@@ -85,7 +87,11 @@ class Config:
     POLYMARKET_REFRESH_INTERVAL = 3600  # 1 hour between market refreshes
 
     # Fee Structure for analysis (more accurate rates)
-    KALSHI_FEE_RATE = 0.00  # Kalshi has no trading fees
+    # Kalshi DOES charge a taker fee (~0.07*C*p*(1-p); see FeeModel.kalshi_taker_fee,
+    # which is authoritative). This flat rate is only a coarse fallback — the
+    # estimated-opportunity path uses the real fee curve, NOT this 0.0. Do not
+    # treat Kalshi as fee-free.
+    KALSHI_FEE_RATE = 0.00
     POLYMARKET_FEE_RATE = 0.01  # ~1% conservative fallback (BPS model handles real calculations)
     POLYMARKET_GAS_FEE = 0.005  # ~0.5% typical gas fee
     POLYMARKET_PROTOCOL_FEE = 0.01  # ~1% protocol fee

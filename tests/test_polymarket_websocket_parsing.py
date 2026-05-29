@@ -68,7 +68,10 @@ async def test_handle_message_ignores_empty_and_counts_invalid_json():
 
     await client._handle_message("")
     await client._handle_message("   ")
-    await client._handle_message("not-json")
+    # JSON-shaped ('{') but malformed -> counts as invalid_json. (A bare
+    # "not-json" is NOT json-shaped and is deliberately bucketed separately as
+    # messages_ignored_non_json, so it would not exercise the invalid_json path.)
+    await client._handle_message("{not valid json")
 
     stats = client.get_stats()
     assert stats["messages_ignored_empty"] == 2

@@ -359,49 +359,6 @@ class KalshiWebSocketClient(WebSocketManager):
             logger.error(f"Error creating Kalshi WebSocket auth headers: {e}")
             return {}
 
-        
-        try:
-            # Load private key from file
-            key_path = '/Users/anirudh/Desktop/kalshi/kalshi_private_key.pem'
-            with open(key_path, 'rb') as key_file:
-                private_key = serialization.load_pem_private_key(
-                    key_file.read(),
-                    password=None
-                )
-            
-            # Create timestamp
-            timestamp = str(int(time.time() * 1000))
-            
-            # Create message to sign: timestamp + method + path
-            # For WebSocket, we sign the connection request
-            method = "GET"
-            path = "/trade-api/ws/v2"  # Back to full path
-            msg_string = timestamp + method + path
-            
-            # Sign the message using RSA-PSS
-            message = msg_string.encode('utf-8')
-            signature = private_key.sign(
-                message,
-                padding.PSS(
-                    mgf=padding.MGF1(hashes.SHA256()),
-                    salt_length=padding.PSS.DIGEST_LENGTH
-                ),
-                hashes.SHA256()
-            )
-            signature_b64 = base64.b64encode(signature).decode('utf-8')
-            
-            logger.debug(f"Kalshi WS auth - Method: {method}, Path: {path}, Timestamp: {timestamp}")
-            
-            return {
-                'Content-Type': 'application/json',
-                'KALSHI-ACCESS-KEY': kalshi_api_key,
-                'KALSHI-ACCESS-SIGNATURE': signature_b64,
-                'KALSHI-ACCESS-TIMESTAMP': timestamp
-            }
-        except Exception as e:
-            logger.error(f"Error creating Kalshi WebSocket auth headers: {e}")
-            return {}
-    
     async def connect(self):
         """Establish WebSocket connection with RSA authentication."""
         if self.session is None:
