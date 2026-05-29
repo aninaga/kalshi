@@ -206,6 +206,7 @@ def spawn_workers(
             claude_bin,
             "-p",
             "--dangerously-skip-permissions",
+            "--effort", "xhigh",  # max reasoning effort for research workers
         ]
         if model:
             argv.extend(["--model", model])

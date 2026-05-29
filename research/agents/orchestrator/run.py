@@ -628,6 +628,8 @@ class LoopConfig:
     creative_every: int  # creative-mode on iteration if iter % creative_every == 0
     claude_model: str | None = None
     cost_profile: str | None = None
+    codex_model: str | None = None
+    claude_prompt: str | None = None
 
 
 def run_loop(cfg: LoopConfig, logger: logging.Logger) -> int:
@@ -761,6 +763,7 @@ def run_loop(cfg: LoopConfig, logger: logging.Logger) -> int:
                         base_dir=cfg.experiments_base,
                         timeout_sec=cfg.codex_timeout_sec,
                         cost_profile=cfg.cost_profile,
+                        model_flag=(f"-m {cfg.codex_model} -c model_reasoning_effort=xhigh" if cfg.codex_model else None),
                     )
                 except FileNotFoundError as exc:
                     logger.error("cannot spawn codex workers: %r", exc)
@@ -778,6 +781,8 @@ def run_loop(cfg: LoopConfig, logger: logging.Logger) -> int:
                         timeout_sec=cfg.claude_timeout_sec,
                         model=cfg.claude_model,
                         cost_profile=cfg.cost_profile,
+                        prompt_path=(Path(cfg.claude_prompt) if cfg.claude_prompt
+                                     else claude_dispatcher.DEFAULT_PROMPT_PATH),
                     )
                 except FileNotFoundError as exc:
                     logger.warning(
@@ -1117,6 +1122,21 @@ def build_argparser() -> argparse.ArgumentParser:
         "RESEARCH_COST_PROFILE env var. Default: each worker's own default "
         "(pessimistic). Use 'live_pm' for realistic Polymarket cost.",
     )
+    p.add_argument(
+        "--codex-model",
+        type=str,
+        default=None,
+        help="Codex model slug passed to codex workers via '-m <model>' "
+        "(e.g. 'gpt-5.3-codex-spark' for the fresh-budget Spark bucket, or "
+        "'gpt-5.5' for the smarter/scarcer bucket). Default: codex config.toml.",
+    )
+    p.add_argument(
+        "--claude-prompt",
+        type=str,
+        default="research/agents/workers/claude_worker_prompt.md",
+        help="Prompt file for Claude workers (default: the creative/autonomous "
+        "claude_worker_prompt.md, distinct from the codex single-shot prompt).",
+    )
     return p
 
 
@@ -1143,6 +1163,8 @@ def main(argv: list[str] | None = None) -> int:
         creative_every=int(args.creative_every),
         claude_model=args.claude_model,
         cost_profile=args.cost_profile,
+        codex_model=args.codex_model,
+        claude_prompt=args.claude_prompt,
     )
     logger.info(
         "starting orchestrator: duration=%.1fh max_trials=%d codex_workers=%d "

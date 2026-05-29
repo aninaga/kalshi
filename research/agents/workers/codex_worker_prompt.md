@@ -398,5 +398,43 @@ test boundary and the registry will dedupe by spec_hash anyway.
   treat those as strong hints but you may deviate if you justify the
   deviation in `writeup.md`.
 
+---
+
+## 10. CRITICAL REGIME UPDATE (2026-05-28) — overrides older priors
+
+The replay engine was fixed and the feature set changed. These supersede any
+conflicting guidance above or in `direction.md`:
+
+1. **Honest execution latency.** Entries now fill at bar i+1 (one game-minute),
+   symmetric with exits — you CANNOT profit from reacting fast. **Momentum /
+   score-run continuation is DEAD**; every "ride the hot team" variant flips
+   negative under honest fills. Do NOT propose run-continuation, fade-momentum,
+   or any edge whose thesis is speed / early reaction. `recent_run_signed`
+   continuation is a confirmed artifact.
+
+2. **`pm_implied_wp` now WORKS** (it was permanently None before today). It is
+   the Polymarket mid = implied home win probability — **use it for price-LEVEL
+   gates**, the load-bearing signal for real edges:
+   - buy-cheap: long a deeply-trailing team while its price is depressed
+     (trailing-home `pm_implied_wp <= 0.18`, or trailing-away `>= 0.82`);
+   - sell-rich / fade an overpriced favorite the score doesn't justify;
+   - calcification: late, near-certain lead but price still `< 0.93` → long it.
+
+3. **Cost-robust mandate.** Realistic cost is ~2¢ round-trip; an edge is only
+   real if net-positive at 2¢ with `>=200` trades. Aim for a FAT per-trade
+   cushion (several ¢/contract gross) that comes from the PRICE LEVEL, not speed.
+
+4. **Target STRUCTURAL mispricings**: deep-deficit mean-reversion, rich-favorite
+   fade, favorite calcification, persistent (multi-minute) score-vs-price gaps.
+
+5. **Confirmed dead — do not propose**: momentum/run-continuation, fade-momentum,
+   high-pace-comeback, cross_market / kalshi_implied_wp (no Kalshi data in cache).
+
+6. **Registry routing**: call `run_backtest` WITHOUT `--registry-db` (the run is
+   routed to a scratch DB via the environment). Pass `--cost-profile live_pm`
+   and `--agent-id "codex:<your worker_id>"`.
+
+---
+
 Now: open `./direction.md`, write `./spec.json`, validate, write
 `./writeup.md`, run the backtest, write `./result.md`, exit.

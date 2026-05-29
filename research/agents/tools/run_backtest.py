@@ -297,8 +297,11 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--registry-db",
-        default=str(DEFAULT_REGISTRY_DB),
-        help="Override path to trials.db (for testing).",
+        default=None,
+        help="Override path to trials.db. If omitted, falls back to the "
+        "$RESEARCH_REGISTRY_DB env var, then the canonical "
+        "market_data/trials.db. Set the env var to a scratch DB for "
+        "speculative search so the canonical multiple-testing N isn't inflated.",
     )
     p.add_argument(
         "--audit-log",
@@ -382,7 +385,12 @@ def run(argv: Optional[List[str]] = None) -> int:
     command_argv = list(argv) if argv is not None else list(sys.argv[1:])
 
     audit_path = Path(args.audit_log)
-    registry_db = args.registry_db  # str ok for sqlite3
+    # Resolve registry path: explicit flag > $RESEARCH_REGISTRY_DB > canonical.
+    registry_db = (
+        args.registry_db
+        or os.environ.get("RESEARCH_REGISTRY_DB")
+        or str(DEFAULT_REGISTRY_DB)
+    )
     unlock_log = Path(args.unlock_log)
 
     # ---- Cost profile resolution: CLI arg > env var > default (pessimistic) ----
