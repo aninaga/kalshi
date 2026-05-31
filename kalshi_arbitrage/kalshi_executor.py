@@ -135,6 +135,7 @@ class KalshiOrderClient:
         count: int,
         price_cents: int,
         ttl_seconds: int = 0,
+        client_order_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Place a limit order on Kalshi.
 
@@ -171,6 +172,11 @@ class KalshiOrderClient:
         # Expiration for pseudo-IOC behavior
         if ttl_seconds > 0:
             body['expiration_ts'] = int(time.time()) + ttl_seconds
+
+        # Idempotency: a deterministic client order id lets a retry reuse the
+        # same id so the exchange de-dupes instead of creating a duplicate.
+        if client_order_id:
+            body['client_order_id'] = client_order_id
 
         logger.info(f"Kalshi place_order: {action} {count}x {side} @ {price_cents}c on {ticker}")
         result = await self._request('POST', '/portfolio/orders', body)

@@ -1,100 +1,179 @@
-"""Arbitrage execution orchestrator.
+"""Arbitrage execution orchestrator (Phase B).
 
-Fires both legs of an arbitrage simultaneously, confirms fills, and
-auto-hedges if one leg fails.  Supports paper mode (log-only) and
-live mode (real orders).
+Thin layer on top of the general-purpose execution engine
+(``kalshi_arbitrage.execution``). It builds two ``OrderRequest`` legs, fires
+them simultaneously through the ``ExecutionEngine`` (kill switch + per-venue
+circuit breaker + idempotent retries), and — when the legs don't fill equally —
+runs a **partial-fill-aware hedge that confirms its unwind** and trips the kill
+switch if the unwind can't complete.
+
+Arb-specific concerns only live here; all the reusable machinery is in
+``execution/``.
 """
 
 import asyncio
 import logging
 import time
 import uuid
-from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Dict, Optional, Tuple
 
 from .config import Config
 from .confirmed_pnl import ConfirmedPnLTracker
-from .kalshi_executor import KalshiOrderClient
-from .mock_execution import ExecutionResult, FeeModel
-from .polymarket_executor import PolymarketOrderClient
+from .execution import (
+    KALSHI,
+    POLYMARKET,
+    STATUS_FILLED,
+    STATUS_PARTIAL,
+    ExecutionEngine,
+    KalshiGateway,
+    KillSwitch,
+    OrderOutcome,
+    OrderRequest,
+    PolymarketGateway,
+)
+from .mock_execution import ExecutionResult, FeeModel, PolymarketFeeClient
+from .risk_engine import RiskEngine
 
 logger = logging.getLogger(__name__)
 
-
-@dataclass
-class LegResult:
-    """Result of executing one leg of the arbitrage."""
-    platform: str
-    order_id: Optional[str]
-    filled_size: float
-    avg_price: float
-    fees: float
-    status: str  # "filled", "partial", "failed", "paper"
-    raw: Optional[Dict] = None
+_EPS = 1e-6
 
 
 class ArbitrageExecutor:
     """Orchestrates simultaneous execution of two-legged arbitrage trades."""
 
     def __init__(self, pnl_tracker: Optional[ConfirmedPnLTracker] = None):
-        self.kalshi = KalshiOrderClient()
-        self.polymarket = PolymarketOrderClient()
+        self.kalshi_gateway = KalshiGateway()
+        self.polymarket_gateway = PolymarketGateway()
+        self.pm_fee_client = self.polymarket_gateway.fee_client
+        self.kill_switch = KillSwitch.instance()
+        self.engine = ExecutionEngine(
+            {KALSHI: self.kalshi_gateway, POLYMARKET: self.polymarket_gateway},
+            kill_switch=self.kill_switch,
+        )
+        self.risk_engine = RiskEngine()
         self.pnl_tracker = pnl_tracker
         self._daily_loss = 0.0
         self._daily_reset_date: Optional[str] = None
 
     async def close(self) -> None:
-        await self.kalshi.close()
-        await self.polymarket.close()
+        await self.kalshi_gateway.close()
+        await self.polymarket_gateway.close()
 
     # ------------------------------------------------------------------ #
     #  Main entry point                                                    #
     # ------------------------------------------------------------------ #
 
     async def execute_arbitrage(self, opportunity: Dict) -> ExecutionResult:
-        """Execute an arbitrage opportunity.
-
-        Returns an ExecutionResult compatible with the existing simulation
-        interface so it can be recorded via _record_execution_receipt().
-        """
         opp_id = opportunity.get('opportunity_id', f'opp-{uuid.uuid4().hex[:8]}')
-        strategy_type = opportunity.get('strategy_type', 'same_outcome')
         t0 = time.time()
 
-        # Pre-flight checks
-        rejection = self._pre_flight_checks(opportunity)
+        rejection = await self._pre_flight_checks(opportunity)
         if rejection:
             return self._skipped_result(opp_id, opportunity, rejection, t0)
 
-        if strategy_type == 'complementary':
-            return await self._execute_complementary(opportunity, opp_id, t0)
-        else:
-            return await self._execute_same_outcome(opportunity, opp_id, t0)
+        if Config.EXECUTION_MODE != 'live':
+            return await self._paper_result(opp_id, opportunity, t0)
+
+        legs = self._build_legs(opportunity)
+        if legs is None:
+            return self._skipped_result(opp_id, opportunity, 'unbuildable_legs', t0)
+        buy_req, sell_req = legs
+
+        try:
+            buy_out, sell_out = await asyncio.wait_for(
+                asyncio.gather(
+                    self.engine.execute(buy_req, stable_key=f"{opp_id}:buy"),
+                    self.engine.execute(sell_req, stable_key=f"{opp_id}:sell"),
+                    return_exceptions=True,
+                ),
+                timeout=Config.EXECUTION_TIMEOUT_SECONDS + Config.FILL_POLL_BUDGET_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            logger.error("Execution timeout for %s", opp_id)
+            return self._skipped_result(opp_id, opportunity, 'execution_timeout', t0)
+
+        buy_out = self._coerce_outcome(buy_out, buy_req)
+        sell_out = self._coerce_outcome(sell_out, sell_req)
+
+        matched = min(buy_out.filled_size, sell_out.filled_size)
+        imbalance = abs(buy_out.filled_size - sell_out.filled_size)
+
+        # Hedge any imbalance (including partial/partial) and confirm the unwind.
+        hedge_info = None
+        if imbalance > _EPS and Config.HEDGE_ENABLED:
+            hedge_info = await self._hedge(buy_req, buy_out, sell_req, sell_out)
+
+        if matched > _EPS:
+            return self._build_result(opp_id, opportunity, buy_out, sell_out,
+                                      matched, t0, hedge_info)
+
+        reason = 'partial_fill_hedged' if imbalance > _EPS else 'no_fill'
+        return self._skipped_result(opp_id, opportunity, reason, t0)
 
     # ------------------------------------------------------------------ #
     #  Pre-flight checks                                                   #
     # ------------------------------------------------------------------ #
 
-    def _pre_flight_checks(self, opp: Dict) -> Optional[str]:
+    async def _pre_flight_checks(self, opp: Dict) -> Optional[str]:
         """Return a rejection reason string, or None if checks pass."""
-        # Daily loss limit
+        active, why = self.kill_switch.is_active()
+        # In paper mode the master flag being off is expected — only the
+        # explicit sentinel / tripped flag should block a paper simulation.
+        if active and (Config.EXECUTION_MODE == 'live' or why != 'execution_disabled'):
+            return f'halted:{why}'
+
         self._maybe_reset_daily_loss()
         if self._daily_loss >= Config.MAX_DAILY_LOSS_USD:
             return 'daily_loss_limit'
 
-        # Position size cap
-        volume = float(opp.get('max_tradeable_volume', 0))
-        avg_price = float(opp.get('kalshi_price', 0.5))
-        notional = volume * avg_price
-        if notional > Config.MAX_POSITION_SIZE_USD:
-            # Clamp — don't reject, just cap later
-            pass
-
-        # Re-verify minimum profit
         total_profit = float(opp.get('total_profit', 0))
         if total_profit < Config.MIN_PROFIT_AFTER_FEES_USD:
             return 'below_min_profit'
 
+        # Risk gate (uses normalized books if the caller attached them).
+        if Config.RISK_GATE_ENABLED:
+            reason = await self._risk_gate(opp)
+            if reason:
+                return reason
+
+        # Balance gate (live only; best-effort — can't verify → warn, proceed).
+        if Config.EXECUTION_MODE == 'live' and Config.REQUIRE_BALANCE_CHECK:
+            reason = await self._balance_gate(opp)
+            if reason:
+                return reason
+
+        return None
+
+    async def _risk_gate(self, opp: Dict) -> Optional[str]:
+        try:
+            books = opp.get('risk_orderbooks') or (None, None)
+            kalshi_nob, poly_nob = books
+            assessment = await self.risk_engine.assess_opportunity(opp, kalshi_nob, poly_nob)
+            if float(assessment.total_risk_score) > Config.MAX_RISK_SCORE:
+                logger.warning("Risk gate rejected %s: score=%.1f",
+                               opp.get('opportunity_id'), float(assessment.total_risk_score))
+                return 'risk_too_high'
+            if float(assessment.confidence) < Config.MIN_RISK_CONFIDENCE:
+                return 'low_risk_confidence'
+        except Exception as exc:  # never let the risk model crash execution
+            logger.error("Risk gate error (proceeding): %s", exc)
+        return None
+
+    async def _balance_gate(self, opp: Dict) -> Optional[str]:
+        try:
+            volume = self._capped_volume(opp)
+            buy_platform = opp.get('buy_platform', '')
+            buy_price = self._buy_price(opp)
+            notional = volume * buy_price
+            gateway = self.kalshi_gateway if buy_platform == 'kalshi' else self.polymarket_gateway
+            balance = await gateway.get_balance()
+            if balance is not None and balance < notional:
+                logger.warning("Balance gate: need $%.2f have $%.2f on %s",
+                               notional, balance, buy_platform)
+                return 'insufficient_balance'
+        except Exception as exc:
+            logger.error("Balance gate error (proceeding): %s", exc)
         return None
 
     def _maybe_reset_daily_loss(self):
@@ -104,286 +183,176 @@ class ArbitrageExecutor:
             self._daily_reset_date = today
 
     # ------------------------------------------------------------------ #
-    #  Same-outcome execution (S1/S2)                                      #
+    #  Leg construction                                                    #
     # ------------------------------------------------------------------ #
 
-    async def _execute_same_outcome(self, opp: Dict, opp_id: str,
-                                    t0: float) -> ExecutionResult:
-        """Buy on one platform, sell on the other."""
-        buy_platform = opp.get('buy_platform', '')
-        sell_platform = opp.get('sell_platform', '')
+    def _buy_price(self, opp: Dict) -> float:
+        return (float(opp.get('kalshi_price', 0)) if opp.get('buy_platform') == 'kalshi'
+                else float(opp.get('polymarket_price', 0)))
+
+    def _build_legs(self, opp: Dict) -> Optional[Tuple[OrderRequest, OrderRequest]]:
+        """Translate an opportunity into two venue-agnostic OrderRequests."""
         ticker = opp.get('match_data', {}).get('kalshi_market', {}).get('id', '')
         token_id = opp.get('polymarket_token', '')
         volume = self._capped_volume(opp)
-        buy_price = float(opp.get('kalshi_price', 0)) if buy_platform == 'kalshi' else float(opp.get('polymarket_price', 0))
-        sell_price = float(opp.get('polymarket_price', 0)) if sell_platform == 'polymarket' else float(opp.get('kalshi_price', 0))
+        if volume <= 0:
+            return None
 
-        is_paper = Config.EXECUTION_MODE != 'live'
-
-        if is_paper:
-            return self._paper_result(opp_id, opp, buy_platform, sell_platform,
-                                      buy_price, sell_price, volume, t0)
-
-        # Fire both legs simultaneously
-        buy_coro = self._place_leg(buy_platform, 'buy', ticker, token_id,
-                                   buy_price, volume)
-        sell_coro = self._place_leg(sell_platform, 'sell', ticker, token_id,
-                                    sell_price, volume)
-
-        try:
-            buy_result, sell_result = await asyncio.wait_for(
-                asyncio.gather(buy_coro, sell_coro, return_exceptions=True),
-                timeout=Config.EXECUTION_TIMEOUT_SECONDS,
-            )
-        except asyncio.TimeoutError:
-            logger.error(f"Execution timeout for {opp_id}")
-            return self._skipped_result(opp_id, opp, 'execution_timeout', t0)
-
-        # Handle exceptions from gather
-        if isinstance(buy_result, Exception):
-            logger.error(f"Buy leg exception: {buy_result}")
-            buy_result = LegResult(buy_platform, None, 0, 0, 0, 'failed')
-        if isinstance(sell_result, Exception):
-            logger.error(f"Sell leg exception: {sell_result}")
-            sell_result = LegResult(sell_platform, None, 0, 0, 0, 'failed')
-
-        # Both filled
-        if buy_result.status in ('filled', 'partial') and sell_result.status in ('filled', 'partial'):
-            filled = min(buy_result.filled_size, sell_result.filled_size)
-            return self._build_result(opp_id, opp, buy_result, sell_result, filled, t0)
-
-        # One failed — hedge the other
-        if Config.HEDGE_ENABLED:
-            await self._hedge(buy_result, sell_result, ticker, token_id)
-
-        return self._skipped_result(opp_id, opp, 'partial_fill_hedged', t0)
-
-    # ------------------------------------------------------------------ #
-    #  Complementary execution (S3/S4)                                     #
-    # ------------------------------------------------------------------ #
-
-    async def _execute_complementary(self, opp: Dict, opp_id: str,
-                                     t0: float) -> ExecutionResult:
-        """Buy on both platforms (YES + NO for guaranteed $1 payout)."""
-        strategy = opp.get('strategy', '')
-        ticker = opp.get('match_data', {}).get('kalshi_market', {}).get('id', '')
-        token_id = opp.get('polymarket_token', '')
-        volume = self._capped_volume(opp)
-
-        # Determine which side on each platform
-        # S3: Buy Kalshi YES + Buy Poly NO
-        # S4: Buy Poly YES + Buy Kalshi NO
-        if 'S3' in strategy or 'Kalshi YES' in strategy:
-            kalshi_side = 'yes'
-            poly_side = 'BUY'  # buying NO token
-        else:
-            kalshi_side = 'no'
-            poly_side = 'BUY'  # buying YES token
-
+        strategy_type = opp.get('strategy_type', 'same_outcome')
         kalshi_price = float(opp.get('kalshi_price', 0))
         poly_price = float(opp.get('polymarket_price', 0))
 
-        is_paper = Config.EXECUTION_MODE != 'live'
-        if is_paper:
-            return self._paper_result(opp_id, opp, 'kalshi', 'polymarket',
-                                      kalshi_price, poly_price, volume, t0)
-
-        # Fire both legs
-        kalshi_coro = self._place_kalshi_order(
-            ticker, kalshi_side, 'buy', volume, kalshi_price)
-        poly_coro = self._place_polymarket_order(
-            token_id, poly_side, poly_price, volume)
-
-        try:
-            k_result, p_result = await asyncio.wait_for(
-                asyncio.gather(kalshi_coro, poly_coro, return_exceptions=True),
-                timeout=Config.EXECUTION_TIMEOUT_SECONDS,
+        if strategy_type == 'complementary':
+            # Both legs are buys of complementary outcomes → guaranteed $1.
+            strategy = opp.get('strategy', '')
+            kalshi_side = 'yes' if ('S3' in strategy or 'Kalshi YES' in strategy) else 'no'
+            buy_req = OrderRequest(
+                venue=KALSHI, action='buy', size=volume, limit_price=kalshi_price,
+                ticker=ticker, outcome_side=kalshi_side, tif='IOC',
+                meta={'opportunity_id': opp.get('opportunity_id'), 'leg': 'kalshi'},
             )
-        except asyncio.TimeoutError:
-            logger.error(f"Complementary execution timeout for {opp_id}")
-            return self._skipped_result(opp_id, opp, 'execution_timeout', t0)
+            sell_req = OrderRequest(
+                venue=POLYMARKET, action='buy', size=volume, limit_price=poly_price,
+                token_id=token_id, tif=Config.POLYMARKET_ORDER_TYPE,
+                meta={'opportunity_id': opp.get('opportunity_id'), 'leg': 'polymarket'},
+            )
+            return buy_req, sell_req
 
-        if isinstance(k_result, Exception):
-            logger.error(f"Kalshi leg exception: {k_result}")
-            k_result = LegResult('kalshi', None, 0, 0, 0, 'failed')
-        if isinstance(p_result, Exception):
-            logger.error(f"Poly leg exception: {p_result}")
-            p_result = LegResult('polymarket', None, 0, 0, 0, 'failed')
-
-        if k_result.status in ('filled', 'partial') and p_result.status in ('filled', 'partial'):
-            filled = min(k_result.filled_size, p_result.filled_size)
-            return self._build_result(opp_id, opp, k_result, p_result, filled, t0)
-
-        if Config.HEDGE_ENABLED:
-            await self._hedge(k_result, p_result, ticker, token_id)
-
-        return self._skipped_result(opp_id, opp, 'partial_fill_hedged', t0)
-
-    # ------------------------------------------------------------------ #
-    #  Leg execution helpers                                               #
-    # ------------------------------------------------------------------ #
-
-    async def _place_leg(self, platform: str, action: str, ticker: str,
-                         token_id: str, price: float, volume: float) -> LegResult:
-        """Route a leg to the correct platform executor."""
-        if platform == 'kalshi':
-            return await self._place_kalshi_order(ticker, 'yes', action, volume, price)
+        # Same-outcome: buy on one venue, sell on the other.
+        buy_platform = opp.get('buy_platform', '')
+        if buy_platform == 'kalshi':
+            buy_req = OrderRequest(
+                venue=KALSHI, action='buy', size=volume, limit_price=kalshi_price,
+                ticker=ticker, outcome_side='yes', tif='IOC',
+                meta={'opportunity_id': opp.get('opportunity_id'), 'leg': 'kalshi_buy'},
+            )
+            sell_req = OrderRequest(
+                venue=POLYMARKET, action='sell', size=volume, limit_price=poly_price,
+                token_id=token_id, tif=Config.POLYMARKET_ORDER_TYPE,
+                meta={'opportunity_id': opp.get('opportunity_id'), 'leg': 'poly_sell'},
+            )
         else:
-            side = 'BUY' if action == 'buy' else 'SELL'
-            return await self._place_polymarket_order(token_id, side, price, volume)
+            buy_req = OrderRequest(
+                venue=POLYMARKET, action='buy', size=volume, limit_price=poly_price,
+                token_id=token_id, tif=Config.POLYMARKET_ORDER_TYPE,
+                meta={'opportunity_id': opp.get('opportunity_id'), 'leg': 'poly_buy'},
+            )
+            sell_req = OrderRequest(
+                venue=KALSHI, action='sell', size=volume, limit_price=kalshi_price,
+                ticker=ticker, outcome_side='yes', tif='IOC',
+                meta={'opportunity_id': opp.get('opportunity_id'), 'leg': 'kalshi_sell'},
+            )
+        return buy_req, sell_req
 
-    async def _place_kalshi_order(self, ticker: str, side: str, action: str,
-                                  volume: float, price: float) -> LegResult:
-        """Place a Kalshi order and return a LegResult."""
-        count = int(volume)
-        if count <= 0:
-            return LegResult('kalshi', None, 0, 0, 0, 'failed')
+    @staticmethod
+    def _coerce_outcome(result, req: OrderRequest) -> OrderOutcome:
+        if isinstance(result, OrderOutcome):
+            return result
+        if isinstance(result, Exception):
+            logger.error("Leg %s raised: %s", req.venue, result)
+        return OrderOutcome.failed(req.venue, req.size, "leg_exception")
 
-        price_cents = max(1, min(99, int(round(price * 100))))
-        resp = await self.kalshi.place_order(ticker, side, action, count, price_cents)
+    # ------------------------------------------------------------------ #
+    #  Partial-fill-aware hedge with confirmed unwind                      #
+    # ------------------------------------------------------------------ #
 
-        if 'error' in resp:
-            return LegResult('kalshi', None, 0, 0, 0, 'failed', resp)
+    async def _hedge(self, buy_req: OrderRequest, buy_out: OrderOutcome,
+                     sell_req: OrderRequest, sell_out: OrderOutcome) -> Dict:
+        """Unwind the *imbalance* between the two legs and confirm it filled.
 
-        order = resp.get('order', {})
-        order_id = order.get('order_id', '')
-        status = order.get('status', '')
+        Unlike the old hedge (which only acted when one leg was exactly zero),
+        this handles any partial/partial mismatch: it computes the over-filled
+        quantity, fires the opposite order for exactly that size at a price
+        concession for a fast fill, and polls it to a terminal state. If the
+        unwind cannot complete, it records the residual exposure and trips the
+        kill switch — an un-hedged position must stop all further trading.
+        """
+        imbalance = buy_out.filled_size - sell_out.filled_size
+        qty = abs(imbalance)
+        if qty <= _EPS:
+            return {'hedged': True, 'residual': 0.0}
 
-        # Kalshi may fill immediately or need polling
-        if status in ('executed', 'filled'):
-            filled = float(order.get('count_filled', count))
-            avg_p = float(order.get('average_fill_price', price_cents)) / 100.0
-            fees = FeeModel.kalshi_taker_fee(avg_p, filled)
-            return LegResult('kalshi', order_id, filled, avg_p, fees, 'filled', resp)
+        # The over-filled leg is the one we must unwind back toward neutral.
+        over_req, over_out = (buy_req, buy_out) if imbalance > 0 else (sell_req, sell_out)
+        unwind_req = self._build_unwind_request(over_req, over_out, qty)
 
-        # Poll briefly for fill
-        filled, avg_p = await self._poll_kalshi_fill(order_id, count, price_cents)
-        fees = FeeModel.kalshi_taker_fee(avg_p, filled) if filled > 0 else 0.0
-        st = 'filled' if filled >= count else ('partial' if filled > 0 else 'failed')
-        return LegResult('kalshi', order_id, filled, avg_p, fees, st, resp)
+        logger.warning("Hedging imbalance of %.4f via %s %s on %s",
+                       qty, unwind_req.action, unwind_req.venue,
+                       unwind_req.ticker or unwind_req.token_id)
 
-    async def _poll_kalshi_fill(self, order_id: str, expected: int,
-                                price_cents: int) -> tuple:
-        """Poll Kalshi order for up to 3 seconds. Returns (filled, avg_price)."""
-        for _ in range(6):
-            await asyncio.sleep(0.5)
-            resp = await self.kalshi.get_order(order_id)
-            order = resp.get('order', {})
-            status = order.get('status', '')
-            filled = float(order.get('count_filled', 0))
-            if status in ('executed', 'filled', 'canceled', 'expired'):
-                avg_p = float(order.get('average_fill_price', price_cents)) / 100.0
-                return filled, avg_p
-        return 0, price_cents / 100.0
+        outcome = await self.engine.execute(
+            unwind_req, stable_key=f"{over_req.meta.get('opportunity_id')}:hedge")
+        residual = qty - outcome.filled_size
 
-    async def _place_polymarket_order(self, token_id: str, side: str,
-                                      price: float, volume: float) -> LegResult:
-        """Place a Polymarket order and return a LegResult."""
-        resp = await self.polymarket.place_order(
-            token_id=token_id,
-            side=side,
-            price=price,
-            size=volume,
-            order_type=Config.POLYMARKET_ORDER_TYPE,
-            ttl_seconds=Config.KALSHI_ORDER_TTL_SECONDS,
+        if residual > max(_EPS, qty * 0.01):
+            logger.critical("UNWIND INCOMPLETE: residual %.4f on %s — tripping kill switch",
+                            residual, unwind_req.venue)
+            self.kill_switch.trip(f"unwind_failed:{over_req.meta.get('opportunity_id')}")
+            self._record_residual_exposure(over_req, residual, over_out.avg_price)
+
+        return {
+            'hedged': residual <= max(_EPS, qty * 0.01),
+            'residual': residual,
+            'unwind_order_id': outcome.order_id,
+            'unwind_filled': outcome.filled_size,
+        }
+
+    def _build_unwind_request(self, req: OrderRequest, out: OrderOutcome,
+                              qty: float) -> OrderRequest:
+        """Opposite of ``req`` for ``qty`` units, priced to cross for a fast fill."""
+        opposite = 'sell' if req.action == 'buy' else 'buy'
+        concession = Config.HEDGE_PRICE_CONCESSION
+        ref = out.avg_price or req.limit_price
+        # To fill fast: a sell crosses down, a buy crosses up.
+        price = ref - concession if opposite == 'sell' else ref + concession
+        price = min(0.99, max(0.01, price))
+        return OrderRequest(
+            venue=req.venue, action=opposite, size=qty, limit_price=price,
+            ticker=req.ticker, outcome_side=req.outcome_side, token_id=req.token_id,
+            tif='FOK' if req.venue == POLYMARKET else 'IOC',
+            ttl_seconds=Config.HEDGE_TIMEOUT_SECONDS,
+            meta={**req.meta, 'hedge': True},
         )
 
-        if isinstance(resp, dict) and resp.get('error'):
-            return LegResult('polymarket', None, 0, 0, 0, 'failed', resp)
-
-        order_id = resp.get('orderID', '') if isinstance(resp, dict) else ''
-        if not order_id:
-            return LegResult('polymarket', None, 0, 0, 0, 'failed', resp)
-
-        # For FOK, the order is either fully filled or fully rejected
-        # For GTD/GTC, we need to poll
-        if Config.POLYMARKET_ORDER_TYPE == 'FOK':
-            # FOK: check if success flag is present
-            success = resp.get('success', False) if isinstance(resp, dict) else False
-            if success:
-                return LegResult('polymarket', order_id, volume, price, 0, 'filled', resp)
-            else:
-                return LegResult('polymarket', order_id, 0, 0, 0, 'failed', resp)
-
-        # Poll for GTD/GTC fills
-        filled, avg_p = await self._poll_polymarket_fill(order_id, volume, price)
-        st = 'filled' if filled >= volume * 0.95 else ('partial' if filled > 0 else 'failed')
-        return LegResult('polymarket', order_id, filled, avg_p, 0, st, resp)
-
-    async def _poll_polymarket_fill(self, order_id: str, expected: float,
-                                    price: float) -> tuple:
-        """Poll Polymarket order for up to 3 seconds."""
-        for _ in range(6):
-            await asyncio.sleep(0.5)
-            resp = await self.polymarket.get_order(order_id)
-            if isinstance(resp, dict):
-                status = resp.get('status', '')
-                matched = float(resp.get('size_matched', 0))
-                if status in ('matched', 'canceled', 'expired'):
-                    return matched, price
-        return 0, price
-
-    # ------------------------------------------------------------------ #
-    #  Hedging                                                             #
-    # ------------------------------------------------------------------ #
-
-    async def _hedge(self, leg_a: LegResult, leg_b: LegResult,
-                     ticker: str, token_id: str) -> None:
-        """Attempt to unwind a filled leg when the other leg failed."""
-        filled_leg = None
-        if leg_a.filled_size > 0 and leg_b.filled_size == 0:
-            filled_leg = leg_a
-        elif leg_b.filled_size > 0 and leg_a.filled_size == 0:
-            filled_leg = leg_b
-        else:
-            return  # Both failed or both partially filled — nothing clean to hedge
-
-        logger.warning(
-            f"Hedging: unwinding {filled_leg.filled_size} on {filled_leg.platform} "
-            f"(order {filled_leg.order_id})"
-        )
-
+    def _record_residual_exposure(self, req: OrderRequest, qty: float, price: float) -> None:
+        if self.pnl_tracker is None:
+            return
         try:
-            if filled_leg.platform == 'kalshi':
-                # Sell back what we bought
-                await self.kalshi.place_order(
-                    ticker, 'yes', 'sell',
-                    int(filled_leg.filled_size),
-                    max(1, int(round(filled_leg.avg_price * 100)) - 1),  # 1c worse for fast fill
-                    ttl_seconds=10,
-                )
-            else:
-                await self.polymarket.place_order(
-                    token_id, 'SELL', filled_leg.avg_price * 0.99,
-                    filled_leg.filled_size, 'FOK',
-                )
-        except Exception as e:
-            logger.error(f"Hedge failed: {e}")
+            self.pnl_tracker.record_execution_receipt(
+                opportunity_id=req.meta.get('opportunity_id', 'unknown'),
+                buy_platform=req.venue, sell_platform=req.venue,
+                buy_price=price, buy_size=qty, buy_fee=0.0,
+                sell_price=0.0, sell_size=0.0, sell_fee=0.0,
+                source='exchange',
+                metadata={'residual_exposure': True, 'reason': 'unwind_failed'},
+                mark_confirmed=False, mark_settled=False,
+            )
+        except Exception as exc:
+            logger.error("Failed to record residual exposure: %s", exc)
 
     # ------------------------------------------------------------------ #
     #  Result builders                                                     #
     # ------------------------------------------------------------------ #
 
     def _capped_volume(self, opp: Dict) -> float:
-        """Cap volume to MAX_POSITION_SIZE_USD."""
         volume = float(opp.get('max_tradeable_volume', 0))
-        avg_price = max(float(opp.get('kalshi_price', 0.5)), 0.01)
+        avg_price = max(self._buy_price(opp), 0.01)
         max_shares = Config.MAX_POSITION_SIZE_USD / avg_price
         return min(volume, max_shares)
 
-    def _build_result(self, opp_id: str, opp: Dict, buy: LegResult,
-                      sell: LegResult, filled: float,
-                      t0: float) -> ExecutionResult:
+    def _build_result(self, opp_id: str, opp: Dict, buy: OrderOutcome,
+                      sell: OrderOutcome, filled: float, t0: float,
+                      hedge_info: Optional[Dict]) -> ExecutionResult:
         gross = sell.avg_price * filled - buy.avg_price * filled
         net = gross - buy.fees - sell.fees
-        self._daily_loss -= net  # net is positive for profit, so subtract
+        self._daily_loss -= net  # net positive → reduces daily loss
         latency = int((time.time() - t0) * 1000)
         exec_id = f"exec-{uuid.uuid4().hex[:16]}"
 
         return ExecutionResult(
             opportunity_id=opp_id,
-            buy_platform=buy.platform,
-            sell_platform=sell.platform,
+            buy_platform=buy.venue,
+            sell_platform=sell.venue,
             requested_volume=float(opp.get('max_tradeable_volume', 0)),
             filled_volume=filled,
             avg_buy_price=buy.avg_price,
@@ -392,7 +361,7 @@ class ArbitrageExecutor:
             sell_fees=sell.fees,
             gross_profit=gross,
             net_profit=net,
-            profit_margin=(net / (buy.avg_price * filled)) if filled > 0 else 0,
+            profit_margin=(net / (buy.avg_price * filled)) if filled > 0 and buy.avg_price > 0 else 0,
             latency_ms=latency,
             timestamp=time.time(),
             execution_id=exec_id,
@@ -401,25 +370,31 @@ class ArbitrageExecutor:
             confirmation_source='exchange',
         )
 
-    def _paper_result(self, opp_id: str, opp: Dict, buy_platform: str,
-                      sell_platform: str, buy_price: float,
-                      sell_price: float, volume: float,
-                      t0: float) -> ExecutionResult:
-        """Simulate a fill in paper mode — log but don't place real orders."""
+    async def _leg_fee(self, platform: str, token_id: str, price: float, size: float) -> float:
+        if platform == 'kalshi':
+            return FeeModel.kalshi_taker_fee(price, size)
+        bps = await self.pm_fee_client.get_fee_rate_bps(token_id) or Config.POLYMARKET_ESTIMATED_FEE_RATE_BPS
+        return FeeModel.polymarket_taker_fee(price, size, bps)
+
+    async def _paper_result(self, opp_id: str, opp: Dict, t0: float) -> ExecutionResult:
+        """Simulate a fill in paper mode using REAL fee models on both venues."""
+        buy_platform = opp.get('buy_platform', 'kalshi')
+        sell_platform = opp.get('sell_platform', 'polymarket')
+        token_id = opp.get('polymarket_token', '')
+        volume = self._capped_volume(opp)
+        buy_price = self._buy_price(opp)
+        sell_price = (float(opp.get('polymarket_price', 0)) if sell_platform == 'polymarket'
+                      else float(opp.get('kalshi_price', 0)))
+
         gross = (sell_price - buy_price) * volume
-        # Use FeeModel for realistic fee estimates
-        buy_fees = FeeModel.kalshi_taker_fee(buy_price, volume) if buy_platform == 'kalshi' else 0
-        sell_fees = FeeModel.kalshi_taker_fee(sell_price, volume) if sell_platform == 'kalshi' else 0
+        buy_fees = await self._leg_fee(buy_platform, token_id, buy_price, volume)
+        sell_fees = await self._leg_fee(sell_platform, token_id, sell_price, volume)
         net = gross - buy_fees - sell_fees
         latency = int((time.time() - t0) * 1000)
-        exec_id = f"paper-{uuid.uuid4().hex[:16]}"
 
-        logger.info(
-            f"[PAPER] {opp.get('strategy', '?')}: "
-            f"buy {volume:.0f}x @ {buy_price:.4f} on {buy_platform}, "
-            f"sell @ {sell_price:.4f} on {sell_platform} → "
-            f"gross=${gross:.2f} net=${net:.2f}"
-        )
+        logger.info("[PAPER] %s: buy %.0fx @ %.4f on %s, sell @ %.4f on %s → gross=$%.2f net=$%.2f",
+                    opp.get('strategy', '?'), volume, buy_price, buy_platform,
+                    sell_price, sell_platform, gross, net)
 
         return ExecutionResult(
             opportunity_id=opp_id,
@@ -436,7 +411,7 @@ class ArbitrageExecutor:
             profit_margin=(net / (buy_price * volume)) if volume > 0 and buy_price > 0 else 0,
             latency_ms=latency,
             timestamp=time.time(),
-            execution_id=exec_id,
+            execution_id=f"paper-{uuid.uuid4().hex[:16]}",
             confirmation_source='paper',
         )
 

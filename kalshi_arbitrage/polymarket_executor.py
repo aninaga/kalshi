@@ -199,6 +199,51 @@ class PolymarketOrderClient:
             logger.error(f"Polymarket get_order error for {order_id}: {e}")
             return {'error': str(e)}
 
+    # ---- Account ----
+
+    async def get_balance_usdc(self) -> Optional[float]:
+        """Return available collateral (USDC) balance, or None if unavailable.
+
+        Required for a pre-trade balance gate. py-clob-client exposes balance/
+        allowance via ``get_balance_allowance``; SDK shapes vary, so parse
+        defensively and convert from 6-decimal USDC base units when needed.
+        """
+        try:
+            client = self._get_client()
+            _ensure_sdk()
+            params = None
+            if hasattr(_clob_types, "BalanceAllowanceParams"):
+                asset_type = getattr(_clob_types, "AssetType", None)
+                collateral = getattr(asset_type, "COLLATERAL", None) if asset_type else None
+                params = _clob_types.BalanceAllowanceParams(asset_type=collateral) if collateral else _clob_types.BalanceAllowanceParams()
+            resp = await asyncio.to_thread(client.get_balance_allowance, params)
+            if not isinstance(resp, dict):
+                return None
+            raw = resp.get("balance")
+            if raw is None:
+                return None
+            val = float(raw)
+            # Heuristic: CLOB returns USDC in 6-decimal base units.
+            return val / 1_000_000 if val > 10_000 else val
+        except Exception as e:
+            logger.error(f"Polymarket get_balance error: {e}")
+            return None
+
+    async def get_positions(self) -> List[Dict]:
+        """Return current positions. Best-effort; returns [] if unsupported."""
+        try:
+            client = self._get_client()
+            if hasattr(client, "get_positions"):
+                resp = await asyncio.to_thread(client.get_positions)
+                if isinstance(resp, list):
+                    return resp
+                if isinstance(resp, dict):
+                    return resp.get("positions", [])
+            return []
+        except Exception as e:
+            logger.error(f"Polymarket get_positions error: {e}")
+            return []
+
     # ---- Convenience ----
 
     async def buy(self, token_id: str, price: float, size: float,

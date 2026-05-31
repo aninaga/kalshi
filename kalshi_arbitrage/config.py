@@ -183,6 +183,32 @@ class Config:
     HEDGE_ENABLED = True  # Auto-hedge on partial fill (unwind filled leg)
     MIN_PROFIT_AFTER_FEES_USD = 0.50  # Re-verify profit before firing orders
 
+    # --- Execution hardening (Phase B) ---
+    # Distinct Polymarket order TTL (previously the Kalshi TTL was reused — a bug).
+    POLYMARKET_ORDER_TTL_SECONDS = 5
+    POLYMARKET_FLAT_TAKER_RATE = 0.02  # flat 2% taker piece (see FeeModel)
+    # Idempotency + retries for transient order-placement failures.
+    EXECUTION_MAX_RETRIES = 2
+    EXECUTION_RETRY_BASE_DELAY = 0.5   # seconds; exponential backoff base
+    # Fill polling: exponential backoff up to a total budget (replaces fixed 3s).
+    FILL_POLL_BUDGET_SECONDS = 15.0
+    FILL_POLL_BASE_INTERVAL = 0.25
+    FILL_POLL_MAX_INTERVAL = 2.0
+    # Hedge / unwind confirmation.
+    HEDGE_TIMEOUT_SECONDS = 15
+    HEDGE_PRICE_CONCESSION = 0.02      # cross this far through book for a fast unwind
+    # Pre-trade risk gate (RiskEngine total_risk_score is 0..100).
+    RISK_GATE_ENABLED = True
+    MAX_RISK_SCORE = 60.0
+    MIN_RISK_CONFIDENCE = 0.3
+    # Execution-level circuit breaker (per venue) thresholds.
+    EXECUTION_CB_FAILURE_THRESHOLD = 4
+    EXECUTION_CB_RECOVERY_TIMEOUT = 120
+    # Kill switch: presence of this file (under DATA_DIR) halts all order placement.
+    EXECUTION_HALT_SENTINEL = "EXECUTION_HALT"
+    # Pre-trade balance check (requires live account credentials).
+    REQUIRE_BALANCE_CHECK = True
+
     # Data Storage
     DATA_DIR = "market_data"
     OPPORTUNITIES_FILE = "arbitrage_opportunities.json"
