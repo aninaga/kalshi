@@ -31,6 +31,7 @@ from .execution import (
     OrderRequest,
     PolymarketGateway,
 )
+from .execution.capture import ExecutionCapture
 from .mock_execution import ExecutionResult, FeeModel, PolymarketFeeClient
 from .risk_engine import RiskEngine
 
@@ -53,6 +54,7 @@ class ArbitrageExecutor:
         )
         self.risk_engine = RiskEngine()
         self.pnl_tracker = pnl_tracker
+        self.capture = ExecutionCapture() if Config.EXECUTION_CAPTURE_ENABLED else None
         self._daily_loss = 0.0
         self._daily_reset_date: Optional[str] = None
 
@@ -65,19 +67,29 @@ class ArbitrageExecutor:
     # ------------------------------------------------------------------ #
 
     async def execute_arbitrage(self, opportunity: Dict) -> ExecutionResult:
+        """Public entry point: run the trade and capture the result (Phase C)."""
+        result, hedge_info = await self._run_arbitrage(opportunity)
+        if self.capture is not None:
+            try:
+                self.capture.record(opportunity, result, hedge=hedge_info)
+            except Exception as exc:
+                logger.error("Execution capture failed: %s", exc)
+        return result
+
+    async def _run_arbitrage(self, opportunity: Dict) -> Tuple[ExecutionResult, Optional[Dict]]:
         opp_id = opportunity.get('opportunity_id', f'opp-{uuid.uuid4().hex[:8]}')
         t0 = time.time()
 
         rejection = await self._pre_flight_checks(opportunity)
         if rejection:
-            return self._skipped_result(opp_id, opportunity, rejection, t0)
+            return self._skipped_result(opp_id, opportunity, rejection, t0), None
 
         if Config.EXECUTION_MODE != 'live':
-            return await self._paper_result(opp_id, opportunity, t0)
+            return await self._paper_result(opp_id, opportunity, t0), None
 
         legs = self._build_legs(opportunity)
         if legs is None:
-            return self._skipped_result(opp_id, opportunity, 'unbuildable_legs', t0)
+            return self._skipped_result(opp_id, opportunity, 'unbuildable_legs', t0), None
         buy_req, sell_req = legs
 
         try:
@@ -91,7 +103,7 @@ class ArbitrageExecutor:
             )
         except asyncio.TimeoutError:
             logger.error("Execution timeout for %s", opp_id)
-            return self._skipped_result(opp_id, opportunity, 'execution_timeout', t0)
+            return self._skipped_result(opp_id, opportunity, 'execution_timeout', t0), None
 
         buy_out = self._coerce_outcome(buy_out, buy_req)
         sell_out = self._coerce_outcome(sell_out, sell_req)
@@ -105,11 +117,12 @@ class ArbitrageExecutor:
             hedge_info = await self._hedge(buy_req, buy_out, sell_req, sell_out)
 
         if matched > _EPS:
-            return self._build_result(opp_id, opportunity, buy_out, sell_out,
-                                      matched, t0, hedge_info)
+            result = self._build_result(opp_id, opportunity, buy_out, sell_out,
+                                        matched, t0, hedge_info)
+            return result, hedge_info
 
         reason = 'partial_fill_hedged' if imbalance > _EPS else 'no_fill'
-        return self._skipped_result(opp_id, opportunity, reason, t0)
+        return self._skipped_result(opp_id, opportunity, reason, t0), hedge_info
 
     # ------------------------------------------------------------------ #
     #  Pre-flight checks                                                   #

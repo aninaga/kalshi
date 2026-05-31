@@ -9,6 +9,7 @@ Kalshi/Polymarket order flow. Components:
   * ``kill_switch``   — global halt
 """
 
+from .capture import ExecutionCapture
 from .kill_switch import KillSwitch
 from .order_types import (
     KALSHI,
@@ -38,6 +39,7 @@ __all__ = [
     "OrderOutcome",
     "OrderRequest",
     "KillSwitch",
+    "ExecutionCapture",
     "ExecutionEngine",
     "KalshiGateway",
     "PolymarketGateway",

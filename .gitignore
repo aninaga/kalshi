@@ -148,3 +148,8 @@ market_data/live_*.json
 market_data/polymarket_us_*.json
 market_data/polymarket_us_*.csv
 market_data/polymarket_anirudh_*.csv
+
+# Execution runtime artifacts (Phase C/D)
+market_data/executions/
+market_data/EXECUTION_HALT
+market_data/matching/match_allowlist.json

@@ -209,6 +209,11 @@ class Config:
     # Pre-trade balance check (requires live account credentials).
     REQUIRE_BALANCE_CHECK = True
 
+    # --- Paper-trading validation (Phase C) ---
+    # Capture every execution (estimate + realized) for offline analysis.
+    EXECUTION_CAPTURE_ENABLED = True
+    EXECUTION_CAPTURE_FILE = "executions/executions.jsonl"
+
     # Data Storage
     DATA_DIR = "market_data"
     OPPORTUNITIES_FILE = "arbitrage_opportunities.json"
