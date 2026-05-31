@@ -152,7 +152,26 @@ class Config:
     
     # Default completeness level
     DEFAULT_COMPLETENESS_LEVEL = 'BALANCED'
-    
+
+    # --- Match verification settings (Phase A) ---
+    # Cross-venue matching is purely lexical by default. These gates add
+    # semantic safety on top: outcome-polarity resolution and
+    # resolution-criteria equivalence. A false match in the EXECUTION path
+    # fires two un-hedged legs, so verification is required before live.
+    MATCH_VERIFICATION_ENABLED = True
+    # Drop a candidate match whose verifier fails (different real-world event,
+    # divergent resolution criteria, or unresolvable polarity).
+    MATCH_DROP_ON_FAIL = True
+    # When polarity can't be resolved, treat the match as failed (vs. passing
+    # it through with polarity="unknown"). Conservative default.
+    MATCH_REJECT_UNKNOWN_POLARITY = False
+    # Live trading only fires on operator-allowlisted pairs (Phase D gate).
+    MATCH_REQUIRE_ALLOWLIST_FOR_LIVE = True
+    # Max difference between the two venues' close/resolution times.
+    MATCH_MAX_CLOSE_TIME_SKEW_HOURS = 24
+    # Operator allow/deny list of verified pairs.
+    MATCH_ALLOWLIST_FILE = "matching/match_allowlist.json"
+
     # --- Execution settings ---
     EXECUTION_ENABLED = False  # Master kill switch — must explicitly enable
     EXECUTION_MODE = "paper"   # "paper" (log only) | "live" (real orders)

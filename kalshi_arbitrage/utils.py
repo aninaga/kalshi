@@ -116,44 +116,51 @@ def _calculate_enhanced_similarity(title1, title2):
     # Extract key terms from Kalshi ticker
     kalshi_terms = _extract_kalshi_terms(kalshi_title)
     human_terms = set(human_title.lower().split())
-    
-    # Check for specific patterns
-    matches = 0
+
     total_key_terms = len(kalshi_terms)
-    
     if total_key_terms == 0:
         return 0.0
-    
+
+    # Generic term overlap: count a ticker term as matched if it appears in the
+    # human title exactly or shares a 4+ char prefix with one of its words
+    # (handles e.g. "republican"/"republicans", "govern"/"governor").
+    matches = 0
     for term in kalshi_terms:
         if term in human_terms:
             matches += 1
-        # Special case: "leave" + "powell" should match "powell out"
-        elif term == 'leave' and any('out' in t or 'leave' in t for t in human_terms):
-            matches += 0.8
-        elif term == 'powell' and any('powell' in t for t in human_terms):
-            matches += 1
-    
+        elif len(term) >= 4 and any(
+            w.startswith(term[:4]) or term.startswith(w[:4]) for w in human_terms if len(w) >= 4
+        ):
+            matches += 0.5
+
     return min(matches / total_key_terms, 1.0)
 
+# Kalshi ticker boilerplate: series-type prefixes and structural tokens that
+# carry no event-distinguishing meaning.
+_TICKER_STOPWORDS = frozenset({
+    'kx', 'kxp', 'the', 'and', 'for', 'will', 'be', 'to', 'of', 't', 'b',
+})
+
+
 def _extract_kalshi_terms(ticker):
-    """Extract meaningful terms from Kalshi ticker format."""
-    ticker = ticker.lower()
+    """Extract meaningful word terms from a Kalshi ticker, generically.
+
+    Kalshi tickers are opaque codes like ``KXPRESPARTY-28-DEM`` or
+    ``FEDDECISION-25DEC``. Split on delimiters and letter/number boundaries,
+    then keep alphabetic tokens of length >= 3 that aren't structural
+    boilerplate. No hardcoded subject names — that was brittle whack-a-mole.
+    """
+    ticker = (ticker or "").lower()
+    # Split on any non-alphanumeric delimiter, then on letter<->digit boundaries.
+    raw_segments = re.split(r'[^a-z0-9]+', ticker)
     terms = set()
-    
-    # Common Kalshi patterns
-    if 'leavepowell' in ticker:
-        terms.update(['leave', 'powell'])
-    if 'powell' in ticker:
-        terms.add('powell')
-    if 'fed' in ticker:
-        terms.add('fed')
-    if 'chair' in ticker:
-        terms.add('chair')
-    if 'admin' in ticker:
-        terms.add('admin')
-    if 'leave' in ticker:
-        terms.add('leave')
-    
+    for seg in raw_segments:
+        if not seg:
+            continue
+        # Break "fed25dec" -> ["fed", "25", "dec"]
+        for piece in re.findall(r'[a-z]+|[0-9]+', seg):
+            if piece.isalpha() and len(piece) >= 3 and piece not in _TICKER_STOPWORDS:
+                terms.add(piece)
     return terms
 
 def _calculate_basic_similarity(title1, title2):

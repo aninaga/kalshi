@@ -11,6 +11,7 @@ from collections import defaultdict
 import heapq
 from .api_clients import KalshiClient, PolymarketClient
 from .utils import clean_title, get_similarity_score, extract_stat_types, thresholds_compatible
+from .matching import CompositeVerifier, INVERTED, UNKNOWN
 from .config import Config
 from .mock_execution import MockExecutionEngine, FeeModel
 from .confirmed_pnl import ConfirmedPnLTracker
@@ -35,7 +36,13 @@ class MarketAnalyzer:
             'price_cache': {}
         }
         self.opportunities_history = []
-        
+
+        # Semantic match verification (Phase A): runs after the lexical
+        # similarity threshold to reject false positives (divergent resolution
+        # criteria, inverted polarity) before they reach the execution path.
+        self.match_verifier = CompositeVerifier() if Config.MATCH_VERIFICATION_ENABLED else None
+        self.completeness_stats_rejected_matches = 0
+
         # Performance optimization caches
         self._polymarket_term_index = defaultdict(set)  # term -> set of market_ids
         self._similarity_cache = {}  # (title1, title2) -> similarity
@@ -831,9 +838,20 @@ class MarketAnalyzer:
                     self._similarity_cache[similarity_key] = similarity
                 
                 if similarity >= Config.SIMILARITY_THRESHOLD:
+                    # --- Semantic verification gate (Phase A) ---
+                    # Lexical similarity is necessary but not sufficient: reject
+                    # pairs with divergent resolution criteria, and resolve
+                    # outcome polarity (Kalshi-YES vs PM YES/NO token).
+                    verdict = None
+                    if self.match_verifier is not None:
+                        verdict = self.match_verifier.verify(k_market, p_market)
+                        if not verdict.passed:
+                            self.completeness_stats_rejected_matches += 1
+                            continue
+
                     # Use heap to maintain top matches per Kalshi market (adaptive limit)
                     # Add unique tie-breaker to avoid dict comparison issues
-                    heap_item = (similarity, market_id, p_market)
+                    heap_item = (similarity, market_id, (p_market, verdict))
                     if len(top_matches) < max_matches:
                         heapq.heappush(top_matches, heap_item)
                     elif similarity > top_matches[0][0]:
@@ -841,9 +859,9 @@ class MarketAnalyzer:
                     elif len(top_matches) >= max_matches:
                         # Track truncation for completeness monitoring
                         self.completeness_stats['truncated_matches'] += 1
-            
+
             # Add top matches to results
-            for similarity, _, p_market in top_matches:
+            for similarity, _, (p_market, verdict) in top_matches:
                 match = {
                     'kalshi_market': k_market,
                     'polymarket_market': p_market,
@@ -851,6 +869,9 @@ class MarketAnalyzer:
                     'match_confidence': self._calculate_match_confidence(k_market, p_market),
                     'timestamp': datetime.now().isoformat()
                 }
+                if verdict is not None:
+                    match['verification'] = verdict.to_dict()
+                    match['polarity'] = verdict.polarity
                 batch_matches.append(match)
         
         return batch_matches
@@ -1256,6 +1277,17 @@ class MarketAnalyzer:
         if no_orderbook is not None and not _skew_ok(no_orderbook):
             self.completeness_stats['data_staleness_warnings'] += 1
             no_token_id = no_orderbook = None
+
+        # --- Polarity normalization (Phase A) ---
+        # All four strategies below are written in the Kalshi-YES frame: they
+        # assume the PM "yes_*" book is the SAME real-world outcome as Kalshi
+        # YES. When the verifier resolved the pair as INVERTED (Kalshi YES ==
+        # Polymarket NO token), swap the YES/NO books so the frame holds. This
+        # is the safety-critical fix: without it an inverted match turns a
+        # "buy YES / sell YES" hedge into buying the same side twice.
+        if match.get('polarity') == INVERTED:
+            yes_token_id, no_token_id = no_token_id, yes_token_id
+            yes_orderbook, no_orderbook = no_orderbook, yes_orderbook
 
         # Phase 2: Same-outcome strategies (existing logic, using YES orderbooks)
         if yes_orderbook:
