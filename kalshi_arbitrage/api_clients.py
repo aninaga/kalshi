@@ -363,10 +363,15 @@ class KalshiClient:
             # limit while running several series in flight.
             sem = asyncio.Semaphore(Config.KALSHI_EVENT_SERIES_CONCURRENCY)
             new_count = 0
+            sweep_deadline = time.monotonic() + Config.KALSHI_EVENT_DISCOVERY_BUDGET_SECONDS
 
             async def _fetch_series(series):
                 nonlocal new_count
+                if time.monotonic() > sweep_deadline:
+                    return  # time-boxed: don't blow the scan budget
                 async with sem:
+                    if time.monotonic() > sweep_deadline:
+                        return
                     for attempt in range(4):
                         try:
                             params = {'limit': 200, 'series_ticker': series}

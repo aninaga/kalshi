@@ -16,10 +16,7 @@ async def main(limit=40):
     kc = analyzer.kalshi_client
     pc = analyzer.polymarket_client
 
-    async def _noop(_session):
-        return
-    kc._discover_individual_markets_via_events = _noop
-    await kc._discover_markets_via_rest()
+    await kc._discover_markets_via_rest()  # bulk (capped) + event-based discovery
     await pc._bootstrap_markets_via_rest()
 
     kalshi = list(kc.markets_cache.values())
@@ -28,6 +25,8 @@ async def main(limit=40):
 
     k_proc = analyzer._process_kalshi_markets(kalshi)
     p_proc = analyzer._process_polymarket_markets(poly)
+    # The matcher's inverted-index lookup reads this (set in run_full_scan).
+    analyzer._current_polymarket_markets = p_proc
     print(f"Processed: Kalshi {len(k_proc)}  Polymarket {len(p_proc)}\n")
 
     print("=== sample KALSHI titles ===")

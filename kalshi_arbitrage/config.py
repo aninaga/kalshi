@@ -10,7 +10,13 @@ class Config:
     
     # Analysis Parameters
     MIN_PROFIT_THRESHOLD = 0.02  # 2% minimum profit threshold
-    SIMILARITY_THRESHOLD = 0.85  # 85% similarity for market matching
+    # 0.78: live data shows genuine equivalent markets score 0.79-0.85 (e.g.
+    # "Republicans win Vermont governor race" vs "Republican party win the
+    # governorship in Vermont"), so 0.85 cut most true matches. The Phase A
+    # verification layer (resolution-criteria + polarity) is what rejects the
+    # false positives a lower threshold lets through (year/scope mismatches),
+    # so we surface candidates here and gate them there.
+    SIMILARITY_THRESHOLD = 0.78
     
     # API Configuration
     KALSHI_API_BASE = "https://api.elections.kalshi.com/trade-api/v2"
@@ -100,14 +106,16 @@ class Config:
     # matched set rather than the full market universe.
     ORDERBOOK_REST_BUDGET_PER_SCAN = 600
 
-    # Market discovery completeness. Kalshi paginates by cursor; loop until the
-    # cursor is exhausted (cap is a safety bound, not the normal stop).
-    KALSHI_MAX_DISCOVERY_PAGES = 200  # 200 * 200 = 40k markets ceiling
-    # Kalshi's individual matchable markets come from event-based discovery (the
-    # bulk /markets listing is ~all multi-leg parlays). These control how
-    # complete + fast that phase is.
+    # Market discovery completeness.
+    # The bulk Kalshi /markets listing is ~entirely multi-leg parlays
+    # (KXMVE*MULTIGAME/CROSSCATEGORY) that the matcher discards and that cost
+    # ~90s + rate-limiting to page through. The individual MATCHABLE Kalshi
+    # markets come from event-based discovery instead, so we cap the bulk dump
+    # low (it still seeds a few singles) and invest the request budget in events.
+    KALSHI_MAX_DISCOVERY_PAGES = 10       # bulk /markets pages (mostly parlays)
     KALSHI_MAX_EVENT_PAGES = 30           # open-events pages (200 each)
-    KALSHI_EVENT_SERIES_CONCURRENCY = 6   # parallel series-market fetches
+    KALSHI_EVENT_SERIES_CONCURRENCY = 8   # parallel series-market fetches
+    KALSHI_EVENT_DISCOVERY_BUDGET_SECONDS = 90  # time box the series sweep
     KALSHI_EVENT_DISCOVERY_ENABLED = True # the source of matchable Kalshi markets
     # Polymarket discovery: paginate the Gamma catalog to completion.
     POLYMARKET_MAX_DISCOVERY_PAGES = 60  # 60 * 500 = 30k markets ceiling
@@ -197,7 +205,10 @@ class Config:
     # Live trading only fires on operator-allowlisted pairs (Phase D gate).
     MATCH_REQUIRE_ALLOWLIST_FOR_LIVE = True
     # Max difference between the two venues' close/resolution times.
-    MATCH_MAX_CLOSE_TIME_SKEW_HOURS = 24
+    # Same real-world event can list different close times across venues (e.g.
+    # provisional vs certified resolution), so don't be too tight. A YEAR
+    # mismatch (2026 vs 2028) is ~17500h and still firmly rejected.
+    MATCH_MAX_CLOSE_TIME_SKEW_HOURS = 96
     # Operator allow/deny list of verified pairs.
     MATCH_ALLOWLIST_FILE = "matching/match_allowlist.json"
 
