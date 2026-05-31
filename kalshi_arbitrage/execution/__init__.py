@@ -11,6 +11,7 @@ Kalshi/Polymarket order flow. Components:
 
 from .capture import ExecutionCapture
 from .kill_switch import KillSwitch
+from .live_lock import LiveTradingLock
 from .order_types import (
     KALSHI,
     POLYMARKET,
@@ -21,6 +22,7 @@ from .order_types import (
     OrderOutcome,
     OrderRequest,
 )
+from .simulated_gateway import SimulatedGateway
 from .single_leg import ExecutionEngine
 from .venue_gateway import (
     KalshiGateway,
@@ -39,10 +41,12 @@ __all__ = [
     "OrderOutcome",
     "OrderRequest",
     "KillSwitch",
+    "LiveTradingLock",
     "ExecutionCapture",
     "ExecutionEngine",
     "KalshiGateway",
     "PolymarketGateway",
+    "SimulatedGateway",
     "VenueGateway",
     "gateway_for",
 ]

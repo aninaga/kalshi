@@ -5,9 +5,36 @@ This document describes the execution stack that takes the system from
 operate each phase. It is intentionally gated: matching must be proven before
 any money moves, and live trading is hard-capped and allowlist-only.
 
-> **Default state is safe.** `EXECUTION_ENABLED=False` and
-> `EXECUTION_MODE="paper"`. Nothing places a real order until both are flipped
-> *and* the readiness checklist passes.
+> **Default state: full pipeline, no real orders.** Out of the box
+> (`EXECUTION_ENABLED=True`, `EXECUTION_MODE="paper"`) a local run does
+> *everything except place a real order*: detect → match → verify → price →
+> pre-flight/risk checks → build orders → **simulated fills** → PnL capture.
+> Real order placement is gated behind a separate, deliberate **live-trading
+> lock** (see below) — flipping a config flag is **not** enough.
+
+## Three independent conditions for a REAL order
+
+A real order reaches a venue only when ALL hold:
+1. `Config.EXECUTION_ENABLED` is True            (executor runs — default True)
+2. `Config.EXECUTION_MODE == "live"`             (live, not paper — default paper)
+3. the **live-trading lock is ARMED**            (`execution/live_lock.py`)
+
+Until then, paper mode swaps in a `SimulatedGateway` that fills orders locally
+with the real fee model but never calls a venue API; and even in live mode the
+real gateways refuse to POST (`live_trading_locked`) until the lock is armed.
+
+### Arming the lock (only after validation)
+
+```bash
+python -m kalshi_arbitrage.execution.live_lock status   # show ARMED / locked
+python -m kalshi_arbitrage.execution.live_lock arm      # writes the arm file
+python -m kalshi_arbitrage.execution.live_lock disarm
+```
+
+Arming is intentionally awkward: it writes `market_data/LIVE_TRADING_ARMED`
+containing the exact phrase `I_HAVE_VALIDATED_AND_ACCEPT_REAL_MONEY_RISK` (or set
+env `ARB_LIVE_TRADING_ARM` to that phrase). This is the mechanism saved for after
+validation.
 
 ## Architecture
 

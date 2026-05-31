@@ -22,6 +22,7 @@ from ..config import Config
 from ..kalshi_executor import KalshiOrderClient
 from ..mock_execution import FeeModel, PolymarketFeeClient
 from ..polymarket_executor import PolymarketOrderClient
+from .live_lock import LiveTradingLock
 from .order_types import (
     KALSHI,
     POLYMARKET,
@@ -72,6 +73,11 @@ class KalshiGateway:
 
     async def place(self, req: OrderRequest) -> OrderOutcome:
         coid = req.ensure_client_order_id()
+        # HARD BACKSTOP: a real Kalshi order only goes out when the live-trading
+        # lock is armed (post-validation). Otherwise refuse — never POST.
+        armed, reason = LiveTradingLock.instance().assert_or_warn(KALSHI)
+        if not armed:
+            return OrderOutcome.failed(KALSHI, req.size, reason, coid)
         count = int(req.size)
         if count <= 0:
             return OrderOutcome.failed(KALSHI, req.size, "non_positive_size", coid)
@@ -156,6 +162,11 @@ class PolymarketGateway:
 
     async def place(self, req: OrderRequest) -> OrderOutcome:
         coid = req.ensure_client_order_id()
+        # HARD BACKSTOP: a real Polymarket order only goes out when the
+        # live-trading lock is armed (post-validation). Otherwise refuse.
+        armed, reason = LiveTradingLock.instance().assert_or_warn(POLYMARKET)
+        if not armed:
+            return OrderOutcome.failed(POLYMARKET, req.size, reason, coid)
         side = "BUY" if req.action == "buy" else "SELL"
         order_type = req.tif if req.tif in ("FOK", "GTC", "GTD") else Config.POLYMARKET_ORDER_TYPE
         ttl = req.ttl_seconds or Config.POLYMARKET_ORDER_TTL_SECONDS

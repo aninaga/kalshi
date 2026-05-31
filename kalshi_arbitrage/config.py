@@ -219,8 +219,16 @@ class Config:
     MATCH_ALLOWLIST_FILE = "matching/match_allowlist.json"
 
     # --- Execution settings ---
-    EXECUTION_ENABLED = False  # Master kill switch — must explicitly enable
-    EXECUTION_MODE = "paper"   # "paper" (log only) | "live" (real orders)
+    # Default = FULL PAPER PIPELINE. The executor runs end-to-end (build orders,
+    # pre-flight, simulated fills via SimulatedGateway, hedge logic, capture,
+    # PnL) so a local run does *everything except place a real order*. Real
+    # orders additionally require EXECUTION_MODE="live" AND the live-trading lock
+    # to be armed (see execution/live_lock.py) — flipping a flag is NOT enough.
+    EXECUTION_ENABLED = True    # executor runs (paper unless live+armed)
+    EXECUTION_MODE = "paper"    # "paper" (simulate, no API) | "live" (real, lock-gated)
+    # Arming file (under DATA_DIR) that unlocks real order placement post-validation.
+    LIVE_TRADING_ARM_FILE = "LIVE_TRADING_ARMED"
+    KALSHI_ORDER_TTL_SECONDS = 5  # Short-lived limit order = pseudo-IOC
     KALSHI_ORDER_TTL_SECONDS = 5  # Short-lived limit order = pseudo-IOC
     POLYMARKET_ORDER_TYPE = "FOK"  # Fill-or-Kill
     MAX_POSITION_SIZE_USD = 100.0  # Per-leg capital cap

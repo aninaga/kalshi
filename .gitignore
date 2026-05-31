@@ -153,3 +153,4 @@ market_data/polymarket_anirudh_*.csv
 market_data/executions/
 market_data/EXECUTION_HALT
 market_data/matching/match_allowlist.json
+market_data/LIVE_TRADING_ARMED

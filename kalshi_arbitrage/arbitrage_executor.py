@@ -32,6 +32,7 @@ from .execution import (
     PolymarketGateway,
 )
 from .execution.capture import ExecutionCapture
+from .execution.simulated_gateway import SimulatedGateway
 from .matching import AllowlistVerifier
 from .mock_execution import ExecutionResult, FeeModel, PolymarketFeeClient
 from .risk_engine import RiskEngine
@@ -49,10 +50,18 @@ class ArbitrageExecutor:
         self.polymarket_gateway = PolymarketGateway()
         self.pm_fee_client = self.polymarket_gateway.fee_client
         self.kill_switch = KillSwitch.instance()
-        self.engine = ExecutionEngine(
-            {KALSHI: self.kalshi_gateway, POLYMARKET: self.polymarket_gateway},
-            kill_switch=self.kill_switch,
-        )
+        # Real gateways place orders (lock-gated); simulated gateways fill
+        # without any API call. Paper mode uses the simulated set so the FULL
+        # execution path runs end-to-end with zero chance of a real order.
+        self._real_gateways = {KALSHI: self.kalshi_gateway, POLYMARKET: self.polymarket_gateway}
+        self._sim_gateways = {
+            KALSHI: SimulatedGateway(KALSHI),
+            POLYMARKET: SimulatedGateway(POLYMARKET, fee_client=self.pm_fee_client),
+        }
+        active = self._real_gateways if Config.EXECUTION_MODE == "live" else self._sim_gateways
+        # dict(...) COPY: the engine owns its own gateway dict so _sync can
+        # clear/refill it without mutating the canonical _real/_sim sources.
+        self.engine = ExecutionEngine(dict(active), kill_switch=self.kill_switch)
         self.risk_engine = RiskEngine()
         self.pnl_tracker = pnl_tracker
         self.capture = ExecutionCapture() if Config.EXECUTION_CAPTURE_ENABLED else None
@@ -64,6 +73,20 @@ class ArbitrageExecutor:
     async def close(self) -> None:
         await self.kalshi_gateway.close()
         await self.polymarket_gateway.close()
+        for gw in self._sim_gateways.values():
+            await gw.close()
+
+    def _sync_engine_gateways(self) -> None:
+        """Point the engine at real gateways in live mode, simulated otherwise.
+
+        Updates the gateway dict in place (only when the engine is our real
+        ExecutionEngine — tests that swap in a fake engine are left untouched).
+        """
+        target = self._real_gateways if Config.EXECUTION_MODE == "live" else self._sim_gateways
+        gws = getattr(self.engine, "gateways", None)
+        if isinstance(gws, dict):
+            gws.clear()
+            gws.update(target)
 
     # ------------------------------------------------------------------ #
     #  Main entry point                                                    #
@@ -87,8 +110,12 @@ class ArbitrageExecutor:
         if rejection:
             return self._skipped_result(opp_id, opportunity, rejection, t0), None
 
-        if Config.EXECUTION_MODE != 'live':
-            return await self._paper_result(opp_id, opportunity, t0), None
+        # Both paper and live run the SAME orchestration; only the gateways
+        # differ (simulated vs real). Paper therefore exercises leg building,
+        # the engine (idempotency/circuit-breaker/kill-switch), the hedge, and
+        # capture — everything except a real order. Keep the active engine's
+        # gateways in sync with the current mode (tests flip the mode at runtime).
+        self._sync_engine_gateways()
 
         legs = self._build_legs(opportunity)
         if legs is None:
@@ -383,7 +410,10 @@ class ArbitrageExecutor:
         net = gross - buy.fees - sell.fees
         self._daily_loss -= net  # net positive → reduces daily loss
         latency = int((time.time() - t0) * 1000)
-        exec_id = f"exec-{uuid.uuid4().hex[:16]}"
+        # Paper fills carry source 'paper'; only a real (live) fill is 'exchange'.
+        is_live = Config.EXECUTION_MODE == 'live'
+        prefix = 'exec' if is_live else 'paper'
+        exec_id = f"{prefix}-{uuid.uuid4().hex[:16]}"
 
         return ExecutionResult(
             opportunity_id=opp_id,
@@ -403,53 +433,9 @@ class ArbitrageExecutor:
             execution_id=exec_id,
             buy_order_id=buy.order_id,
             sell_order_id=sell.order_id,
-            confirmation_source='exchange',
+            confirmation_source='exchange' if is_live else 'paper',
         )
 
-    async def _leg_fee(self, platform: str, token_id: str, price: float, size: float) -> float:
-        if platform == 'kalshi':
-            return FeeModel.kalshi_taker_fee(price, size)
-        bps = await self.pm_fee_client.get_fee_rate_bps(token_id) or Config.POLYMARKET_ESTIMATED_FEE_RATE_BPS
-        return FeeModel.polymarket_taker_fee(price, size, bps)
-
-    async def _paper_result(self, opp_id: str, opp: Dict, t0: float) -> ExecutionResult:
-        """Simulate a fill in paper mode using REAL fee models on both venues."""
-        buy_platform = opp.get('buy_platform', 'kalshi')
-        sell_platform = opp.get('sell_platform', 'polymarket')
-        token_id = opp.get('polymarket_token', '')
-        volume = self._capped_volume(opp)
-        buy_price = self._buy_price(opp)
-        sell_price = (float(opp.get('polymarket_price', 0)) if sell_platform == 'polymarket'
-                      else float(opp.get('kalshi_price', 0)))
-
-        gross = (sell_price - buy_price) * volume
-        buy_fees = await self._leg_fee(buy_platform, token_id, buy_price, volume)
-        sell_fees = await self._leg_fee(sell_platform, token_id, sell_price, volume)
-        net = gross - buy_fees - sell_fees
-        latency = int((time.time() - t0) * 1000)
-
-        logger.info("[PAPER] %s: buy %.0fx @ %.4f on %s, sell @ %.4f on %s → gross=$%.2f net=$%.2f",
-                    opp.get('strategy', '?'), volume, buy_price, buy_platform,
-                    sell_price, sell_platform, gross, net)
-
-        return ExecutionResult(
-            opportunity_id=opp_id,
-            buy_platform=buy_platform,
-            sell_platform=sell_platform,
-            requested_volume=volume,
-            filled_volume=volume,
-            avg_buy_price=buy_price,
-            avg_sell_price=sell_price,
-            buy_fees=buy_fees,
-            sell_fees=sell_fees,
-            gross_profit=gross,
-            net_profit=net,
-            profit_margin=(net / (buy_price * volume)) if volume > 0 and buy_price > 0 else 0,
-            latency_ms=latency,
-            timestamp=time.time(),
-            execution_id=f"paper-{uuid.uuid4().hex[:16]}",
-            confirmation_source='paper',
-        )
 
     def _skipped_result(self, opp_id: str, opp: Dict, reason: str,
                         t0: float) -> ExecutionResult:
