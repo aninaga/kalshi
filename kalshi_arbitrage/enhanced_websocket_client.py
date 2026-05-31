@@ -13,6 +13,7 @@ from dataclasses import dataclass
 import aiohttp
 from collections import defaultdict, deque
 from .circuit_breaker import CircuitBreaker, CircuitBreakerConfig, CircuitOpenError, circuit_breaker_manager
+from .config import Config
 from .websocket_client import StreamMessage, WebSocketManager
 
 logger = logging.getLogger(__name__)
@@ -144,8 +145,8 @@ class EnhancedWebSocketManager(WebSocketManager):
     async def _connect_internal(self):
         """Internal connection logic wrapped by circuit breaker."""
         if self.session is None:
-            self.session = aiohttp.ClientSession()
-            
+            self.session = aiohttp.ClientSession(headers=Config.default_headers())
+
         logger.info(f"Connecting to {self.platform} WebSocket at {self.endpoint}")
         
         # Add connection timeout and proper error handling

@@ -168,7 +168,7 @@ class KalshiClient:
         import aiohttp
         
         try:
-            async with aiohttp.ClientSession() as session:
+            async with aiohttp.ClientSession(headers=Config.default_headers()) as session:
                 # Get all events first
                 events_url = f"{Config.KALSHI_API_BASE}/events"
                 async with session.get(events_url) as response:
@@ -187,7 +187,9 @@ class KalshiClient:
                 # Paginate through markets with reasonable limit for performance
                 cursor = None
                 page_count = 0
-                max_pages = 50  # Reasonable limit: 50 pages * 200 = 10,000 markets max
+                # Loop until the cursor is exhausted; the cap is just a safety
+                # bound so a runaway cursor can't spin forever.
+                max_pages = Config.KALSHI_MAX_DISCOVERY_PAGES
                 rate_limit_retries = 0
                 max_rate_limit_retries = 8
                 timeout = aiohttp.ClientTimeout(total=15)  # 15 second timeout per request
@@ -455,7 +457,7 @@ class KalshiClient:
             if not market:
                 return None
 
-            async with aiohttp.ClientSession() as session:
+            async with aiohttp.ClientSession(headers=Config.default_headers()) as session:
                 # Kalshi addresses markets by TICKER (our cache key), not the
                 # internal numeric id — mirror the orderbook REST fallback below.
                 # Using market.get('id') previously suppressed this fallback
@@ -512,7 +514,7 @@ class KalshiClient:
 
                 url = f"{Config.KALSHI_API_BASE}/markets/{market_ticker}/orderbook"
                 if self._orderbook_rest_session is None or self._orderbook_rest_session.closed:
-                    self._orderbook_rest_session = aiohttp.ClientSession()
+                    self._orderbook_rest_session = aiohttp.ClientSession(headers=Config.default_headers())
                 async with self._orderbook_rest_session.get(url) as resp:
                         if resp.status == 200:
                             data = await resp.json()
@@ -568,6 +570,7 @@ class PolymarketClient:
         self._orderbook_rest_last_call = 0.0
         self._orderbook_rest_session = None
         self._orderbook_rest_budget = Config.ORDERBOOK_REST_BUDGET_PER_SCAN
+        self.catalog_truncated = False  # set True if REST discovery is incomplete
         self.stream_quality_stats = {
             'price_updates_received': 0,
             'price_updates_accepted': 0,
@@ -665,47 +668,90 @@ class PolymarketClient:
         import json
         
         try:
-            # Use Polymarket Gamma API to discover markets with pagination
+            # Use Polymarket Gamma API to discover markets with pagination.
             url = f"{Config.POLYMARKET_GAMMA_BASE}/markets"
             all_markets = []
             offset = 0
             limit = 500  # Max limit per request
-            
+            max_pages = Config.POLYMARKET_MAX_DISCOVERY_PAGES
+            page = 0
+
             timeout = aiohttp.ClientTimeout(total=30)
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                while True:
+            async with aiohttp.ClientSession(timeout=timeout, headers=Config.default_headers()) as session:
+                while page < max_pages:
                     params = {
                         "active": "true",
-                        "closed": "false", 
+                        "closed": "false",
                         "limit": limit,
-                        "offset": offset
+                        "offset": offset,
                     }
-                    
-                    try:
-                        async with session.get(url, params=params) as response:
-                            response.raise_for_status()
-                            markets_data = await response.json()
-                        
-                        if not markets_data or not isinstance(markets_data, list) or len(markets_data) == 0:
+
+                    # Fetch this page with retry/backoff. A transient failure
+                    # (incl. a Cloudflare 403 if the UA ever regresses) must be
+                    # retried and surfaced loudly — NOT silently treated as
+                    # "end of data" (the old `except: break` is what made the
+                    # bot fall back to ~100 markets and find 0 arbs).
+                    markets_data = None
+                    last_err = None
+                    for attempt in range(Config.DISCOVERY_FETCH_RETRIES):
+                        try:
+                            async with session.get(url, params=params) as response:
+                                if response.status == 403:
+                                    raise RuntimeError(
+                                        "Polymarket Gamma 403 (Cloudflare) — check User-Agent header"
+                                    )
+                                response.raise_for_status()
+                                markets_data = await response.json()
                             break
-                        
-                        all_markets.extend(markets_data)
-                        logger.info(f"Fetched {len(markets_data)} markets at offset {offset}, total: {len(all_markets)}")
-                        
-                        # If we got fewer than the limit, we've reached the end
-                        if len(markets_data) < limit:
-                            break
-                            
-                        offset += limit
-                        
-                    except Exception as e:
-                        logger.warning(f"Error fetching markets at offset {offset}: {e}")
+                        except Exception as e:
+                            last_err = e
+                            backoff = 2 ** attempt
+                            logger.warning(
+                                "Polymarket discovery offset=%d attempt %d/%d failed: %s; retrying in %ds",
+                                offset, attempt + 1, Config.DISCOVERY_FETCH_RETRIES, e, backoff,
+                            )
+                            await asyncio.sleep(backoff)
+
+                    if markets_data is None:
+                        # Retries exhausted — fail LOUD, don't return a partial
+                        # catalog as if it were complete.
+                        logger.error(
+                            "Polymarket discovery FAILED at offset=%d after %d retries: %s. "
+                            "Catalog INCOMPLETE (%d markets so far).",
+                            offset, Config.DISCOVERY_FETCH_RETRIES, last_err, len(all_markets),
+                        )
+                        self.catalog_truncated = True
                         break
-            
+
+                    if not isinstance(markets_data, list) or len(markets_data) == 0:
+                        break
+
+                    all_markets.extend(markets_data)
+                    page += 1
+                    logger.info(
+                        "Fetched %d Polymarket markets at offset %d, total: %d",
+                        len(markets_data), offset, len(all_markets),
+                    )
+
+                    if len(markets_data) < limit:
+                        break  # reached the end of the catalog
+                    offset += limit
+
+                if page >= max_pages:
+                    logger.warning(
+                        "Polymarket discovery hit the %d-page cap (%d markets); "
+                        "raise POLYMARKET_MAX_DISCOVERY_PAGES if the catalog is larger.",
+                        max_pages, len(all_markets),
+                    )
+
             if not all_markets:
-                logger.warning("No markets returned from Polymarket REST API")
+                logger.error(
+                    "No markets from Polymarket REST API — discovery failed; matching "
+                    "will have nothing to compare against."
+                )
                 return
-            
+
+            logger.info("Polymarket REST discovery complete: %d markets", len(all_markets))
             markets_data = all_markets
             
             # Process and cache markets
@@ -878,7 +924,7 @@ class PolymarketClient:
             seen_ids = set()        # (B7) for tombstoning markets no longer returned
             updated = 0
             sweep_complete = False  # only tombstone after a FULL successful sweep
-            async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with aiohttp.ClientSession(timeout=timeout, headers=Config.default_headers()) as session:
                 while True:
                     if time.monotonic() - refresh_start > max_refresh_seconds:
                         logger.warning(f"Polymarket refresh timed out after {max_refresh_seconds}s at offset {offset}")
@@ -987,7 +1033,7 @@ class PolymarketClient:
                 url = f"{Config.POLYMARKET_CLOB_BASE}/book"
                 params = {"token_id": token_id}
                 if self._orderbook_rest_session is None or self._orderbook_rest_session.closed:
-                    self._orderbook_rest_session = aiohttp.ClientSession()
+                    self._orderbook_rest_session = aiohttp.ClientSession(headers=Config.default_headers())
                 async with self._orderbook_rest_session.get(url, params=params) as resp:
                         if resp.status == 200:
                             data = await resp.json()

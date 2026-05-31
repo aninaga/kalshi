@@ -56,6 +56,7 @@ def kalshi_auth_headers(method: str, path: str) -> Dict[str, str]:
         )
         return {
             'Content-Type': 'application/json',
+            'User-Agent': Config.HTTP_USER_AGENT,
             'KALSHI-ACCESS-KEY': api_key,
             'KALSHI-ACCESS-SIGNATURE': base64.b64encode(signature).decode('utf-8'),
             'KALSHI-ACCESS-TIMESTAMP': timestamp,
@@ -75,7 +76,7 @@ class KalshiOrderClient:
 
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
-            self._session = aiohttp.ClientSession()
+            self._session = aiohttp.ClientSession(headers=Config.default_headers())
         return self._session
 
     async def close(self) -> None:

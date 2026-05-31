@@ -52,7 +52,9 @@ class PolymarketFeeClient:
 
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None:
-            self._session = aiohttp.ClientSession()
+            # Browser UA required: Polymarket's CLOB fee-rate endpoint sits
+            # behind Cloudflare and 403s the default Python UA.
+            self._session = aiohttp.ClientSession(headers=Config.default_headers())
         return self._session
 
     async def close(self) -> None:

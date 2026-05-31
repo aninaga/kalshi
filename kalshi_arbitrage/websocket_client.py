@@ -14,6 +14,8 @@ from dataclasses import dataclass
 import aiohttp
 from collections import defaultdict, deque
 
+from .config import Config
+
 logger = logging.getLogger(__name__)
 
 # Known non-JSON ack-style payloads that platforms may send.
@@ -79,7 +81,7 @@ class WebSocketManager:
         if self._closing:
             return
         if self.session is None:
-            self.session = aiohttp.ClientSession()
+            self.session = aiohttp.ClientSession(headers=Config.default_headers())
             
         try:
             logger.info(f"Connecting to {self.platform} WebSocket at {self.endpoint}")
@@ -362,7 +364,7 @@ class KalshiWebSocketClient(WebSocketManager):
     async def connect(self):
         """Establish WebSocket connection with RSA authentication."""
         if self.session is None:
-            self.session = aiohttp.ClientSession()
+            self.session = aiohttp.ClientSession(headers=Config.default_headers())
             
         try:
             logger.info(f"Connecting to {self.platform} WebSocket at {self.endpoint}")

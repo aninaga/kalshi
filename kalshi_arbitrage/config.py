@@ -21,6 +21,15 @@ class Config:
     POLYMARKET_GAMMA_BASE = "https://gamma-api.polymarket.com"
     POLYMARKET_CLOB_BASE = "https://clob.polymarket.com"
 
+    # Browser User-Agent for ALL outbound HTTP/WS calls. Polymarket's Cloudflare
+    # returns HTTP 403 to the default Python/aiohttp UA; a browser UA gets 200.
+    # This was the root cause of the bot seeing ~100 Polymarket markets instead
+    # of the full ~5,600+ tradeable universe (and therefore finding 0 arbs).
+    HTTP_USER_AGENT = (
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+    )
+
     # Fee endpoints (live)
     POLYMARKET_FEE_RATE_ENDPOINT = "https://clob.polymarket.com/fee-rate?token_id={token_id}"
     POLYMARKET_FEE_RATE_TTL_SECONDS = 300
@@ -78,12 +87,26 @@ class Config:
     REALTIME_ENABLED = True
     STREAM_BUFFER_SIZE = 1000  # Max messages to buffer during disconnections
     STREAM_FRESHNESS_THRESHOLD = 10  # Seconds before data considered stale
-    STREAM_FALLBACK_TO_REST = False  # WebSocket-only mode - no REST fallback
+    # Allow REST to fill price gaps the WebSocket cache misses. A single batch
+    # scan barely warms the WS feed, so WS-only mode starves it; REST fallback
+    # (budgeted, matched-pairs only) makes single scans actually see books.
+    STREAM_FALLBACK_TO_REST = True
 
     # Orderbook REST fallback (used when WebSocket cache misses)
     ORDERBOOK_REST_FALLBACK = True
     ORDERBOOK_REST_MAX_PER_SECOND = 3
-    ORDERBOOK_REST_BUDGET_PER_SCAN = 50  # Max REST orderbook fetches per scan
+    # Max REST orderbook fetches per scan. Only matched pairs (post-similarity)
+    # need real books — a few hundred at most — so this is sized to cover the
+    # matched set rather than the full market universe.
+    ORDERBOOK_REST_BUDGET_PER_SCAN = 600
+
+    # Market discovery completeness. Kalshi paginates by cursor; loop until the
+    # cursor is exhausted (cap is a safety bound, not the normal stop).
+    KALSHI_MAX_DISCOVERY_PAGES = 200  # 200 * 200 = 40k markets ceiling
+    # Polymarket discovery: paginate the Gamma catalog to completion.
+    POLYMARKET_MAX_DISCOVERY_PAGES = 60  # 60 * 500 = 30k markets ceiling
+    # Retry budget for a transient discovery fetch failure before giving up.
+    DISCOVERY_FETCH_RETRIES = 4
 
     # Kalshi market cache management
     KALSHI_STALE_MARKET_TTL = 7200  # 2 hours - evict WS-only markets older than this
@@ -231,6 +254,18 @@ class Config:
     LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
     LOG_FILE = "arbitrage_analysis.log"
     
+    @classmethod
+    def default_headers(cls, extra: Optional[dict] = None) -> dict:
+        """Headers for every outbound HTTP/WS request (always sets User-Agent).
+
+        Pass ``extra`` to merge venue auth headers; the UA is applied first so
+        callers can still override it if they ever need to.
+        """
+        headers = {"User-Agent": cls.HTTP_USER_AGENT}
+        if extra:
+            headers.update(extra)
+        return headers
+
     @classmethod
     def setup_logging(cls):
         """Configure logging for the application."""
