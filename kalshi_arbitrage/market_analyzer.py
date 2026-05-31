@@ -1289,6 +1289,26 @@ class MarketAnalyzer:
             yes_token_id, no_token_id = no_token_id, yes_token_id
             yes_orderbook, no_orderbook = no_orderbook, yes_orderbook
 
+        # Optional edge instrumentation (set ARB_DEBUG_EDGES=1) — logs the raw
+        # cross-venue spread per matched pair so "0 opportunities" can be
+        # verified as real efficiency rather than a pricing bug.
+        if os.environ.get('ARB_DEBUG_EDGES') and yes_orderbook:
+            def _best(levels, side):
+                ps = [l.get('price') for l in (levels or []) if l.get('price') is not None]
+                return (min(ps) if side == 'ask' else max(ps)) if ps else None
+            k_ask = _best(kalshi_orderbook.get('yes_asks'), 'ask')
+            k_bid = _best(kalshi_orderbook.get('yes_bids'), 'bid')
+            p_ask = _best(yes_orderbook.get('asks'), 'ask')
+            p_bid = _best(yes_orderbook.get('bids'), 'bid')
+            if None not in (k_ask, k_bid, p_ask, p_bid):
+                logger.info(
+                    "EDGE %s | K[ask=%.3f bid=%.3f] P[ask=%.3f bid=%.3f] "
+                    "buyK/sellP=%+.3f buyP/sellK=%+.3f | %.40s == %.40s",
+                    match.get('polarity', '?'), k_ask, k_bid, p_ask, p_bid,
+                    p_bid - k_ask, k_bid - p_ask,
+                    kalshi_market.get('title', ''), polymarket_market.get('title', ''),
+                )
+
         # Phase 2: Same-outcome strategies (existing logic, using YES orderbooks)
         if yes_orderbook:
             uses_synthetic = bool(kalshi_orderbook.get('is_synthetic')) or bool(yes_orderbook.get('is_synthetic'))
