@@ -59,8 +59,13 @@ class Config:
     # (the simulation path uses SIMULATION_MAX_ORDERBOOK_AGE_SECONDS separately).
     ESTIMATED_MAX_ORDERBOOK_AGE_SECONDS = 30
     # (B13) Reject a cross-venue pairing whose two books' timestamps differ by
-    # more than this, so both legs reflect a coherent as-of snapshot.
-    MAX_CROSS_VENUE_SKEW_SECONDS = 5
+    # more than this, so both legs reflect a coherent as-of snapshot. Must be
+    # consistent with ESTIMATED_MAX_ORDERBOOK_AGE_SECONDS: in a batch scan the
+    # two legs' books are REST-fetched seconds/tens-of-seconds apart, so a 5s
+    # skew nulled virtually every PM book (the estimated path tolerates 30s
+    # staleness anyway). The pre-trade re-check at execution time enforces the
+    # tight real-time coherence; detection just needs both legs reasonably fresh.
+    MAX_CROSS_VENUE_SKEW_SECONDS = 30
 
     # Stream subscription coverage (bounded to avoid overwhelming feeds)
     KALSHI_STREAM_SUBSCRIPTION_LIMIT = 100
@@ -101,10 +106,11 @@ class Config:
     # Orderbook REST fallback (used when WebSocket cache misses)
     ORDERBOOK_REST_FALLBACK = True
     ORDERBOOK_REST_MAX_PER_SECOND = 3
-    # Max REST orderbook fetches per scan. Only matched pairs (post-similarity)
-    # need real books — a few hundred at most — so this is sized to cover the
-    # matched set rather than the full market universe.
-    ORDERBOOK_REST_BUDGET_PER_SCAN = 600
+    # Max REST orderbook fetches per scan. Each matched pair needs up to 3 books
+    # (Kalshi + PM YES + PM NO), and a scan can surface ~400 matches, so size
+    # this well above 2-3x the match count or later batches starve (which looks
+    # like "0 opportunities" even though the spreads were never computed).
+    ORDERBOOK_REST_BUDGET_PER_SCAN = 3000
 
     # Market discovery completeness.
     # The bulk Kalshi /markets listing is ~entirely multi-leg parlays

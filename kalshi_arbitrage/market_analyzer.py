@@ -1241,6 +1241,7 @@ class MarketAnalyzer:
         no_token_id = None
         no_orderbook = None
 
+        _dbg = os.environ.get('ARB_DEBUG_EDGES')
         for token_id, price_data in polymarket_prices.items():
             if not price_data:
                 continue
@@ -1250,6 +1251,10 @@ class MarketAnalyzer:
                 if ob:
                     yes_token_id = token_id
                     yes_orderbook = ob
+                elif _dbg:
+                    logger.info("YESBOOK_NONE tok=%s mid=%s | %.35s",
+                                str(token_id)[:10], str(polymarket_market['id'])[:14],
+                                polymarket_market.get('title', ''))
             elif outcome_name in {'no', 'false', '0'}:
                 ob = await self._get_cached_orderbook(polymarket_market['id'], 'polymarket', token_id)
                 if ob:
@@ -1292,6 +1297,13 @@ class MarketAnalyzer:
         # Optional edge instrumentation (set ARB_DEBUG_EDGES=1) — logs the raw
         # cross-venue spread per matched pair so "0 opportunities" can be
         # verified as real efficiency rather than a pricing bug.
+        if os.environ.get('ARB_DEBUG_EDGES') and not yes_orderbook:
+            _outs = {str(pd.get('outcome')): tid[:8] for tid, pd in polymarket_prices.items() if pd}
+            logger.info(
+                "NOEDGE prices=%d outcomes=%s yes_tok=%s kob=%s | %.35s",
+                len(polymarket_prices), _outs, bool(yes_token_id), bool(kalshi_orderbook),
+                polymarket_market.get('title', ''),
+            )
         if os.environ.get('ARB_DEBUG_EDGES') and yes_orderbook:
             def _best(levels, side):
                 ps = [l.get('price') for l in (levels or []) if l.get('price') is not None]

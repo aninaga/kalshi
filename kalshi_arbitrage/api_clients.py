@@ -509,16 +509,28 @@ class KalshiClient:
         
         return None
     
+    def _book_is_fresh(self, book) -> bool:
+        """Reuse a cached book only if recent enough (see PolymarketClient)."""
+        if not isinstance(book, dict):
+            return False
+        ts = book.get('timestamp')
+        if ts is None:
+            return True
+        max_age = getattr(Config, 'ESTIMATED_MAX_ORDERBOOK_AGE_SECONDS', 30)
+        return (time.time() - float(ts)) <= max_age
+
     async def get_market_orderbook(self, market_ticker: str) -> Optional[Dict[str, Any]]:
         """Get market orderbook from cache, with REST fallback."""
         result = self.orderbook_cache.get(market_ticker)
-        if result is not None:
+        if result is not None and self._book_is_fresh(result):
             return result
-        # REST fallback (budget-limited to avoid rate limits)
+        # Cache miss or STALE cached book → fetch fresh (budget-limited).
         if Config.ORDERBOOK_REST_FALLBACK and self._orderbook_rest_budget > 0:
             self._orderbook_rest_budget -= 1
-            return await self._fetch_orderbook_rest(market_ticker)
-        return None
+            fresh = await self._fetch_orderbook_rest(market_ticker)
+            if fresh is not None:
+                return fresh
+        return result  # fall back to stale rather than nothing
 
     async def _fetch_orderbook_rest(self, market_ticker: str) -> Optional[Dict[str, Any]]:
         """Fetch orderbook via REST API as fallback when WebSocket cache misses."""
@@ -1008,18 +1020,36 @@ class PolymarketClient:
         except Exception as e:
             logger.error(f"Failed to refresh Polymarket markets: {e}")
 
+    def _book_is_fresh(self, book) -> bool:
+        """A cached book is reusable only if recent enough for the estimated path.
+
+        Without this, a book cached early in a scan goes stale (>max age) but is
+        still RETURNED from cache here, then rejected by the caller's freshness
+        gate — yielding None and a phantom 'no orderbook'. Treating a stale
+        cached book as a miss forces a fresh REST re-fetch instead.
+        """
+        if not isinstance(book, dict):
+            return False
+        ts = book.get('timestamp')
+        if ts is None:
+            return True
+        max_age = getattr(Config, 'ESTIMATED_MAX_ORDERBOOK_AGE_SECONDS', 30)
+        return (time.time() - float(ts)) <= max_age
+
     async def get_market_orderbook(self, market_id: str, token_id: str = None) -> Optional[Dict[str, Any]]:
         """Get market orderbook from cache, with REST fallback."""
         market_orderbooks = self.orderbook_cache.get(market_id, {})
         if token_id:
             result = market_orderbooks.get(token_id) or market_orderbooks.get(self.token_outcome_map.get(token_id))
-            if result is not None:
+            if result is not None and self._book_is_fresh(result):
                 return result
-            # REST fallback (budget-limited)
+            # Cache miss or STALE cached book → fetch fresh (budget-limited).
             if Config.ORDERBOOK_REST_FALLBACK and self._orderbook_rest_budget > 0:
                 self._orderbook_rest_budget -= 1
-                return await self._fetch_orderbook_rest(token_id)
-            return None
+                fresh = await self._fetch_orderbook_rest(token_id)
+                if fresh is not None:
+                    return fresh
+            return result  # fall back to the stale book rather than nothing
         if market_orderbooks:
             return market_orderbooks
         # REST fallback for first token if available
