@@ -663,79 +663,73 @@ class PolymarketClient:
             return False
     
     async def _bootstrap_markets_via_rest(self):
-        """Bootstrap market discovery using REST API with full pagination."""
+        """Bootstrap market discovery via the CLOB sampling-markets endpoint.
+
+        We use CLOB ``/sampling-markets`` (cursor-paginated) rather than the
+        Gamma ``/markets`` endpoint because:
+          * Gamma caps ``limit`` at 100 and 422s on deep ``offset`` pagination,
+            so it could only ever surface ~100 markets — the root cause of the
+            bot seeing 100 markets and finding 0 arbs.
+          * sampling-markets returns ONLY active, order-book-enabled markets —
+            i.e. the actually-tradeable arbitrage universe (~5,600) — with the
+            ``question``/``description``/``end_date_iso``/``tokens`` fields the
+            matcher, verifier, and executor all need, in ~1.5s.
+        """
         import aiohttp
-        import json
-        
+
         try:
-            # Use Polymarket Gamma API to discover markets with pagination.
-            url = f"{Config.POLYMARKET_GAMMA_BASE}/markets"
+            url = f"{Config.POLYMARKET_CLOB_BASE}/sampling-markets"
             all_markets = []
-            offset = 0
-            limit = 500  # Max limit per request
-            max_pages = Config.POLYMARKET_MAX_DISCOVERY_PAGES
+            cursor = ""
             page = 0
+            max_pages = Config.POLYMARKET_MAX_DISCOVERY_PAGES
 
             timeout = aiohttp.ClientTimeout(total=30)
             async with aiohttp.ClientSession(timeout=timeout, headers=Config.default_headers()) as session:
                 while page < max_pages:
-                    params = {
-                        "active": "true",
-                        "closed": "false",
-                        "limit": limit,
-                        "offset": offset,
-                    }
+                    params = {"next_cursor": cursor} if cursor else {}
 
-                    # Fetch this page with retry/backoff. A transient failure
-                    # (incl. a Cloudflare 403 if the UA ever regresses) must be
-                    # retried and surfaced loudly — NOT silently treated as
-                    # "end of data" (the old `except: break` is what made the
-                    # bot fall back to ~100 markets and find 0 arbs).
-                    markets_data = None
+                    # Retry/backoff per page; fail LOUD on exhaustion rather than
+                    # silently returning a partial catalog as "end of data".
+                    payload = None
                     last_err = None
                     for attempt in range(Config.DISCOVERY_FETCH_RETRIES):
                         try:
                             async with session.get(url, params=params) as response:
                                 if response.status == 403:
                                     raise RuntimeError(
-                                        "Polymarket Gamma 403 (Cloudflare) — check User-Agent header"
+                                        "Polymarket CLOB 403 (Cloudflare) — check User-Agent header"
                                     )
                                 response.raise_for_status()
-                                markets_data = await response.json()
+                                payload = await response.json()
                             break
                         except Exception as e:
                             last_err = e
                             backoff = 2 ** attempt
                             logger.warning(
-                                "Polymarket discovery offset=%d attempt %d/%d failed: %s; retrying in %ds",
-                                offset, attempt + 1, Config.DISCOVERY_FETCH_RETRIES, e, backoff,
+                                "Polymarket discovery page=%d attempt %d/%d failed: %s; retrying in %ds",
+                                page, attempt + 1, Config.DISCOVERY_FETCH_RETRIES, e, backoff,
                             )
                             await asyncio.sleep(backoff)
 
-                    if markets_data is None:
-                        # Retries exhausted — fail LOUD, don't return a partial
-                        # catalog as if it were complete.
+                    if payload is None:
                         logger.error(
-                            "Polymarket discovery FAILED at offset=%d after %d retries: %s. "
+                            "Polymarket discovery FAILED at page=%d after %d retries: %s. "
                             "Catalog INCOMPLETE (%d markets so far).",
-                            offset, Config.DISCOVERY_FETCH_RETRIES, last_err, len(all_markets),
+                            page, Config.DISCOVERY_FETCH_RETRIES, last_err, len(all_markets),
                         )
                         self.catalog_truncated = True
                         break
 
-                    if not isinstance(markets_data, list) or len(markets_data) == 0:
+                    rows = payload.get("data", []) if isinstance(payload, dict) else []
+                    if not rows:
                         break
-
-                    all_markets.extend(markets_data)
+                    all_markets.extend(rows)
                     page += 1
-                    logger.info(
-                        "Fetched %d Polymarket markets at offset %d, total: %d",
-                        len(markets_data), offset, len(all_markets),
-                    )
-
-                    if len(markets_data) < limit:
-                        break  # reached the end of the catalog
-                    offset += limit
+                    cursor = payload.get("next_cursor", "") if isinstance(payload, dict) else ""
+                    # 'LTE=' is CLOB's base64 end-of-list sentinel.
+                    if not cursor or cursor == "LTE=":
+                        break
 
                 if page >= max_pages:
                     logger.warning(
@@ -746,83 +740,77 @@ class PolymarketClient:
 
             if not all_markets:
                 logger.error(
-                    "No markets from Polymarket REST API — discovery failed; matching "
+                    "No markets from Polymarket CLOB API — discovery failed; matching "
                     "will have nothing to compare against."
                 )
                 return
 
             logger.info("Polymarket REST discovery complete: %d markets", len(all_markets))
-            markets_data = all_markets
-            
-            # Process and cache markets
-            for market in markets_data:
+
+            # Process and cache markets (CLOB sampling-markets schema).
+            for market in all_markets:
                 try:
-                    # Parse market data
-                    market_id = market.get('id')
-                    question = market.get('question', '')
-                    outcomes = market.get('outcomes', '[]')
-                    clob_token_ids = market.get('clobTokenIds', '[]')
-                    outcome_prices = market.get('outcomePrices', '[]')
-                    
-                    # Parse JSON strings if needed
-                    if isinstance(outcomes, str):
-                        outcomes = json.loads(outcomes)
-                    if isinstance(clob_token_ids, str):
-                        clob_token_ids = json.loads(clob_token_ids)
-                    if isinstance(outcome_prices, str):
-                        outcome_prices = json.loads(outcome_prices)
-                    
-                    if not all([market_id, question, outcomes, clob_token_ids]):
+                    if not market.get("enable_order_book") or market.get("closed"):
                         continue
-                    
-                    # Store market data
+                    market_id = market.get("condition_id")
+                    question = market.get("question", "")
+                    tokens = market.get("tokens", []) or []
+                    if not market_id or not question or not tokens:
+                        continue
+
+                    outcomes = [t.get("outcome") for t in tokens]
+                    clob_token_ids = [t.get("token_id") for t in tokens]
+
                     self.markets_cache[market_id] = {
-                        'id': market_id,
-                        'title': question,
-                        'clean_title': self._clean_title(question),
-                        'platform': 'polymarket',
-                        'status': 'active',
-                        'active': True,  # Explicitly set as active since we filter for active markets
-                        'outcomes': outcomes,
-                        'clob_token_ids': clob_token_ids,
-                        'outcome_prices': outcome_prices,
-                        'raw_data': market
+                        "id": market_id,
+                        "title": question,
+                        "clean_title": self._clean_title(question),
+                        "platform": "polymarket",
+                        "status": "active",
+                        "active": True,
+                        "outcomes": outcomes,
+                        "clob_token_ids": clob_token_ids,
+                        # CLOB exposes resolution rules in 'description' and the
+                        # close date in 'end_date_iso' — feed both through so the
+                        # ResolutionCriteriaVerifier can use them.
+                        "description": market.get("description", ""),
+                        "endDate": market.get("end_date_iso"),
+                        "raw_data": market,
                     }
-                    
-                    # Store asset IDs for WebSocket subscription
+
                     self.asset_ids.extend(clob_token_ids)
-                    
-                    # Store initial price data
-                    for i, (outcome, price_str, token_id) in enumerate(zip(outcomes, outcome_prices, clob_token_ids)):
-                        if market_id not in self.price_cache:
-                            self.price_cache[market_id] = {}
-                        
-                        price = self._safe_float(price_str)
-                        if not self._is_valid_probability(price):
+
+                    for token in tokens:
+                        token_id = token.get("token_id")
+                        outcome = token.get("outcome")
+                        if not token_id:
                             continue
-                        # (B11) outcomePrices is a single last/mid price, NOT an
-                        # executable bid/ask. Flag executable=False so nothing
-                        # mistakes buy_price==sell_price for a real spread.
-                        self.price_cache[market_id][token_id] = {
-                            'outcome': outcome,
-                            'buy_price': price,
-                            'sell_price': price,
-                            'mid_price': price,
-                            'last_price': price,
-                            'executable': False,
-                            'timestamp': time.time()
-                        }
+                        price = self._safe_float(token.get("price"))
                         self.token_to_market[token_id] = market_id
                         self.token_outcome_map[token_id] = outcome
-                
+                        if not self._is_valid_probability(price):
+                            continue
+                        # The token 'price' is a last/mid price, NOT an executable
+                        # bid/ask — flag executable=False so nothing mistakes
+                        # buy==sell for a real spread (real books come from WS/REST).
+                        self.price_cache.setdefault(market_id, {})[token_id] = {
+                            "outcome": outcome,
+                            "buy_price": price,
+                            "sell_price": price,
+                            "mid_price": price,
+                            "last_price": price,
+                            "executable": False,
+                            "timestamp": time.time(),
+                        }
+
                 except Exception as e:
                     logger.debug(f"Error processing Polymarket market: {e}")
                     continue
-            
+
             self.asset_ids = list(dict.fromkeys(asset_id for asset_id in self.asset_ids if asset_id))
             logger.info(f"Bootstrapped {len(self.markets_cache)} Polymarket markets via REST API")
             logger.info(f"Collected {len(self.asset_ids)} unique asset IDs for WebSocket subscription")
-            
+
         except Exception as e:
             logger.error(f"Failed to bootstrap Polymarket markets: {e}")
     
@@ -909,77 +897,82 @@ class PolymarketClient:
         return self.price_cache.get(market_id, {})
     
     async def refresh_markets(self):
-        """Re-fetch markets from REST API, merging new ones into existing cache."""
+        """Re-fetch the CLOB sampling-markets catalog, upserting into the cache.
+
+        Uses the same CLOB cursor source as the bootstrap (NOT Gamma — which
+        caps at 100 and would falsely tombstone the other ~5,500 markets).
+        Snapshots the cache before fetching so it can tombstone markets that
+        dropped out of the active set, but only after a COMPLETE sweep.
+        """
         import aiohttp
-        import json as _json
         try:
-            logger.info("Refreshing Polymarket markets from REST API...")
-            url = f"{Config.POLYMARKET_GAMMA_BASE}/markets"
-            added = 0
-            offset = 0
-            limit = 500
+            logger.info("Refreshing Polymarket markets from CLOB sampling-markets...")
+            url = f"{Config.POLYMARKET_CLOB_BASE}/sampling-markets"
+            cursor = ""
+            page = 0
+            max_pages = Config.POLYMARKET_MAX_DISCOVERY_PAGES
+            added = updated = 0
+            seen_ids = set()
+            sweep_complete = False
             refresh_start = time.monotonic()
-            max_refresh_seconds = 120  # 2 minute hard cap
+            max_refresh_seconds = 120
+
             timeout = aiohttp.ClientTimeout(total=30)
-            seen_ids = set()        # (B7) for tombstoning markets no longer returned
-            updated = 0
-            sweep_complete = False  # only tombstone after a FULL successful sweep
             async with aiohttp.ClientSession(timeout=timeout, headers=Config.default_headers()) as session:
-                while True:
+                while page < max_pages:
                     if time.monotonic() - refresh_start > max_refresh_seconds:
-                        logger.warning(f"Polymarket refresh timed out after {max_refresh_seconds}s at offset {offset}")
+                        logger.warning(f"Polymarket refresh timed out after {max_refresh_seconds}s")
                         break
-                    params = {"active": "true", "closed": "false", "limit": limit, "offset": offset}
+                    params = {"next_cursor": cursor} if cursor else {}
                     try:
                         async with session.get(url, params=params) as response:
                             response.raise_for_status()
-                            markets_data = await response.json()
-                        if not markets_data or not isinstance(markets_data, list) or len(markets_data) == 0:
-                            break
-                        for market in markets_data:
-                            market_id = market.get('id')
-                            if not market_id:
-                                continue
-                            question = market.get('question', '')
-                            outcomes = market.get('outcomes', '[]')
-                            clob_token_ids = market.get('clobTokenIds', '[]')
-                            outcome_prices = market.get('outcomePrices', '[]')
-                            if isinstance(outcomes, str):
-                                outcomes = _json.loads(outcomes)
-                            if isinstance(clob_token_ids, str):
-                                clob_token_ids = _json.loads(clob_token_ids)
-                            if isinstance(outcome_prices, str):
-                                outcome_prices = _json.loads(outcome_prices)
-                            if not all([market_id, question, outcomes, clob_token_ids]):
-                                continue
-                            seen_ids.add(market_id)
-                            is_new = market_id not in self.markets_cache
-                            # (B7) Upsert — refresh mutable fields for EXISTING markets
-                            # too (prices/outcomes/tokens/raw), not just insert-if-absent.
-                            self.markets_cache[market_id] = {
-                                'id': market_id, 'title': question,
-                                'clean_title': self._clean_title(question),
-                                'platform': 'polymarket', 'status': 'active', 'active': True,
-                                'outcomes': outcomes, 'clob_token_ids': clob_token_ids,
-                                'outcome_prices': outcome_prices, 'raw_data': market
-                            }
-                            for outcome, price_str, token_id in zip(outcomes, outcome_prices, clob_token_ids):
-                                self.token_to_market[token_id] = market_id
-                                self.token_outcome_map[token_id] = outcome
-                            if is_new:
-                                added += 1
-                            else:
-                                updated += 1
-                        if len(markets_data) < limit:
-                            sweep_complete = True
-                            break
-                        offset += limit
+                            payload = await response.json()
                     except Exception as e:
-                        logger.warning(f"Error during Polymarket refresh at offset {offset}: {e}")
+                        logger.warning(f"Error during Polymarket refresh page {page}: {e}")
                         break
-            # (B7) Tombstone: after a COMPLETE sweep, mark cached PM markets not
-            # seen this pass as inactive (closed/resolved). Skip on a partial
-            # sweep (timeout/error) to avoid mass false tombstoning.
+
+                    rows = payload.get("data", []) if isinstance(payload, dict) else []
+                    if not rows:
+                        sweep_complete = True
+                        break
+                    for market in rows:
+                        if not market.get("enable_order_book") or market.get("closed"):
+                            continue
+                        market_id = market.get("condition_id")
+                        question = market.get("question", "")
+                        tokens = market.get("tokens", []) or []
+                        if not market_id or not question or not tokens:
+                            continue
+                        seen_ids.add(market_id)
+                        is_new = market_id not in self.markets_cache
+                        outcomes = [t.get("outcome") for t in tokens]
+                        clob_token_ids = [t.get("token_id") for t in tokens]
+                        self.markets_cache[market_id] = {
+                            "id": market_id, "title": question,
+                            "clean_title": self._clean_title(question),
+                            "platform": "polymarket", "status": "active", "active": True,
+                            "outcomes": outcomes, "clob_token_ids": clob_token_ids,
+                            "description": market.get("description", ""),
+                            "endDate": market.get("end_date_iso"),
+                            "raw_data": market,
+                        }
+                        for token in tokens:
+                            tid = token.get("token_id")
+                            if tid:
+                                self.token_to_market[tid] = market_id
+                                self.token_outcome_map[tid] = token.get("outcome")
+                        added += int(is_new)
+                        updated += int(not is_new)
+
+                    page += 1
+                    cursor = payload.get("next_cursor", "") if isinstance(payload, dict) else ""
+                    if not cursor or cursor == "LTE=":
+                        sweep_complete = True
+                        break
+
+            # Tombstone markets that dropped out of the active set — only after a
+            # complete sweep, to avoid mass false tombstoning on a partial fetch.
             tombstoned = 0
             if sweep_complete:
                 for _mid, _m in self.markets_cache.items():
