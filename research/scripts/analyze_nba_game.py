@@ -13,9 +13,9 @@ Data sources (all historical, ~1-minute resolution, wall-clock aligned):
 import argparse
 import os
 
-from nba_odds_study import analysis
-from nba_odds_study import dataset as ds
-from nba_odds_study import teams
+from research.nba_odds_study import analysis
+from research.nba_odds_study import dataset as ds
+from research.nba_odds_study import teams
 
 
 def _fmt(v):

@@ -10,7 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from kalshi_arbitrage.execution.capture import ExecutionCapture
 from kalshi_arbitrage.mock_execution import ExecutionResult
-from research.paper.analyze_paper_run import analyze, load_records
+from kalshi_arbitrage.validation.paper.analyze_paper_run import analyze, load_records
 
 
 def _result(**kw):

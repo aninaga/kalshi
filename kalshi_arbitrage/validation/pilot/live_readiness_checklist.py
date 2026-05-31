@@ -25,8 +25,8 @@ from kalshi_arbitrage.config import Config
 from kalshi_arbitrage.execution.kill_switch import KillSwitch
 from kalshi_arbitrage.matching import CompositeVerifier, load_labeled_pairs
 
-from research.matching.gate import MatchingGate
-from research.paper.analyze_paper_run import analyze, load_records
+from kalshi_arbitrage.validation.matching.gate import MatchingGate
+from kalshi_arbitrage.validation.paper.analyze_paper_run import analyze, load_records
 
 
 @dataclass

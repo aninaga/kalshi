@@ -14,9 +14,9 @@ from kalshi_arbitrage.matching.labels import (
     load_labeled_pairs,
     save_labeled_pairs,
 )
-from research.matching.dataset import build_dataset, make_hard_negatives
-from research.matching.evaluate import evaluate_matcher
-from research.matching.gate import MatchingGate
+from kalshi_arbitrage.validation.matching.dataset import build_dataset, make_hard_negatives
+from kalshi_arbitrage.validation.matching.evaluate import evaluate_matcher
+from kalshi_arbitrage.validation.matching.gate import MatchingGate
 
 
 def _true_pair(kid, pid, title, polarity="aligned", close="2026-11-03T00:00:00"):

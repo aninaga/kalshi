@@ -11,7 +11,7 @@ the live pilot (Phase D):
 
 Usage::
 
-    python -m research.paper.analyze_paper_run market_data/executions/executions.jsonl
+    python -m kalshi_arbitrage.validation.paper.analyze_paper_run market_data/executions/executions.jsonl
 """
 
 from __future__ import annotations

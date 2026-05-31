@@ -8,7 +8,7 @@ the metric that gates live trading; recall is secondary.
 Usage::
 
     from kalshi_arbitrage.matching import CompositeVerifier, load_labeled_pairs
-    from research.matching.evaluate import evaluate_matcher
+    from kalshi_arbitrage.validation.matching.evaluate import evaluate_matcher
 
     pairs = load_labeled_pairs("market_data/matching/labeled_pairs.jsonl")
     report = evaluate_matcher(CompositeVerifier(), pairs)

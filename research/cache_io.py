@@ -36,7 +36,7 @@ PARQUET_DIR = REPO_ROOT / "research" / "cache"
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from nba_odds_study import dataset, espn  # noqa: E402, F401
+from research.nba_odds_study import dataset, espn  # noqa: E402, F401
 
 CACHE_GLOBS = ("*_total-winner_polymarket.pkl", "*_total-winner.pkl")
 

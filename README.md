@@ -118,29 +118,42 @@ Matches: 89 | Opportunities: 3
 
 ## 📁 Project Structure
 
+This repo holds **two separate projects** that share market-data plumbing but
+are otherwise independent — keep contributions on the correct side of the line:
+
+1. **Kalshi–Polymarket arbitrage bot** — the `kalshi_arbitrage/` package and the
+   root `arbitrage_analyzer.py` entry point. Never imports from `research/`.
+2. **Automated hedge-fund research** (NBA quant studies, strategy backtesting) —
+   everything under `research/`. Self-contained.
+
 ```
 kalshi/
-├── arbitrage_analyzer.py          # Main system entry point
-├── kalshi_arbitrage/              # Core system package
+├── arbitrage_analyzer.py          # ARB BOT — main entry point
+├── analyze_price_discrepancies.py # ARB BOT — helper scripts
+├── simple_price_check.py
+├── kalshi_arbitrage/              # ARB BOT — core package
 │   ├── api_clients.py             # API integration layer
-│   ├── market_analyzer.py         # Analysis engine
-│   ├── config.py                  # Configuration management
-│   ├── utils.py                   # Utility functions
-│   └── websocket_client.py        # Real-time streaming
-├── tests/                         # Test suites (pytest; async via pytest-asyncio)
-│   ├── test_polymarket_websocket_parsing.py  # WS payload parsing
-│   ├── test_polymarket_data_quality.py       # price/orderbook validation
-│   ├── test_orderbook_quality_controls.py    # synthetic vs real orderbook gating
-│   ├── test_confirmed_pnl_tracker.py         # confirmed-PnL tracking
-│   └── test_enhanced_infrastructure.py       # risk engine / circuit breaker / monitoring
-├── tools/                         # Analysis utilities
-│   ├── detailed_search.py         # Market search tool
-│   └── search_markets.py          # Data analysis utility
-└── market_data/                   # Data storage
-    ├── arbitrage_analysis.log     # System logs
-    ├── arbitrage_opportunities.json # Historical opportunities
-    └── scan_report_*.json         # Individual scan reports
+│   ├── market_analyzer.py         # detection / matching engine
+│   ├── matching/                  # cross-venue match verification (polarity, criteria, allowlist)
+│   ├── execution/                 # general-purpose order execution (gateways, engine, kill switch)
+│   ├── arbitrage_executor.py      # arb orchestration (two-leg + confirmed-unwind hedge)
+│   ├── validation/                # arb validation tooling
+│   │   ├── matching/              #   matcher precision/recall backtest + gate
+│   │   ├── paper/                 #   paper-run analysis
+│   │   └── pilot/                 #   live-pilot readiness checklist
+│   ├── risk_engine.py · monitoring.py · config.py · utils.py · websocket_client.py
+│   └── ...
+├── research/                      # HEDGE FUND — NBA quant research (independent project)
+│   ├── nba_odds_study/            #   NBA data/analysis package
+│   ├── harness/                   #   strategy backtester (replay, fills, cost profiles)
+│   ├── scorer/ · promotion/ · registry/ · lake/ · agents/
+│   └── scripts/                   #   NBA study CLIs (analyze_nba_game.py, study_*.py)
+├── tests/                         # ARB BOT test suite (pytest; async via pytest-asyncio)
+├── tools/                         # misc analysis utilities
+├── docs/EXECUTION.md              # auto-execution platform guide
+└── market_data/                   # data storage (logs, opportunities, captures)
 ```
+
 
 ## 🔍 How It Works
 

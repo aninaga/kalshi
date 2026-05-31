@@ -12,7 +12,7 @@ from kalshi_arbitrage.config import Config
 from kalshi_arbitrage.arbitrage_executor import ArbitrageExecutor
 from kalshi_arbitrage.execution import KALSHI, POLYMARKET, KillSwitch, OrderOutcome
 from kalshi_arbitrage.execution.operator import OperatorControls
-from research.pilot.live_readiness_checklist import (
+from kalshi_arbitrage.validation.pilot.live_readiness_checklist import (
     check_allowlist,
     check_kill_switch,
     check_live_readiness,

@@ -44,11 +44,11 @@ adds a verification layer that runs after the similarity threshold:
 
 ```bash
 # 1. capture candidate pairs during a paper scan, label a sample true/false,
-#    save to market_data/matching/labeled_pairs.jsonl  (see research/matching/dataset.py)
+#    save to market_data/matching/labeled_pairs.jsonl  (see kalshi_arbitrage/validation/matching/dataset.py)
 # 2. measure + gate:
 python - <<'PY'
 from kalshi_arbitrage.matching import CompositeVerifier, load_labeled_pairs
-from research.matching.gate import MatchingGate
+from kalshi_arbitrage.validation.matching.gate import MatchingGate
 pairs = load_labeled_pairs("market_data/matching/labeled_pairs.jsonl")
 print(MatchingGate().evaluate(CompositeVerifier(), pairs).summary())
 PY
@@ -70,7 +70,7 @@ The gate requires the **lower bound** of a bootstrapped precision CI to clear
 
 ```bash
 # run with EXECUTION_ENABLED=True, EXECUTION_MODE="paper" for N days, then:
-python -m research.paper.analyze_paper_run market_data/executions/executions.jsonl
+python -m kalshi_arbitrage.validation.paper.analyze_paper_run market_data/executions/executions.jsonl
 ```
 
 Reports estimated-vs-realized drift (with CI), hedge rate, unwind failures, and
@@ -84,7 +84,7 @@ Reports estimated-vs-realized drift (with CI), hedge rate, unwind failures, and
    to `match_allowlist.json` and add verified pairs.
 3. Run the readiness gate:
    ```bash
-   python -m research.pilot.live_readiness_checklist
+   python -m kalshi_arbitrage.validation.pilot.live_readiness_checklist
    ```
 4. Only if it prints `PASS`, set `EXECUTION_MODE="live"`. Caps:
    `LIVE_MAX_NOTIONAL_USD` (default $5/leg), `LIVE_MAX_CONCURRENT_POSITIONS=1`.
