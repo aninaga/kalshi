@@ -103,6 +103,12 @@ class Config:
     # Market discovery completeness. Kalshi paginates by cursor; loop until the
     # cursor is exhausted (cap is a safety bound, not the normal stop).
     KALSHI_MAX_DISCOVERY_PAGES = 200  # 200 * 200 = 40k markets ceiling
+    # Kalshi's individual matchable markets come from event-based discovery (the
+    # bulk /markets listing is ~all multi-leg parlays). These control how
+    # complete + fast that phase is.
+    KALSHI_MAX_EVENT_PAGES = 30           # open-events pages (200 each)
+    KALSHI_EVENT_SERIES_CONCURRENCY = 6   # parallel series-market fetches
+    KALSHI_EVENT_DISCOVERY_ENABLED = True # the source of matchable Kalshi markets
     # Polymarket discovery: paginate the Gamma catalog to completion.
     POLYMARKET_MAX_DISCOVERY_PAGES = 60  # 60 * 500 = 30k markets ceiling
     # Retry budget for a transient discovery fetch failure before giving up.

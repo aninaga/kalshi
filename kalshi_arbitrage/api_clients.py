@@ -316,18 +316,24 @@ class KalshiClient:
         """
         import aiohttp
 
+        if not Config.KALSHI_EVENT_DISCOVERY_ENABLED:
+            return
+
         try:
-            # Step 1: Fetch all open events (paginated)
+            # Step 1: Fetch open events (paginated to completion).
             all_events = []
             cursor = None
             timeout = aiohttp.ClientTimeout(total=15)
-            for _ in range(10):
+            for _ in range(Config.KALSHI_MAX_EVENT_PAGES):
                 params = {'limit': 200, 'status': 'open'}
                 if cursor:
                     params['cursor'] = cursor
                 async with session.get(
                     f"{Config.KALSHI_API_BASE}/events", params=params, timeout=timeout
                 ) as resp:
+                    if resp.status == 429:
+                        await asyncio.sleep(2)
+                        continue
                     if resp.status != 200:
                         break
                     data = await resp.json()
@@ -347,57 +353,65 @@ class KalshiClient:
                 et = e.get('event_ticker', '')
                 if not et or 'MULTIGAME' in et.upper():
                     continue
-                series_prefix = et.split('-')[0]
-                series_set.add(series_prefix)
+                series_set.add(et.split('-')[0])
 
             logger.info(f"Event-based discovery: {len(series_set)} unique series to query")
 
-            # Step 3: For each series, fetch one page of markets (limit=200)
+            # Step 3: Fetch markets per series with BOUNDED CONCURRENCY (the old
+            # sequential 0.3s-per-series loop took ~2min for ~370 series and was
+            # the matching bottleneck). A semaphore keeps us under Kalshi's rate
+            # limit while running several series in flight.
+            sem = asyncio.Semaphore(Config.KALSHI_EVENT_SERIES_CONCURRENCY)
             new_count = 0
-            rate_limit_backoff = 0.3  # seconds between requests
-            for series in sorted(series_set):
-                try:
-                    params = {'limit': 200, 'series_ticker': series}
-                    async with session.get(
-                        f"{Config.KALSHI_API_BASE}/markets",
-                        params=params, timeout=timeout,
-                    ) as resp:
-                        if resp.status == 429:
-                            await asyncio.sleep(2)
+
+            async def _fetch_series(series):
+                nonlocal new_count
+                async with sem:
+                    for attempt in range(4):
+                        try:
+                            params = {'limit': 200, 'series_ticker': series}
+                            async with session.get(
+                                f"{Config.KALSHI_API_BASE}/markets",
+                                params=params, timeout=timeout,
+                            ) as resp:
+                                if resp.status == 429:
+                                    await asyncio.sleep(1.5 * (attempt + 1))
+                                    continue
+                                if resp.status != 200:
+                                    return
+                                data = await resp.json()
+                                break
+                        except asyncio.TimeoutError:
+                            return
+                        except Exception as e:
+                            logger.debug(f"Error fetching series {series}: {e}")
+                            return
+                    else:
+                        return  # exhausted retries (kept getting 429)
+
+                    for market in data.get('markets', []):
+                        ticker = market.get('ticker', '')
+                        if not ticker or 'MULTIGAME' in ticker.upper():
                             continue
-                        if resp.status != 200:
+                        if ticker in self.markets_cache:
                             continue
-                        data = await resp.json()
-                        markets = data.get('markets', [])
-                        for market in markets:
-                            ticker = market.get('ticker', '')
-                            if not ticker or 'MULTIGAME' in ticker.upper():
-                                continue
-                            if ticker in self.markets_cache:
-                                continue  # already have it
-                            self.discovered_tickers.append(ticker)
-                            self._rest_discovered_tickers.add(ticker)
-                            self.markets_cache[ticker] = {
-                                'id': market.get('id'),
-                                'ticker': ticker,
-                                'title': market.get('title', ticker),
-                                'platform': 'kalshi',
-                                'status': market.get('status', 'active'),
-                                'close_time': market.get('close_time'),
-                                'clean_title': self._clean_title(
-                                    market.get('title', ticker)
-                                ),
-                                'raw_data': market,
-                                'source': 'rest_event',
-                                'last_updated': time.time(),
-                            }
-                            new_count += 1
-                except asyncio.TimeoutError:
-                    continue
-                except Exception as e:
-                    logger.debug(f"Error fetching series {series}: {e}")
-                    continue
-                await asyncio.sleep(rate_limit_backoff)
+                        self.discovered_tickers.append(ticker)
+                        self._rest_discovered_tickers.add(ticker)
+                        self.markets_cache[ticker] = {
+                            'id': market.get('id'),
+                            'ticker': ticker,
+                            'title': market.get('title', ticker),
+                            'platform': 'kalshi',
+                            'status': market.get('status', 'active'),
+                            'close_time': market.get('close_time'),
+                            'clean_title': self._clean_title(market.get('title', ticker)),
+                            'raw_data': market,
+                            'source': 'rest_event',
+                            'last_updated': time.time(),
+                        }
+                        new_count += 1
+
+            await asyncio.gather(*(_fetch_series(s) for s in sorted(series_set)))
 
             logger.info(
                 f"Event-based discovery added {new_count} individual markets "
