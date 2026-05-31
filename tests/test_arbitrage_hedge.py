@@ -51,7 +51,9 @@ def _live(monkeypatch):
     monkeypatch.setattr(Config, "EXECUTION_MODE", "live", raising=False)
     monkeypatch.setattr(Config, "RISK_GATE_ENABLED", False, raising=False)
     monkeypatch.setattr(Config, "REQUIRE_BALANCE_CHECK", False, raising=False)
+    monkeypatch.setattr(Config, "MATCH_REQUIRE_ALLOWLIST_FOR_LIVE", False, raising=False)
     monkeypatch.setattr(Config, "MAX_POSITION_SIZE_USD", 1000.0, raising=False)
+    monkeypatch.setattr(Config, "LIVE_MAX_NOTIONAL_USD", 1000.0, raising=False)
     KillSwitch.instance().reset()
     yield
     KillSwitch.instance().reset()

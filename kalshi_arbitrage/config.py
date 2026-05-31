@@ -214,6 +214,14 @@ class Config:
     EXECUTION_CAPTURE_ENABLED = True
     EXECUTION_CAPTURE_FILE = "executions/executions.jsonl"
 
+    # --- Live pilot (Phase D) ---
+    # Extreme caps for the first real-money trades. The staged schedule is the
+    # ceiling per leg; raise only after a clean daily reconciliation.
+    LIVE_MAX_NOTIONAL_USD = 5.0          # hard per-leg notional clamp in live mode
+    LIVE_MAX_CONCURRENT_POSITIONS = 1    # at most one in-flight live trade
+    # Drift tolerance the paper run must clear before live (USD per trade).
+    PAPER_MAX_EST_VS_REAL_DRIFT_USD = 0.25
+
     # Data Storage
     DATA_DIR = "market_data"
     OPPORTUNITIES_FILE = "arbitrage_opportunities.json"

@@ -32,6 +32,7 @@ from .execution import (
     PolymarketGateway,
 )
 from .execution.capture import ExecutionCapture
+from .matching import AllowlistVerifier
 from .mock_execution import ExecutionResult, FeeModel, PolymarketFeeClient
 from .risk_engine import RiskEngine
 
@@ -55,8 +56,10 @@ class ArbitrageExecutor:
         self.risk_engine = RiskEngine()
         self.pnl_tracker = pnl_tracker
         self.capture = ExecutionCapture() if Config.EXECUTION_CAPTURE_ENABLED else None
+        self.allowlist = AllowlistVerifier()
         self._daily_loss = 0.0
         self._daily_reset_date: Optional[str] = None
+        self._live_in_flight = 0  # concurrent live executions
 
     async def close(self) -> None:
         await self.kalshi_gateway.close()
@@ -92,6 +95,7 @@ class ArbitrageExecutor:
             return self._skipped_result(opp_id, opportunity, 'unbuildable_legs', t0), None
         buy_req, sell_req = legs
 
+        self._live_in_flight += 1
         try:
             buy_out, sell_out = await asyncio.wait_for(
                 asyncio.gather(
@@ -104,6 +108,8 @@ class ArbitrageExecutor:
         except asyncio.TimeoutError:
             logger.error("Execution timeout for %s", opp_id)
             return self._skipped_result(opp_id, opportunity, 'execution_timeout', t0), None
+        finally:
+            self._live_in_flight -= 1
 
         buy_out = self._coerce_outcome(buy_out, buy_req)
         sell_out = self._coerce_outcome(sell_out, sell_req)
@@ -150,11 +156,25 @@ class ArbitrageExecutor:
             if reason:
                 return reason
 
-        # Balance gate (live only; best-effort — can't verify → warn, proceed).
-        if Config.EXECUTION_MODE == 'live' and Config.REQUIRE_BALANCE_CHECK:
-            reason = await self._balance_gate(opp)
-            if reason:
-                return reason
+        # Live-only pilot gates.
+        if Config.EXECUTION_MODE == 'live':
+            # Allowlist gate: the pilot only fires on operator-approved pairs.
+            if Config.MATCH_REQUIRE_ALLOWLIST_FOR_LIVE:
+                match = opp.get('match_data', {}) or {}
+                k_id = match.get('kalshi_market', {}).get('id')
+                p_id = opp.get('polymarket_token') or match.get('polymarket_market', {}).get('id')
+                if not self.allowlist.is_allowlisted(k_id, p_id):
+                    return 'not_allowlisted'
+
+            # Concurrency cap.
+            if self._live_in_flight >= Config.LIVE_MAX_CONCURRENT_POSITIONS:
+                return 'max_concurrent_positions'
+
+            # Balance gate (best-effort — can't verify → warn, proceed).
+            if Config.REQUIRE_BALANCE_CHECK:
+                reason = await self._balance_gate(opp)
+                if reason:
+                    return reason
 
         return None
 
@@ -350,8 +370,11 @@ class ArbitrageExecutor:
     def _capped_volume(self, opp: Dict) -> float:
         volume = float(opp.get('max_tradeable_volume', 0))
         avg_price = max(self._buy_price(opp), 0.01)
-        max_shares = Config.MAX_POSITION_SIZE_USD / avg_price
-        return min(volume, max_shares)
+        notional_cap = Config.MAX_POSITION_SIZE_USD
+        # Live pilot: an even tighter staged notional clamp on real money.
+        if Config.EXECUTION_MODE == 'live':
+            notional_cap = min(notional_cap, Config.LIVE_MAX_NOTIONAL_USD)
+        return min(volume, notional_cap / avg_price)
 
     def _build_result(self, opp_id: str, opp: Dict, buy: OrderOutcome,
                       sell: OrderOutcome, filled: float, t0: float,
