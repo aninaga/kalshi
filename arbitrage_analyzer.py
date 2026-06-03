@@ -400,9 +400,10 @@ def main():
     Config.REQUIRE_REAL_ORDERBOOKS_FOR_ESTIMATED = not args.allow_synthetic_orderbooks
     Config.CONFIRMED_PNL_INCLUDE_SIMULATION = args.count_simulated_as_confirmed
 
-    # WebSocket-only mode is always enabled - remove REST fallback option
+    # WebSocket-only mode is always enabled for live streaming, but keep REST
+    # orderbook fallback ON: a batch scan barely warms the WS feed, so WS-only
+    # would starve single scans of books (see Config.STREAM_FALLBACK_TO_REST).
     Config.REALTIME_ENABLED = True
-    Config.STREAM_FALLBACK_TO_REST = False
     
     # Ensure WebSocket connections are enabled (can be controlled via CLI)
     if args.realtime or not hasattr(args, 'realtime'):

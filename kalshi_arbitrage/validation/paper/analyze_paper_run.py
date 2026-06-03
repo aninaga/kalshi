@@ -126,11 +126,20 @@ def analyze(records: List[Dict]) -> PaperRunReport:
 
 
 def main(argv: Optional[List[str]] = None) -> int:
+    import os
     argv = argv if argv is not None else sys.argv[1:]
     if not argv:
         print("usage: analyze_paper_run.py <executions.jsonl>")
         return 2
-    records = load_records(argv[0])
+    path = argv[0]
+    if not os.path.exists(path):
+        print(f"No capture file at {path}. Run a paper scan first "
+              f"(kalshi-arb scan) to generate executions.")
+        return 2
+    records = load_records(path)
+    if not records:
+        print(f"{path} is empty — no executions captured yet.")
+        return 0
     print(analyze(records).summary())
     return 0
 

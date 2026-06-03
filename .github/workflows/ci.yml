@@ -12,12 +12,13 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Install dependencies
+      - name: Install package (editable, with dev extras)
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install pytest pytest-asyncio
+          pip install -e ".[dev]"
       - name: Byte-compile (syntax check)
         run: python -m compileall kalshi_arbitrage
+      - name: CLI wires up (console script importable)
+        run: kalshi-arb --help
       - name: Run arbitrage-bot tests
         run: pytest tests/ -q

@@ -29,50 +29,59 @@ This system continuously monitors **ALL** markets on both Kalshi and Polymarket,
 - **Professional Logging**: Multi-level logging with file rotation
 - **Authentication Support**: Full Kalshi API access with proper authentication
 
-## 🚀 Installation
+## 🚀 Installation (local)
 
 ```bash
-# Navigate to project directory
-cd kalshi
+git clone <repo> && cd kalshi
+git checkout claude/codebase-overview-QycoJ      # the working branch
 
-# Install dependencies
-pip install -r requirements.txt
-
-# Configure authentication (optional but recommended)
-cp .env.example .env
-# Edit .env with your Kalshi credentials
+python -m venv .venv && source .venv/bin/activate   # recommended
+pip install -e .                                  # installs the `kalshi-arb` command
 ```
 
-## ⚡ Quick Start
+`pip install -e .` is all you need to run a paper scan. Optional extras:
+`pip install -e ".[dev]"` (tests), `".[viz]"` (plots), `".[research]"` (parquet/duckdb).
 
-### Basic Continuous Monitoring
-Monitor markets continuously with default settings:
+## ⚡ Quick Start — one command for everything
+
+Everything runs through a single `kalshi-arb` CLI:
+
 ```bash
-python arbitrage_analyzer.py --mode continuous
+kalshi-arb doctor            # 1. confirm both venues are reachable (catches the
+                             #    Polymarket Cloudflare/User-Agent gotcha)
+kalshi-arb scan              # 2. full paper pipeline: detect → match → verify →
+                             #    price → simulated fills → PnL  (NO real orders)
+kalshi-arb analyze-paper     # 3. summarize the captured paper run (drift, hedges)
+kalshi-arb diagnose matches  #    inspect why matches are/aren't found
+kalshi-arb backtest          #    matching precision/recall gate (needs labels)
+kalshi-arb readiness         # 4. live-pilot go/no-go checklist
+kalshi-arb live status       #    show the live-trading lock state
 ```
 
-### Single Comprehensive Scan
-Run one complete analysis with lossless completeness:
+> **Safe by default.** `kalshi-arb scan` runs the *entire* pipeline including the
+> execution engine, but fills are **simulated** — no real order is ever placed.
+> Real trading additionally requires `EXECUTION_MODE="live"` **and** an armed
+> live-trading lock (see *Auto-Execution* below). It is the mechanism saved for
+> after you've validated.
+
+### Common scan variations
 ```bash
-python arbitrage_analyzer.py --mode single --completeness LOSSLESS
+kalshi-arb scan --mode single --completeness LOSSLESS   # one thorough pass
+kalshi-arb scan --mode continuous --interval 30         # keep monitoring
+kalshi-arb scan --threshold 0.015 --similarity 0.80     # custom thresholds
 ```
 
-### Real-Time Streaming Mode
-Enable WebSocket streaming for sub-second latency:
-```bash
-python arbitrage_analyzer.py --mode continuous --realtime --completeness BALANCED
-```
+(The original `python arbitrage_analyzer.py ...` entry point still works; the CLI
+just wraps it plus the validation tools.)
 
-### Custom Parameters
-Fine-tune analysis with custom thresholds and completeness:
+### Going live (only after validation)
 ```bash
-python arbitrage_analyzer.py \
-  --mode continuous \
-  --interval 15 \
-  --threshold 0.015 \
-  --similarity 0.8 \
-  --completeness LOSSLESS
+kalshi-arb readiness                 # must print PASS
+kalshi-arb live arm                  # writes the arm token (deliberate, explicit)
+EXECUTION_MODE=live kalshi-arb scan  # real orders now permitted, hard-capped
+kalshi-arb live disarm               # lock it back down
 ```
+See [`docs/EXECUTION.md`](docs/EXECUTION.md) for the full safety model.
 
 ## 📊 Sample Output
 
