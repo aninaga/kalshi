@@ -195,6 +195,18 @@ class ArbitrageAnalysisSystem:
             synthetic_count = int(scan_report.get('synthetic_orderbook_opportunities', 0))
             real_count = int(scan_report.get('real_orderbook_opportunities', 0))
             print(f"Orderbook Quality: real={real_count}, synthetic={synthetic_count}")
+        ob = scan_report.get('orderbook_availability', {})
+        if isinstance(ob, dict) and (ob.get('kalshi_hits') or ob.get('polymarket_hits')):
+            kh, ke = ob.get('kalshi_hits', 0), ob.get('kalshi_empty', 0)
+            ph, pe = ob.get('polymarket_hits', 0), ob.get('polymarket_empty', 0)
+            print(f"Live Liquidity: Kalshi {kh-ke}/{kh} books with depth, "
+                  f"Polymarket {ph-pe}/{ph} books with depth")
+            if kh and ke == kh:
+                print("  ⚠️  All Kalshi books are EMPTY — detection starved on the "
+                      "Kalshi side (0 opps = no liquidity, not an efficient market).")
+            if ph and pe == ph:
+                print("  ⚠️  All Polymarket books are EMPTY — detection starved on "
+                      "the Polymarket side.")
         data_quality = scan_report.get('data_quality', {})
         if isinstance(data_quality, dict):
             pm_ws = data_quality.get('polymarket_websocket') or {}

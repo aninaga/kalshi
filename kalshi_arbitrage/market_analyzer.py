@@ -90,7 +90,17 @@ class MarketAnalyzer:
         self._orderbook_miss_logged: Set[str] = set()
         self._scan_orderbook_hits: Dict[str, int] = {'kalshi': 0, 'polymarket': 0}
         self._scan_orderbook_misses: Dict[str, int] = {'kalshi': 0, 'polymarket': 0}
-    
+        self._scan_orderbook_empty: Dict[str, int] = {'kalshi': 0, 'polymarket': 0}
+
+    @staticmethod
+    def _book_has_levels(orderbook: Dict, platform: str) -> bool:
+        """True if a fetched book has at least one resting bid/ask level."""
+        if platform == 'kalshi':
+            keys = ('yes_asks', 'yes_bids', 'no_asks', 'no_bids')
+        else:
+            keys = ('bids', 'asks')
+        return any(orderbook.get(k) for k in keys)
+
     async def initialize(self):
         """Initialize the analyzer with WebSocket connections."""
         logger.info("Initializing Market Analyzer with WebSocket-only mode...")
@@ -220,6 +230,7 @@ class MarketAnalyzer:
         # Reset per-scan orderbook counters, REST budgets, and nearest-miss tracker
         self._scan_orderbook_hits = {'kalshi': 0, 'polymarket': 0}
         self._scan_orderbook_misses = {'kalshi': 0, 'polymarket': 0}
+        self._scan_orderbook_empty = {'kalshi': 0, 'polymarket': 0}
         self._nearest_misses = []  # Track best rejected margins for diagnostics
         self.reset_completeness_stats()  # (B14) per-scan; else the scan report shows LIFETIME totals
         self.kalshi_client.reset_rest_budget()
@@ -320,6 +331,9 @@ class MarketAnalyzer:
                     self._scan_orderbook_hits['polymarket'] /
                     max(1, self._scan_orderbook_hits['polymarket'] + self._scan_orderbook_misses['polymarket'])
                 ),
+                # Books fetched OK but with no resting levels (liquidity health).
+                'kalshi_empty': self._scan_orderbook_empty['kalshi'],
+                'polymarket_empty': self._scan_orderbook_empty['polymarket'],
             }
         }
         
@@ -367,10 +381,27 @@ class MarketAnalyzer:
         k_misses = self._scan_orderbook_misses['kalshi']
         p_hits = self._scan_orderbook_hits['polymarket']
         p_misses = self._scan_orderbook_misses['polymarket']
+        k_empty = self._scan_orderbook_empty['kalshi']
+        p_empty = self._scan_orderbook_empty['polymarket']
         logger.info(
-            f"Orderbook availability: Kalshi {k_hits}/{k_hits+k_misses} hits, "
-            f"Polymarket {p_hits}/{p_hits+p_misses} hits"
+            f"Orderbook availability: Kalshi {k_hits}/{k_hits+k_misses} hits "
+            f"({k_empty} empty), Polymarket {p_hits}/{p_hits+p_misses} hits "
+            f"({p_empty} empty)"
         )
+        # Loud liquidity-health warning: if a venue's fetched books are all
+        # empty, detection CAN'T find arbitrage regardless of matching — this
+        # distinguishes "efficient market" from "no live liquidity on a venue".
+        if k_hits > 0 and k_empty == k_hits:
+            logger.warning(
+                "LIQUIDITY: all %d Kalshi books fetched were EMPTY (no resting "
+                "orders) — detection is starved on the Kalshi side. 0 opportunities "
+                "here reflects missing liquidity, not an efficient market.", k_hits
+            )
+        if p_hits > 0 and p_empty == p_hits:
+            logger.warning(
+                "LIQUIDITY: all %d Polymarket books fetched were EMPTY — detection "
+                "is starved on the Polymarket side.", p_hits
+            )
 
         self._first_scan_completed = True
         logger.info(f"Scan completed in {scan_duration:.2f}s - Found {len(opportunities)} opportunities")
@@ -1542,6 +1573,13 @@ class MarketAnalyzer:
                 if ts is None or (time.time() - float(ts)) <= max_age:
                     self.completeness_stats['cache_hits'] += 1
                     self._scan_orderbook_hits[platform] = self._scan_orderbook_hits.get(platform, 0) + 1
+                    # Liquidity health: a fetched book with no resting levels is a
+                    # "hit" but carries no tradeable depth. Tracking this lets a
+                    # live operator tell "efficient market" from "venue serving
+                    # empty books" (the latter is why a live scan can find 0 even
+                    # when both venues respond 200).
+                    if not self._book_has_levels(orderbook, platform):
+                        self._scan_orderbook_empty[platform] = self._scan_orderbook_empty.get(platform, 0) + 1
                     orderbook_copy = dict(orderbook)
                     orderbook_copy.setdefault('is_synthetic', False)
                     return orderbook_copy
