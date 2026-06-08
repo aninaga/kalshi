@@ -234,6 +234,48 @@ def _is_categorical(market: Dict) -> bool:
     return first in {"who", "which"} or title.startswith("what will")
 
 
+# Elected offices / contest types. Stripped as boilerplate for the *entity*
+# overlap, but they DISTINGUISH the contest — an Attorney-General race is not a
+# Governor race even in the same state. Multi-word offices are canonical keys.
+_OFFICE_PHRASES = {
+    ("attorney", "general"): "attorney_general",
+    ("secretary", "of", "state"): "secretary_of_state",
+    ("lieutenant", "governor"): "lieutenant_governor",
+}
+_OFFICE_SINGLE = {
+    "governor": "governor", "governorship": "governor",
+    "senate": "senate", "senator": "senate",
+    "house": "house",
+    "mayor": "mayor", "mayoral": "mayor",
+    "president": "president", "presidency": "president", "presidential": "president",
+    "comptroller": "comptroller", "treasurer": "treasurer",
+    "sheriff": "sheriff", "council": "council",
+}
+
+
+def _offices(clean_text: str) -> set:
+    """Set of elected-office keys named in a cleaned title."""
+    tokens = clean_text.split()
+    found = set()
+    consumed = set()
+    n = len(tokens)
+    for i in range(n):
+        if i in consumed:
+            continue
+        for plen, key in (
+            (3, _OFFICE_PHRASES.get(tuple(tokens[i:i + 3]))),
+            (2, _OFFICE_PHRASES.get(tuple(tokens[i:i + 2]))),
+        ):
+            if key:
+                found.add(key)
+                consumed.update(range(i, i + plen))
+                break
+    for i, tok in enumerate(tokens):
+        if i not in consumed and tok in _OFFICE_SINGLE:
+            found.add(_OFFICE_SINGLE[tok])  # canonical form (governorship->governor)
+    return found
+
+
 # --------------------------------------------------------------------------- #
 #  Verifiers                                                                    #
 # --------------------------------------------------------------------------- #
@@ -346,6 +388,17 @@ class DistinguishingEntityVerifier:
             return MatchVerdict(False, UNKNOWN, 0.0,
                                 (f"scope_mismatch k={sorted(k_scope)} p={sorted(p_scope)}",),
                                 self.name)
+
+        # (A1) Office veto: a contest for a DIFFERENT elected office is a
+        # different event (Attorney General race vs Governor race in the same
+        # state). Offices are stripped as boilerplate for entity overlap, so
+        # check them explicitly: if both name an office and they don't intersect,
+        # reject.
+        k_off = _offices(_clean(kalshi_market))
+        p_off = _offices(_clean(polymarket_market))
+        if k_off and p_off and not (k_off & p_off):
+            return MatchVerdict(False, UNKNOWN, 0.0,
+                                (f"office_mismatch k={sorted(k_off)} p={sorted(p_off)}",), self.name)
 
         kt = set(_clean(kalshi_market).split()) - _BOILERPLATE
         pt = set(_clean(polymarket_market).split()) - _BOILERPLATE
