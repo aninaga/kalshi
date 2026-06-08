@@ -1,0 +1,261 @@
+"""Shared live cross-venue arbitrage primitives.
+
+Factored out of ``tools/find_live_arb.py`` so the discovery scan, the continuous
+capture monitor, and the retroactive backtest all share ONE implementation of:
+catalog fetch, synchronized order-book fetch (migrated Kalshi ``orderbook_fp``
+schema), and the fee-aware complementary-arb economics. The pure economics
+functions take no network and are unit-tested; the network functions are thin
+stdlib HTTP (works behind the env's policy with a browser UA).
+
+The economics enforce the discipline the analysis proved is required: a
+complementary arb (own outcome-A + outcome-B across venues for < $1) is only
+real once it clears the dominant Kalshi taker fee curve 0.07*P*(1-P).
+"""
+
+from __future__ import annotations
+
+import json
+import time
+import urllib.request
+from collections import defaultdict
+from typing import Dict, List, Optional, Tuple
+
+from .config import Config
+from .matching import CompositeVerifier, INVERTED
+from .mock_execution import FeeModel
+from .utils import _BOILERPLATE, clean_title, get_similarity_score
+
+UA = {"User-Agent": getattr(Config, "HTTP_USER_AGENT", None)
+      or "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+KBASE = "https://api.elections.kalshi.com/trade-api/v2"
+PM_CLOB = "https://clob.polymarket.com"
+
+
+def get(url: str, timeout: int = 25):
+    try:
+        return json.load(urllib.request.urlopen(urllib.request.Request(url, headers=UA), timeout=timeout))
+    except Exception:
+        return None
+
+
+# --------------------------------------------------------------------------- #
+#  Pure economics (no network — unit-tested)                                   #
+# --------------------------------------------------------------------------- #
+
+def kalshi_fee_per_contract(price: float) -> float:
+    """Kalshi taker fee per contract, $ — the curve 0.07*P*(1-P). Maximal at
+    P=0.5 (1.75¢), tiny at the extremes. This is the cost that eats mid-priced
+    cross-venue gaps and is why durable arb sits at extreme prices."""
+    return 0.07 * price * (1.0 - price)
+
+
+def walk_complementary(
+    ladder_a: List[Tuple[float, float]],
+    ladder_b: List[Tuple[float, float]],
+    a_is_kalshi: bool,
+    b_is_kalshi: bool,
+    pm_fee_bps: int = 1000,
+) -> Optional[Dict]:
+    """Walk two ascending ask ladders (outcome A, outcome B on opposite venues),
+    accumulating size while each marginal contract is net-positive AFTER fees.
+
+    Returns dict(size, cost, net, avg_a, avg_b, net_edge) or None if no
+    net-positive size exists. Mirrors the proven /tmp logic; the FeeModel is the
+    single source of truth for both venues' fees.
+    """
+    qa = [list(x) for x in ladder_a]
+    qb = [list(x) for x in ladder_b]
+    ia = ib = 0
+    n = ca = cb = 0.0
+    while ia < len(qa) and ib < len(qb):
+        pa, sa = qa[ia]
+        pb, sb = qb[ib]
+        step = min(sa, sb)
+        if step <= 0:
+            ia += sa <= 0
+            ib += sb <= 0
+            continue
+        kf = (FeeModel.kalshi_taker_fee(pa, step) if a_is_kalshi else 0.0) \
+            + (FeeModel.kalshi_taker_fee(pb, step) if b_is_kalshi else 0.0)
+        pf = (FeeModel.polymarket_taker_fee(pa, step, pm_fee_bps) if not a_is_kalshi else 0.0) \
+            + (FeeModel.polymarket_taker_fee(pb, step, pm_fee_bps) if not b_is_kalshi else 0.0)
+        if (1.0 - pa - pb) * step - kf - pf <= 0:
+            break
+        n += step
+        ca += pa * step
+        cb += pb * step
+        qa[ia][1] -= step
+        qb[ib][1] -= step
+        if qa[ia][1] <= 1e-9:
+            ia += 1
+        if qb[ib][1] <= 1e-9:
+            ib += 1
+    if n <= 0:
+        return None
+    kf = (FeeModel.kalshi_taker_fee(ca / n, n) if a_is_kalshi else 0.0) \
+        + (FeeModel.kalshi_taker_fee(cb / n, n) if b_is_kalshi else 0.0)
+    pf = (FeeModel.polymarket_taker_fee(ca / n, n, pm_fee_bps) if not a_is_kalshi else 0.0) \
+        + (FeeModel.polymarket_taker_fee(cb / n, n, pm_fee_bps) if not b_is_kalshi else 0.0)
+    net = (n - ca - cb) - kf - pf
+    return {"size": n, "cost": ca + cb, "net": net, "avg_a": ca / n, "avg_b": cb / n,
+            "net_edge": net / (ca + cb) if (ca + cb) else 0.0}
+
+
+# --------------------------------------------------------------------------- #
+#  Order books (synchronized, migrated schema)                                #
+# --------------------------------------------------------------------------- #
+
+def _parse_levels(arr):
+    out = []
+    for p, s in arr or []:
+        pf, sf = float(p), float(s)
+        if pf > 1.5:  # legacy cents
+            pf /= 100.0
+        out.append((pf, sf))
+    return out
+
+
+def kalshi_book(ticker: str) -> Tuple[list, list]:
+    """(yes_ask_ladder, no_ask_ladder) ascending. yes_ask = 1 - best_no_bid."""
+    ob = get(f"{KBASE}/markets/{ticker}/orderbook?depth=100")
+    fp = (ob or {}).get("orderbook_fp") or {}
+    yb = _parse_levels(fp.get("yes_dollars"))
+    nb = _parse_levels(fp.get("no_dollars"))
+    return sorted((1 - p, s) for p, s in nb), sorted((1 - p, s) for p, s in yb)
+
+
+def pm_asks(token: str) -> list:
+    b = get(f"{PM_CLOB}/book?token_id={token}")
+    return sorted((float(a["price"]), float(a["size"])) for a in (b or {}).get("asks", []))
+
+
+def price_pair(pair: Dict, pm_fee_bps: int = 1000) -> Optional[Dict]:
+    """Fetch synchronized books for a verified pair and price the cross-venue
+    complementary arb. ``pair`` carries ktk, tokens, polarity (from a verdict)."""
+    kyes, kno = kalshi_book(pair["ktk"])
+    toks = {str(t.get("outcome", "")).lower(): t["token_id"] for t in pair["tokens"]}
+    yes_t = toks.get("yes") or pair["tokens"][0]["token_id"]
+    no_t = toks.get("no") or pair["tokens"][1]["token_id"]
+    pyes, pno = pm_asks(yes_t), pm_asks(no_t)
+    inv = pair["polarity"] == INVERTED
+    pm_A, pm_B = (pno, pyes) if inv else (pyes, pno)  # A = Kalshi-YES outcome
+    ka = kyes[0][0] if kyes else 9
+    pa = pm_A[0][0] if pm_A else 9
+    kb = kno[0][0] if kno else 9
+    pb = pm_B[0][0] if pm_B else 9
+    a_is_k = ka <= pa
+    b_is_k = kb <= pb
+    if a_is_k == b_is_k:  # need one leg per venue
+        return None
+    A = kyes if a_is_k else pm_A
+    B = kno if b_is_k else pm_B
+    if not A or not B:
+        return None
+    res = walk_complementary(A, B, a_is_k, b_is_k, pm_fee_bps)
+    if not res:
+        return None
+    res.update({**pair, "a_src": "K" if a_is_k else "P", "b_src": "K" if b_is_k else "P"})
+    return res
+
+
+# --------------------------------------------------------------------------- #
+#  Catalogs + matching                                                         #
+# --------------------------------------------------------------------------- #
+
+def fetch_polymarket() -> List[Dict]:
+    out, cur = [], ""
+    while True:
+        d = get(f"{PM_CLOB}/sampling-markets" + (f"?next_cursor={cur}" if cur else ""))
+        if not d:
+            break
+        rows = d.get("data", []) if isinstance(d, dict) else d
+        out.extend(rows)
+        cur = d.get("next_cursor", "") if isinstance(d, dict) else ""
+        if not cur or cur == "LTE=" or len(out) > 9000:
+            break
+    return [m for m in out if m.get("active") and not m.get("closed") and len(m.get("tokens") or []) == 2]
+
+
+def fetch_kalshi() -> List[Dict]:
+    evs, cur, pages = [], "", 0
+    while pages < 45:
+        d = get(f"{KBASE}/events?limit=200&status=open&with_nested_markets=true"
+                + (f"&cursor={cur}" if cur else ""))
+        if not d:
+            break
+        evs.extend(d.get("events", []))
+        cur = d.get("cursor", "")
+        pages += 1
+        if not cur or not d.get("events"):
+            break
+
+    def f(m, k):
+        try:
+            return float(m.get(k) or 0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    out = []
+    for e in evs:
+        for m in (e.get("markets") or []):
+            if any(x in m.get("ticker", "") for x in ("MULTIGAME", "CROSSCATEGORY")):
+                continue
+            if (f(m, "yes_bid_dollars") > 0 and f(m, "yes_ask_dollars") > 0) \
+                    or f(m, "volume_fp") > 0 or f(m, "open_interest_fp") > 0:
+                out.append(m)
+    return out
+
+
+def match_pairs(pm: List[Dict], ks: List[Dict]) -> List[Dict]:
+    """Verified same-event (Kalshi, PM) pairs via similarity + CompositeVerifier."""
+    pmp = []
+    for m in pm:
+        ct = clean_title(m.get("question") or "")
+        pmp.append({"id": m.get("condition_id"), "title": m.get("question") or "",
+                    "clean": ct, "tokens": m.get("tokens"), "desc": m.get("description") or "",
+                    "close": m.get("end_date_iso"),
+                    "terms": {t for t in ct.split() if len(t) >= 3} - _BOILERPLATE})
+    idx = defaultdict(set)
+    for i, p in enumerate(pmp):
+        for t in p["terms"]:
+            idx[t].add(i)
+
+    verifier = CompositeVerifier()
+    pairs, seen = [], set()
+    for m in ks:
+        title = m.get("title") or ""
+        if not title:
+            continue
+        ct = clean_title(title)
+        cand = defaultdict(int)
+        for t in ({t for t in ct.split() if len(t) >= 3} - _BOILERPLATE):
+            for j in idx.get(t, ()):
+                cand[j] += 1
+        kd = {"id": m.get("ticker"), "title": title, "clean_title": ct,
+              "close_time": m.get("close_time"),
+              "raw_data": {"yes_sub_title": m.get("yes_sub_title", ""),
+                           "no_sub_title": m.get("no_sub_title", ""),
+                           "rules_primary": m.get("rules_primary", ""),
+                           "rules_secondary": m.get("rules_secondary", "")}}
+        for j, sc in sorted(cand.items(), key=lambda x: -x[1])[:8]:
+            if sc < 2:
+                continue
+            p = pmp[j]
+            key = (m.get("ticker"), p["id"])
+            if key in seen or get_similarity_score(ct, p["clean"]) < Config.SIMILARITY_THRESHOLD:
+                continue
+            pd = {"id": p["id"], "title": p["title"], "clean_title": p["clean"],
+                  "close_time": p["close"], "raw_data": {"description": p["desc"]}}
+            verdict = verifier.verify(kd, pd)
+            if not verdict.passed:
+                continue
+            seen.add(key)
+            pairs.append({"ktk": m.get("ticker"), "kt": title, "pt": p["title"],
+                          "tokens": p["tokens"], "pid": p["id"],
+                          "polarity": verdict.polarity, "uncertain": verdict.uncertain})
+    return pairs
+
+
+def discover() -> List[Dict]:
+    """Full sweep: fetch both catalogs and return verified same-event pairs."""
+    return match_pairs(fetch_polymarket(), fetch_kalshi())
