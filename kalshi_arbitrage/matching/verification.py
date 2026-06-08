@@ -141,6 +141,77 @@ def _parse_time(value) -> Optional[datetime]:
     return None
 
 
+_MONTH_NUM = {
+    "january": 1, "jan": 1, "february": 2, "feb": 2, "march": 3, "mar": 3,
+    "april": 4, "apr": 4, "may": 5, "june": 6, "jun": 6, "july": 7, "jul": 7,
+    "august": 8, "aug": 8, "september": 9, "sep": 9, "sept": 9, "october": 10,
+    "oct": 10, "november": 11, "nov": 11, "december": 12, "dec": 12,
+}
+# A deadline is governed by these lead-ins; a bare date elsewhere is ignored.
+_DEADLINE_LEAD = r"(?:by|before|until|through|on or before|no later than|end of)"
+_DL_MONTH_DAY = re.compile(
+    rf"\b{_DEADLINE_LEAD}\s+([A-Za-z]+)\.?\s+(\d{{1,2}})(?:st|nd|rd|th)?,?\s+(\d{{4}})",
+    re.IGNORECASE,
+)
+_DL_MONTH_YEAR = re.compile(
+    rf"\b{_DEADLINE_LEAD}\s+([A-Za-z]+)\.?\s+(\d{{4}})", re.IGNORECASE
+)
+_DL_YEAR = re.compile(rf"\b{_DEADLINE_LEAD}\s+(\d{{4}})\b", re.IGNORECASE)
+_IN_YEAR = re.compile(r"\bin\s+(20\d\d)\b", re.IGNORECASE)
+_BARE_YEAR = re.compile(r"\b(20\d\d)\b")
+
+
+def _raw_rules(market: Dict) -> str:
+    """Raw (uncleaned) title + resolution-criteria text — keeps dates intact."""
+    raw = market.get("raw_data", {}) or {}
+    parts = [str(market.get("title") or "")]
+    for key in ("rules_primary", "rules_secondary", "description", "subtitle"):
+        val = raw.get(key)
+        if isinstance(val, str) and val.strip():
+            parts.append(val)
+    return " ".join(parts)
+
+
+def _extract_deadline(text: str) -> Optional[int]:
+    """Return the governing resolution-deadline as a date ordinal, or None.
+
+    Normalizes the many phrasings of the SAME cutoff to a comparable date so
+    "before Jan 1, 2027", "by December 31, 2026", and "in 2026" all collapse to
+    ~the same ordinal (within a day), while genuinely different deadlines
+    ("before Sep 1, 2026" vs "by December 31, 2026") stay far apart. Prefers an
+    explicit ``<lead-in> <Month> <day>, <year>`` deadline; falls back to
+    month-year, then year, then a bare/`in <year>` (treated as that year-end).
+    """
+    from datetime import date
+    m = _DL_MONTH_DAY.search(text)
+    if m:
+        mon = _MONTH_NUM.get(m.group(1).lower())
+        if mon:
+            try:
+                return date(int(m.group(3)), mon, int(m.group(2))).toordinal()
+            except ValueError:
+                pass
+    m = _DL_MONTH_YEAR.search(text)
+    if m:
+        mon = _MONTH_NUM.get(m.group(1).lower())
+        if mon:
+            # "before <Month> <year>" → first of that month (exclusive cutoff).
+            return date(int(m.group(2)), mon, 1).toordinal()
+    m = _DL_YEAR.search(text)
+    if m:
+        # "before/by <year>" means before that year BEGINS — i.e. the boundary
+        # Jan 1 of <year> (== end of <year>-1). This makes "before 2027" line up
+        # with "before Jan 1, 2027" and "by December 31, 2026" (all ~1 day apart)
+        # rather than landing a full year late.
+        return date(int(m.group(1)), 1, 1).toordinal()
+    m = _IN_YEAR.search(text) or _BARE_YEAR.search(text)
+    if m:
+        # "in <year>" / a bare "<year> election" can resolve anytime within the
+        # year → end-of-year cutoff.
+        return date(int(m.group(1)), 12, 31).toordinal()
+    return None
+
+
 def _rules_text(market: Dict) -> str:
     """Best-effort resolution-criteria text for a market."""
     raw = market.get("raw_data", {}) or {}
@@ -746,6 +817,48 @@ class ResolutionCriteriaVerifier:
         return MatchVerdict(True, UNKNOWN, 0.6, tuple(reasons or ("criteria_unverified",)), self.name)
 
 
+class ResolutionCongruenceVerifier:
+    """Reject pairs whose stated resolution DEADLINES diverge.
+
+    Two markets can name the same subject/scope/proposition yet resolve on
+    different cutoffs — "reopen the embassy *before Sep 1, 2026*" vs "*by Dec 31,
+    2026*", or "release an album *before Dec 1*" vs "*by Dec 31*". Those are not
+    the same contract: there's a window where one resolves YES and the other NO,
+    so a "hedge" across them is an un-hedged directional bet (basis risk). This
+    gate extracts the governing deadline from each venue's TITLE + rules text and
+    rejects when they differ by more than a few days.
+
+    Deliberately conservative on recall: the many phrasings of the *same* cutoff
+    ("before Jan 1, 2027" == "by Dec 31, 2026" == "in 2026") normalize to within
+    a day and PASS; it only fires when both sides expose a clear deadline AND
+    they are materially apart. Same-deadline pairs whose divergence is purely
+    *definitional* (e.g. "arrested" defined differently) are NOT caught here —
+    that residue is left to the optional LLM tiebreaker.
+    """
+
+    name = "resolution_congruence"
+
+    def __init__(self, tolerance_days: Optional[int] = None):
+        self.tolerance_days = (
+            tolerance_days if tolerance_days is not None
+            else getattr(Config, "MATCH_MAX_DEADLINE_SKEW_DAYS", 7)
+        )
+
+    def verify(self, kalshi_market: Dict, polymarket_market: Dict) -> MatchVerdict:
+        k_dl = _extract_deadline(_raw_rules(kalshi_market))
+        p_dl = _extract_deadline(_raw_rules(polymarket_market))
+        if k_dl is not None and p_dl is not None:
+            skew = abs(k_dl - p_dl)
+            if skew > self.tolerance_days:
+                return MatchVerdict(
+                    False, UNKNOWN, 0.0,
+                    (f"deadline_mismatch skew={skew}d (>{self.tolerance_days})",),
+                    self.name,
+                )
+            return MatchVerdict(True, UNKNOWN, 0.6, (f"deadline_ok skew={skew}d",), self.name)
+        return MatchVerdict(True, UNKNOWN, 0.3, ("deadline_unverified",), self.name)
+
+
 class AllowlistVerifier:
     """Operator allow/deny override.
 
@@ -907,4 +1020,5 @@ def default_verifiers() -> List[MatchVerifier]:
         OutcomePolarityVerifier(),
         DistinguishingEntityVerifier(),
         ResolutionCriteriaVerifier(),
+        ResolutionCongruenceVerifier(),
     ]

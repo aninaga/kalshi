@@ -223,6 +223,12 @@ class Config:
     MATCH_MIN_RULES_CONTAINMENT = 0.4
     # Operator allow/deny list of verified pairs.
     MATCH_ALLOWLIST_FILE = "matching/match_allowlist.json"
+    # Max divergence between the two venues' STATED resolution deadlines (parsed
+    # from title + rules text). "before Jan 1 2027" == "by Dec 31 2026" == "in
+    # 2026" all collapse to ~1 day; a genuine mismatch ("before Sep 1" vs "by Dec
+    # 31") is months. 7 days cleanly separates phrasing noise from real basis
+    # risk. The ResolutionCongruenceVerifier rejects beyond this.
+    MATCH_MAX_DEADLINE_SKEW_DAYS = 7
 
     # --- LLM tiebreaker (optional) ---
     # The deterministic verifier resolves 99%+ of pairs. A small residue is

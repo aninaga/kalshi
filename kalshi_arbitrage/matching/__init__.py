@@ -28,6 +28,7 @@ from .verification import (
     MatchVerifier,
     OutcomePolarityVerifier,
     ResolutionCriteriaVerifier,
+    ResolutionCongruenceVerifier,
     default_verifiers,
 )
 
@@ -42,6 +43,7 @@ __all__ = [
     "MatchVerifier",
     "OutcomePolarityVerifier",
     "ResolutionCriteriaVerifier",
+    "ResolutionCongruenceVerifier",
     "default_verifiers",
     "LLMTiebreaker",
     "TiebreakResult",
