@@ -40,6 +40,20 @@ class ExecutionCapture:
         verification = match.get("verification") if isinstance(match, dict) else None
         estimate = estimate or self.estimate_from_opportunity(opportunity)
 
+        # Scale the estimate to the size ACTUALLY filled. ``total_profit`` is the
+        # full-depth estimate, but the executor caps to MAX_POSITION_SIZE_USD per
+        # leg — so comparing full-size estimate vs capped realized would book the
+        # safety cap as "drift" and mask real fill quality. expected_net (scaled)
+        # measures slippage+fees on the traded size; expected_net_full is kept for
+        # reference.
+        expected_full = estimate.get("expected_net")
+        full_vol = float(opportunity.get("max_tradeable_volume") or 0)
+        filled_vol = float(getattr(result, "filled_volume", 0) or 0)
+        if expected_full is not None and full_vol > 0 and filled_vol > 0:
+            expected_scaled = expected_full * (filled_vol / full_vol)
+        else:
+            expected_scaled = expected_full
+
         row = {
             "ts": time.time(),
             "opportunity_id": getattr(result, "opportunity_id", opportunity.get("opportunity_id")),
@@ -54,8 +68,11 @@ class ExecutionCapture:
             "sell_platform": getattr(result, "sell_platform", None),
             "requested_volume": getattr(result, "requested_volume", 0),
             "filled_volume": getattr(result, "filled_volume", 0),
-            # Estimate (pre-trade expectation).
-            "expected_net": estimate.get("expected_net"),
+            # Estimate (pre-trade expectation). expected_net is scaled to the
+            # filled size for a fair fill-quality comparison; expected_net_full is
+            # the full-depth estimate.
+            "expected_net": expected_scaled,
+            "expected_net_full": expected_full,
             "expected_buy_price": estimate.get("buy_price"),
             "expected_sell_price": estimate.get("sell_price"),
             # Realized.

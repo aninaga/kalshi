@@ -23,6 +23,8 @@ from collections import Counter
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
+from ...config import Config
+
 
 def load_records(path: str) -> List[Dict]:
     records = []
@@ -125,21 +127,44 @@ def analyze(records: List[Dict]) -> PaperRunReport:
     return report
 
 
+def filter_records(records: List[Dict], source: Optional[str] = None,
+                   since: Optional[float] = None, strategy: Optional[str] = None) -> List[Dict]:
+    """Isolate a clean view of the shared capture file (which accumulates sample
+    fixtures + every past run): by confirmation_source, timestamp, or strategy."""
+    out = records
+    if source:
+        out = [r for r in out if r.get("confirmation_source") == source]
+    if since is not None:
+        # Capture rows timestamp the fill as "ts" (fall back to "timestamp").
+        out = [r for r in out if float(r.get("ts") or r.get("timestamp") or 0) >= since]
+    if strategy:
+        out = [r for r in out if r.get("strategy_type") == strategy]
+    return out
+
+
 def main(argv: Optional[List[str]] = None) -> int:
+    import argparse
     import os
-    argv = argv if argv is not None else sys.argv[1:]
-    if not argv:
-        print("usage: analyze_paper_run.py <executions.jsonl>")
+    ap = argparse.ArgumentParser(prog="analyze-paper")
+    ap.add_argument("path", nargs="?",
+                    default=os.path.join(Config.DATA_DIR, Config.EXECUTION_CAPTURE_FILE),
+                    help="executions JSONL (default: the live capture file)")
+    ap.add_argument("--source", help="only this confirmation_source (e.g. 'paper' for real paper fills)")
+    ap.add_argument("--since", type=float, help="only records with timestamp >= this epoch (this session)")
+    ap.add_argument("--strategy", help="only this strategy_type (e.g. 'complementary')")
+    args = ap.parse_args(argv)
+
+    if not os.path.exists(args.path):
+        print(f"No capture file at {args.path}. Run a paper scan first "
+              f"(kalshi-arb scan / monitor --execute) to generate executions.")
         return 2
-    path = argv[0]
-    if not os.path.exists(path):
-        print(f"No capture file at {path}. Run a paper scan first "
-              f"(kalshi-arb scan) to generate executions.")
-        return 2
-    records = load_records(path)
+    records = filter_records(load_records(args.path), args.source, args.since, args.strategy)
     if not records:
-        print(f"{path} is empty — no executions captured yet.")
+        print(f"{args.path}: no records match the filter "
+              f"(source={args.source} since={args.since} strategy={args.strategy}).")
         return 0
+    if any([args.source, args.since, args.strategy]):
+        print(f"(filtered: source={args.source} since={args.since} strategy={args.strategy})")
     print(analyze(records).summary())
     return 0
 

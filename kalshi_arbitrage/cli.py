@@ -119,7 +119,12 @@ def _cmd_backtest(args) -> int:
 
 def _cmd_analyze_paper(args) -> int:
     from .validation.paper.analyze_paper_run import main as m
-    return m([args.path])
+    argv = [args.path]
+    for flag in ("source", "since", "strategy"):
+        val = getattr(args, flag, None)
+        if val is not None:
+            argv += [f"--{flag}", str(val)]
+    return m(argv)
 
 
 def _cmd_readiness(args) -> int:
@@ -162,6 +167,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     a = sub.add_parser("analyze-paper", help="summarize a captured paper run")
     a.add_argument("--path", default="market_data/executions/executions.jsonl")
+    a.add_argument("--source", default=None,
+                   help="filter by confirmation_source (e.g. 'paper' for real paper fills)")
+    a.add_argument("--since", type=float, default=None, help="only records ts >= this epoch")
+    a.add_argument("--strategy", default=None, help="filter by strategy_type")
     a.set_defaults(func=_cmd_analyze_paper)
 
     sub.add_parser("readiness", help="live-pilot go/no-go checklist").set_defaults(func=_cmd_readiness)
