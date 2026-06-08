@@ -304,6 +304,12 @@ _PREDICATE_QUALIFIERS = frozenset({
     "quarterfinal", "quarterfinals",
     # "FINISH 1st" is a placement, not the same as "WIN".
     "finish",
+    # Superlative quantifiers: "score the MOST goals" is a ranking, not the same
+    # proposition as "score A goal". Present on only one side ⇒ different
+    # question. (Observed live as a 64% phantom "edge".) NB: "least" is excluded
+    # because "at least N" is a threshold phrasing (== "more than N"), not a
+    # superlative — including it wrongly split true measles-threshold pairs.
+    "most", "fewest",
 })
 
 # Generic event/structural words that recur across contests and are NOT the

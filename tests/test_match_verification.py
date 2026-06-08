@@ -140,6 +140,26 @@ def test_composite_require_allowlist_blocks_unlisted(tmp_path):
     assert not verdict.passed
 
 
+def test_composite_rejects_superlative_proposition_mismatch():
+    # "score the MOST goals" (a ranking) is not "score A goal" (an occurrence) —
+    # a real live 64% phantom "edge". Superlative on one side only => reject.
+    c = CompositeVerifier()
+    assert not c.verify(
+        _mkt("Will Christian Pulisic score the most goals for USMNT"),
+        _mkt("Will Christian Pulisic score a goal at the World Cup"),
+    ).passed
+
+
+def test_composite_keeps_at_least_threshold_pairs():
+    # "at least N" is a threshold phrasing (== "more than N"), NOT a superlative —
+    # must NOT be split by the qualifier veto.
+    c = CompositeVerifier()
+    assert c.verify(
+        _mkt("Will there be more than 4000 measles cases in 2026"),
+        _mkt("Will there be at least 4000 measles cases in 2026"),
+    ).passed
+
+
 def test_composite_carries_inverted_polarity_through():
     c = CompositeVerifier()
     verdict = c.verify(
