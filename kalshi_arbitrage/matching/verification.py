@@ -38,6 +38,7 @@ from ..utils import (
     extract_prop_threshold,
     thresholds_compatible,
 )
+from .gazetteer import extract_scope_entities, is_national_scope
 
 logger = logging.getLogger(__name__)
 
@@ -144,6 +145,58 @@ def _rules_text(market: Dict) -> str:
     return clean_title(" ".join(parts)) if parts else ""
 
 
+def _clean(market: Dict) -> str:
+    """Cleaned title for a market (cached or computed)."""
+    return market.get("clean_title") or clean_title(market.get("title", ""))
+
+
+def _scope_text(market: Dict) -> str:
+    """Cleaned title PLUS the Kalshi scope subtitles, for geography extraction.
+
+    A state-race Kalshi market often carries the state only in its
+    yes_sub_title / title; fold those in so the gazetteer sees them.
+    """
+    raw = market.get("raw_data", {}) or {}
+    extra = " ".join(
+        str(raw.get(k, "")) for k in ("yes_sub_title", "no_sub_title", "subtitle")
+        if raw.get(k)
+    )
+    base = _clean(market)
+    return f"{base} {clean_title(extra)}".strip() if extra else base
+
+
+def _token_matches(word: str, larger: set) -> bool:
+    """Does ``word`` refer to the SAME entity as some token in ``larger``?
+
+    Tolerant of spelling/punctuation variants (republican/republicans,
+    jaemyung/myung) without relaxing into different entities:
+      - exact match
+      - shared 4+ char prefix (either direction)
+      - one token is a substring of the other (>=4 chars) — handles concatenated
+        multi-word names like "jaemyung" containing "myung"
+      - high-cutoff fuzzy ratio (>=0.9) for single-token spelling variants
+    """
+    if word in larger:
+        return True
+    if len(word) >= 4:
+        pre = word[:4]
+        for lw in larger:
+            if len(lw) >= 4 and (lw.startswith(pre) or word.startswith(lw[:4])):
+                return True
+            if len(lw) >= 4 and (word in lw or lw in word):
+                return True
+    for lw in larger:
+        if len(word) >= 4 and len(lw) >= 4 and _ratio(word, lw) >= 0.9:
+            return True
+    return False
+
+
+def _ratio(a: str, b: str) -> float:
+    """Pure-stdlib similarity ratio (no deps) for single-token spelling variants."""
+    from difflib import SequenceMatcher
+    return SequenceMatcher(None, a, b).ratio()
+
+
 # --------------------------------------------------------------------------- #
 #  Verifiers                                                                    #
 # --------------------------------------------------------------------------- #
@@ -202,6 +255,67 @@ class OutcomePolarityVerifier:
         return MatchVerdict(True, UNKNOWN, 0.0, tuple(reasons), self.name)
 
 
+class DistinguishingEntityVerifier:
+    """Reject pairs whose distinguishing entity / scope differs.
+
+    The lexical similarity score rewards shared boilerplate, so different
+    real-world events with the same template ("Will <X> be arrested before
+    2027", "Will the Republicans win the <Y> Senate") score 0.76-0.82 and slip
+    through the threshold. After stripping boilerplate, the SET of distinguishing
+    tokens (the subject/scope) must agree. Two complementary checks:
+
+      (A) Geography/scope veto — if the two titles name different states or
+          countries, or one is national while the other names a sub-scope (state),
+          reject. Catches U.S.-Senate vs Montana-Senate, Israel-Qatar vs
+          Israel-Saudi, national-governorship vs South-Dakota-governor.
+      (B) Distinguishing-entity overlap — the smaller distinguishing token set
+          must be >= MATCH_MIN_DISTINGUISHING_OVERLAP covered by the other,
+          tolerant of spelling variants. Catches Kash-Patel vs Joe-Biden.
+
+    Runs for ALL above-threshold pairs (verifiers run after the similarity gate),
+    so it fires in the 0.76-0.85 band where utils._penalize_divergent_terms does
+    not. Deterministic, pure-Python.
+    """
+
+    name = "distinguishing_entity"
+
+    def __init__(self, min_overlap: Optional[float] = None):
+        self.min_overlap = (
+            min_overlap if min_overlap is not None
+            else getattr(Config, "MATCH_MIN_DISTINGUISHING_OVERLAP", 0.5)
+        )
+
+    def verify(self, kalshi_market: Dict, polymarket_market: Dict) -> MatchVerdict:
+        reasons: List[str] = []
+
+        # (A) Geography / scope veto. Use title + Kalshi subtitles for scope.
+        # The scope SETS must be equal: if either venue names a place the other
+        # doesn't, it's a different event — whether that's national-vs-state
+        # (k={} p={montana}) or a country swap (k={israel,qatar} p={israel,
+        # saudi_arabia}, which share israel but differ on the distinguishing one).
+        k_scope = extract_scope_entities(_scope_text(kalshi_market))
+        p_scope = extract_scope_entities(_scope_text(polymarket_market))
+        if k_scope != p_scope:
+            return MatchVerdict(False, UNKNOWN, 0.0,
+                                (f"scope_mismatch k={sorted(k_scope)} p={sorted(p_scope)}",),
+                                self.name)
+
+        # (B) Distinguishing-entity overlap.
+        kt = set(_clean(kalshi_market).split()) - _BOILERPLATE
+        pt = set(_clean(polymarket_market).split()) - _BOILERPLATE
+        if not kt or not pt:
+            # Nothing to distinguish on — let other verifiers decide.
+            return MatchVerdict(True, UNKNOWN, 0.3, ("no_distinguishing_tokens",), self.name)
+        smaller, larger = (kt, pt) if len(kt) <= len(pt) else (pt, kt)
+        matched = sum(1 for w in smaller if _token_matches(w, larger))
+        overlap = matched / len(smaller)
+        if overlap < self.min_overlap:
+            return MatchVerdict(False, UNKNOWN, 0.0,
+                                (f"distinguishing_entity_overlap={overlap:.2f}",), self.name)
+        return MatchVerdict(True, UNKNOWN, 0.7,
+                            (f"entity_overlap={overlap:.2f}",), self.name)
+
+
 class ResolutionCriteriaVerifier:
     """Reject pairs whose resolution criteria diverge.
 
@@ -241,10 +355,17 @@ class ResolutionCriteriaVerifier:
             reasons.append(f"threshold_mismatch k={k_thr} p={p_thr}")
             return MatchVerdict(False, UNKNOWN, 0.0, tuple(reasons), self.name)
 
-        # (c) Rules-text divergence (only when both sides expose rules).
+        # (c) Rules-text divergence (only when both sides expose rules). Also
+        # apply a scope veto on the rules text — a state/country named in one
+        # venue's rules but absent from the other's is a different event.
         k_rules = _rules_text(kalshi_market)
         p_rules = _rules_text(polymarket_market)
         if k_rules and p_rules:
+            k_rscope = extract_scope_entities(k_rules)
+            p_rscope = extract_scope_entities(p_rules)
+            if k_rscope and p_rscope and not (k_rscope & p_rscope):
+                reasons.append(f"rules_scope_mismatch k={sorted(k_rscope)} p={sorted(p_rscope)}")
+                return MatchVerdict(False, UNKNOWN, 0.0, tuple(reasons), self.name)
             d1 = set(k_rules.split()) - _BOILERPLATE
             d2 = set(p_rules.split()) - _BOILERPLATE
             if d1 and d2:
@@ -254,7 +375,8 @@ class ResolutionCriteriaVerifier:
                     if w in larger or (len(w) >= 4 and any(lw.startswith(w[:4]) for lw in larger))
                 )
                 containment = shared / len(smaller)
-                if containment < 0.3:
+                min_cont = getattr(Config, "MATCH_MIN_RULES_CONTAINMENT", 0.4)
+                if containment < min_cont:
                     reasons.append(f"rules_divergent containment={containment:.2f}")
                     return MatchVerdict(False, UNKNOWN, 0.0, tuple(reasons), self.name)
                 reasons.append(f"rules_ok containment={containment:.2f}")
@@ -392,5 +514,6 @@ def default_verifiers() -> List[MatchVerifier]:
     return [
         AllowlistVerifier(),
         OutcomePolarityVerifier(),
+        DistinguishingEntityVerifier(),
         ResolutionCriteriaVerifier(),
     ]

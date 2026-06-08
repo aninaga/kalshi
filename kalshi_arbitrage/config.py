@@ -211,10 +211,16 @@ class Config:
     # Live trading only fires on operator-allowlisted pairs (Phase D gate).
     MATCH_REQUIRE_ALLOWLIST_FOR_LIVE = True
     # Max difference between the two venues' close/resolution times.
-    # Same real-world event can list different close times across venues (e.g.
-    # provisional vs certified resolution), so don't be too tight. A YEAR
-    # mismatch (2026 vs 2028) is ~17500h and still firmly rejected.
-    MATCH_MAX_CLOSE_TIME_SKEW_HOURS = 96
+    # 48h clears legitimate provisional-vs-certified settlement skew while
+    # tightening the date guard. (Secondary signal — it can't separate same-year
+    # events; the DistinguishingEntityVerifier carries that load.)
+    MATCH_MAX_CLOSE_TIME_SKEW_HOURS = 48
+    # Distinguishing-entity overlap: the smaller non-boilerplate token set must
+    # be at least this fraction covered by the other (same subject/scope). The
+    # false positives (Patel vs Biden) land ~0.33; true variants ~1.0.
+    MATCH_MIN_DISTINGUISHING_OVERLAP = 0.5
+    # Min term containment when BOTH venues expose resolution rules text.
+    MATCH_MIN_RULES_CONTAINMENT = 0.4
     # Operator allow/deny list of verified pairs.
     MATCH_ALLOWLIST_FILE = "matching/match_allowlist.json"
 

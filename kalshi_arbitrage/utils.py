@@ -210,6 +210,13 @@ _BOILERPLATE = frozenset({
     'before', 'after', 'between', 'over', 'under', 'above', 'below',
     'increase', 'decrease', 'how', 'many', 'much', 'who', 'what',
     'this', 'that', 'their', 'year', 'during',
+    # Event-template verbs that recur across UNRELATED markets and so do not
+    # distinguish the subject ("Will <X> be arrested/indicted before 2027",
+    # "<A> and <B> normalize relations"). Without these the shared template
+    # inflates the distinguishing-overlap of different subjects.
+    'arrested', 'indicted', 'convicted', 'sanctioned', 'impeached',
+    'resign', 'resigns', 'normalize', 'normalise', 'relations', 'announce',
+    'announces', 'step', 'down', 'out',
     # Politics / elections
     'party', 'presidential', 'nomination', 'nominate', 'nominated',
     'race', 'election', 'seat', 'vote', 'votes', 'voting',

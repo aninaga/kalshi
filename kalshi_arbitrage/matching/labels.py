@@ -32,6 +32,10 @@ class LabeledPair:
     polymarket_close_time: Optional[str] = None
     notes: str = ""
     source: str = ""                 # e.g. "candidate_capture" | "hard_negative"
+    # Rich Kalshi signals that distinguish scope (e.g. a state name lives in the
+    # subtitle, the series grouping in the event_ticker).
+    kalshi_subtitle: str = ""
+    kalshi_event_ticker: str = ""
 
     def is_true_match(self) -> bool:
         return self.label == TRUE_MATCH
@@ -43,7 +47,11 @@ class LabeledPair:
             "title": self.kalshi_title,
             "clean_title": "",
             "close_time": self.kalshi_close_time,
-            "raw_data": {"rules_primary": self.kalshi_rules},
+            "raw_data": {
+                "rules_primary": self.kalshi_rules,
+                "yes_sub_title": self.kalshi_subtitle,
+                "event_ticker": self.kalshi_event_ticker,
+            },
         }
         polymarket = {
             "id": self.polymarket_id,
