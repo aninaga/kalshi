@@ -183,10 +183,26 @@ def build_trades_realistic(games, *, side, thresh, entry_lat_min, min_elapsed,
             rows.append({"game_id": gid, "date": game["date"], "home_team": g.home_tri,
                          "primary_team": g.home_tri if bet_over else g.away_tri,
                          "bet": "over" if bet_over else "under", "strike": round(strike, 1),
+                         "mid": round(mid, 4), "payoff": payoff, "gap": abs(sig),
                          "fill": round(fill, 4), "fee": round(fee, 4),
                          "final": final_total, "pnl_prob": pnl})
             break
     return pd.DataFrame(rows)
+
+
+def reprice(base: pd.DataFrame, half_spread: float) -> pd.DataFrame:
+    """Re-derive PnL for a new half-spread from a base frame (loads once, no I/O).
+
+    fill = mid + hs (capped); fee = PM 2% taker on fill; pnl = payoff - fill - fee.
+    """
+    hs = half_spread / 100.0
+    out = base.copy()
+    fill = np.minimum(out["mid"].to_numpy(float) + hs, 0.999)
+    fee = np.array([_pm_taker_fee(f) for f in fill])
+    out["fill"] = np.round(fill, 4)
+    out["fee"] = np.round(fee, 4)
+    out["pnl_prob"] = out["payoff"].to_numpy(float) - fill - fee
+    return out
 
 
 def evaluate(trades, extra_cost_c=0.0, n_trials=1):
@@ -267,14 +283,17 @@ def main():
           f"REALISTIC execution (listed strike + half-spread + PM 2% fee), "
           f"gap_cond={a.gap_cond}, max_entry={a.max_entry_elapsed}\n", flush=True)
 
+    # Build ONCE (slow I/O) at half_spread=0; reprice analytically for sweeps.
+    base = build_trades_realistic(games, side="continuation", thresh=a.thresh,
+                                  entry_lat_min=a.entry_lat_min, min_elapsed=a.min_elapsed,
+                                  max_elapsed=a.max_elapsed, max_stale_min=a.max_stale_min,
+                                  half_spread=0.0, gap_cond=a.gap_cond,
+                                  max_entry_elapsed=a.max_entry_elapsed)
+
     if a.sweep_spread:
         print("=== HALF-SPREAD SENSITIVITY (full population, direction pre-registered) ===")
         for hs in (0.0, 1.0, 1.5, 2.0, 2.5):
-            tr = build_trades_realistic(games, side="continuation", thresh=a.thresh,
-                                        entry_lat_min=a.entry_lat_min, min_elapsed=a.min_elapsed,
-                                        max_elapsed=a.max_elapsed, max_stale_min=a.max_stale_min,
-                                        half_spread=hs, gap_cond=a.gap_cond,
-                                        max_entry_elapsed=a.max_entry_elapsed)
+            tr = reprice(base, hs)
             z = evaluate(tr, 0.0)
             flag = "  <-- gate PASS" if z["gate"] else ""
             print(f"  half_spread={hs:.1f}c: n={z['n']:>4} games={z['ngames']:>4} "
@@ -282,11 +301,7 @@ def main():
                   f"gate={z['gate']}{flag}", flush=True)
         return
 
-    tr = build_trades_realistic(games, side="continuation", thresh=a.thresh,
-                                entry_lat_min=a.entry_lat_min, min_elapsed=a.min_elapsed,
-                                max_elapsed=a.max_elapsed, max_stale_min=a.max_stale_min,
-                                half_spread=a.half_spread, gap_cond=a.gap_cond,
-                                max_entry_elapsed=a.max_entry_elapsed)
+    tr = reprice(base, a.half_spread)
     if tr.empty:
         print("no trades (data not built?)"); return
 
