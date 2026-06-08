@@ -100,3 +100,118 @@ one-season n (a real +6c edge fails the full gate ~40% of the time at n~1300).
 The anchoring family (line lags live game-state) GENERALIZES totals -> spreads.
 Same caveats as totals: full-pop gate includes train (OOS rests on pre-registration
 + walk-forward); confirm realistic fills (the totals-refine agent is hardening this).
+
+---
+
+## REALISTIC EXECUTION RE-CHECK
+
+_Date: 2026-06-08. `research/scripts/spread_realistic.py`. Same realistic-fill
+template as the totals re-check (`totals_realistic.py` / TOTALS_REFINE_FINDINGS.md):
+snap the bet to the ACTUAL listed signed-home spread strike nearest the implied
+margin, fill at that strike's REAL quoted P(home margin > strike) (NOT 0.50),
+cross a half-spread to take liquidity, pay the Polymarket 2% flat taker fee on
+entry, settle vs the REAL strike, honest +1-bar latency, hold to settlement.
+Population = 1,127 NON-test games (1,107 trades). Direction (`continuation`),
+threshold (6), freshness guard (≤2 min) UNCHANGED; no refit; test split untouched._
+
+### TL;DR — NOT a pure 0.50-fill artifact; survives gross but FAILS the gate
+
+**Unlike the totals edge, the spread market did NOT price away most of the
+signal.** The real listed at-the-money fill mid is only **0.5187** (vs 0.5555 for
+totals), so the true tradeable gross is **+5.22¢** and survives the 2% fee + a
+1.5¢ half-spread at **+1.88¢ net**. The edge is NOT a 0.50-fill artifact the way
+totals was — roughly half the flat-model number is genuine residual signal. BUT
+the realistic net is too small to clear the promotion gate: the block-bootstrap
+CI lower bound goes negative at any nonzero half-spread, and the season/parity
+stability sub-gates fail. **Real direction, real (small) residual edge, but NOT
+gate-certified and NOT comfortably tradeable after costs.**
+
+### Decomposition — where the reported +5.67¢ went
+
+| component | ¢/contract |
+|---|---|
+| `payoff − 0.50` (flat-model gross, reproduces reported artifact) | **+7.09** |
+| real listed fill mid you actually pay (avg **0.5187**, not 0.50) | −1.87 |
+| `payoff − mid` (TRUE tradeable gross, no spread/fee) | **+5.22** |
+| Polymarket 2% taker fee (avg ~1.8¢) | −1.79 |
+| `payoff − mid − fee` (realistic, 0 half-spread) | **+3.43** |
+| − 1.5¢ half-spread (central) | **+1.88** |
+
+Win rate = 0.571. Decisive contrast with totals: there the real fill (0.5555) ate
+**−5.55¢** and left only +2.44¢ gross; here the real fill (0.5187) eats only
+**−1.87¢** and leaves **+5.22¢** gross. The spread book under-reacts MORE / prices
+the live-margin signal LESS than the totals book — consistent with the
+pre-registered mechanism (the handicap ladder is slower to re-mark). The
+flat-model `payoff−0.50` (+7.09¢) is close to the reported +7.67¢@0¢ / +5.67¢@2¢;
+the gap to my number is the test-split exclusion + the listed-strike snap.
+
+### Realistic-cost re-score (half-spread sensitivity, full non-test population)
+
+| half-spread | n | net ¢/ct | block-bootstrap 95% CI | gate |
+|---|---|---|---|---|
+| 0.0¢ | 1,107 | **+3.43** | [+0.59, +6.25] | ❌ FAIL |
+| 1.0¢ | 1,107 | +2.39 | [−0.44, +5.22] | ❌ FAIL |
+| **1.5¢ (central)** | 1,107 | **+1.88** | [−0.95, +4.70] | ❌ FAIL |
+| 2.0¢ | 1,107 | +1.36 | [−1.47, +4.19] | ❌ FAIL |
+| 2.5¢ | 1,107 | +0.85 | [−1.98, +3.67] | ❌ FAIL |
+
+- **Realistic net (central 1.5¢ spread): +1.88¢/contract** (still positive — unlike
+  totals' −1.00¢).
+- **Breakeven: survives ~+1.88¢ of ADDITIONAL drag** on top of the realistic
+  listed-strike fill + 2% fee (net hits 0 at ~2¢ extra cost).
+- **Gate: FAIL at every half-spread, including 0¢.** Even at 0¢ where the main CI
+  lo is +0.59¢, the gate fails on the stability sub-gates. At the central 1.5¢:
+  `block_bootstrap_ci_lo −0.0095 ≤ 0`; `season_split early_ci_lo=−0.0226,
+  late_ci_lo=−0.0209 (no overlap)`; `parity_split even_ci_lo=−0.0440,
+  odd_ci_lo=−0.0036 (no overlap)`. The realistic residual is too small/noisy to be
+  significant by-game.
+
+### Monthly walk-forward under realistic execution (1.5¢ spread + 2% fee)
+
+| month | n | win% | net ¢/ct | CI lo |
+|---|---|---|---|---|
+| 2025-10 | 66 | 52% | −2.97 | −14.84 |
+| 2025-11 | 215 | 57% | +1.57 | −5.02 |
+| 2025-12 | 197 | 60% | +4.01 | −2.85 |
+| 2026-01 | 232 | 56% | +0.97 | −5.35 |
+| 2026-02 | 166 | 61% | +6.80 | −0.57 |
+| 2026-03 | 224 | 54% | −0.90 | −7.30 |
+| 2026-05 | 5 | 80% | +29.27 | −4.59 |
+| 2026-06 | 2 | 0% | −74.14 | −94.96 |
+
+**5/8 months net-positive** at realistic cost (was 8/9 under the flat 0.50/2¢
+model). The bulk regular-season months (Nov–Feb) are positive but no single
+month has a CI lower bound above zero. Better than the totals walk-forward (3/8,
+all flat-to-negative) but not a clean OOS pass.
+
+### Bottom line — is the spread edge real & tradeable, or another 0.50-fill artifact?
+
+**It is NOT another pure 0.50-fill artifact** — that is the key finding and the
+clear contrast with totals. The spread book genuinely under-reacts to the live
+margin trajectory: the at-the-money contract on the signal side prices only
+~0.519, leaving **+5.22¢ of real residual gross signal** that survives the 2%
+fee and a central 1.5¢ spread at **+1.88¢ net positive**. The direction is real
+(57% hit) and the residual is roughly half the flat-model number, not ~0.
+
+**BUT it is NOT gate-certified and NOT comfortably tradeable.** At realistic cost
+the by-game block-bootstrap CI lower bound is negative for any nonzero spread,
+the season/parity stability sub-gates fail, breakeven is only ~+1.9¢ of extra
+drag, and only 5/8 OOS months are positive (none with CI lo > 0). The reported
+"+5.67¢@2c, STRONG" overstated it: ~3.8¢ of that was the 0.50-fill gap + missing
+fee. The honest realistic figure is **~+1.9¢/contract, gate FAIL** — a marginal,
+under-powered, real-but-thin edge that needs either a tighter execution path
+(maker fills to avoid the half-spread + the 2% taker fee) or more data to
+certify. Mark it PROMISING-BUT-UNCERTIFIED, not STRONG, and not "dead."
+
+### Reproduce
+
+```bash
+python3 -m research.scripts.spread_realistic --thresh 6 --min-elapsed 600 --max-stale-min 2 --decompose
+python3 -m research.scripts.spread_realistic --thresh 6 --min-elapsed 600 --max-stale-min 2 --sweep-spread
+python3 -m research.scripts.spread_realistic --thresh 6 --min-elapsed 600 --max-stale-min 2 --half-spread 1.5 --walkforward
+```
+
+Files: `research/scripts/spread_realistic.py` — spread analog of `totals_realistic.py`
+(listed signed-home-strike fill + half-spread + PM 2% fee; `reprice()` for fast
+sweeps). Reuses `spread_alpha._kalshi_team` / `_implied_home_margin` and the
+promotion gate; excludes the test split.
