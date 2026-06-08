@@ -327,23 +327,27 @@ _PREDICATE_QUALIFIERS = frozenset({
     "finish",
 })
 
-# Superlative/ranking words checked against the RAW title (not the
-# boilerplate-stripped token set — "most" is boilerplate and would never survive
-# to the qualifier veto). "score the MOST goals" is a ranking, not the same
-# proposition as "score A goal". Excludes the "at most/least" threshold idiom via
-# a lookbehind. Observed live as a 64% phantom "edge".
-_RANK_WORDS = ("most", "fewest", "leads", "leading")
+# Superlative ranking checked against the RAW title ("most" is boilerplate and
+# would never survive to the token-set qualifier veto). The decisive structure:
+# one side RANKS a noun ("score the MOST goals") that the other side mentions
+# PLAINLY ("score A goal") — ranking vs occurrence of the SAME thing → different
+# proposition. Excludes the "at most/least" threshold idiom (lookbehind). Fires
+# only when the ranked noun is SHARED, so "win the most SEATS" vs "win the
+# ELECTION" (different nouns, parliamentary-equivalent) is NOT split.
+_SUPERLATIVE_RE = re.compile(r"(?<!at )\b(most|fewest)\s+([a-z]+)", re.IGNORECASE)
 
 
 def _superlative_asymmetry(a: str, b: str) -> Optional[str]:
-    """A ranking word present (as a superlative, not 'at most/least') on exactly
-    one side — a different proposition (ranking vs occurrence)."""
     al, bl = a.lower(), b.lower()
-    for w in _RANK_WORDS:
-        in_a = re.search(rf"(?<!at )\b{w}\b", al) is not None
-        in_b = re.search(rf"(?<!at )\b{w}\b", bl) is not None
-        if in_a != in_b:
-            return w
+    ra = _SUPERLATIVE_RE.search(al)
+    rb = _SUPERLATIVE_RE.search(bl)
+    if bool(ra) == bool(rb):  # neither, or both rank (symmetric) → same proposition
+        return None
+    word, noun = (ra or rb).group(1), (ra or rb).group(2)
+    other = bl if ra else al
+    stem = noun[:-1] if noun.endswith("s") else noun  # goals→goal
+    if re.search(rf"\b{re.escape(stem)}s?\b", other):  # other side names the ranked noun plainly
+        return word
     return None
 
 # Generic event/structural words that recur across contests and are NOT the

@@ -152,6 +152,17 @@ def test_composite_rejects_superlative_proposition_mismatch():
     ).passed
 
 
+def test_superlative_veto_only_on_shared_noun():
+    # "win the most SEATS" vs "win the ELECTION" ranks a noun the other side
+    # doesn't contest (parliamentary-equivalent) — must NOT be split, or recall
+    # drops. Contrast with the shared-noun goals case above which IS split.
+    c = CompositeVerifier()
+    assert c.verify(
+        _mkt("Will SPD win the 2026 Berlin state election"),
+        _mkt("Will SPD win the most seats in the 2026 Berlin state elections"),
+    ).passed
+
+
 def test_composite_keeps_at_least_threshold_pairs():
     # "at least N" is a threshold phrasing (== "more than N"), NOT a superlative —
     # must NOT be split by the qualifier veto.
