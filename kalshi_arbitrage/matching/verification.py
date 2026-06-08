@@ -172,6 +172,27 @@ def _raw_rules(market: Dict) -> str:
     return " ".join(parts)
 
 
+# An explicit carve-out clause: one venue enumerates scenarios that do NOT
+# resolve YES (e.g. Polymarket's arrest rules exclude "named in an indictment
+# without arrest" and count "house arrest", which Kalshi's one-line rule does
+# not). When one side has such a clause and the other does not, the resolution
+# FUNCTIONS differ even at the same deadline — definitional basis risk.
+_EXCLUSION_RE = re.compile(
+    r"\b(?:will not qualify|does not qualify|do not qualify|"
+    r"will not count|does not count|does not include|not be considered|"
+    r"following scenarios will not|excluded?:|exception)\b",
+    re.IGNORECASE,
+)
+
+
+def _has_exclusion_clause(market: Dict) -> bool:
+    raw = market.get("raw_data", {}) or {}
+    text = " ".join(
+        str(raw.get(k, "")) for k in ("rules_primary", "rules_secondary", "description")
+    )
+    return len(text) >= 120 and bool(_EXCLUSION_RE.search(text))
+
+
 def _extract_deadline(text: str) -> Optional[int]:
     """Return the governing resolution-deadline as a date ordinal, or None.
 
@@ -853,6 +874,7 @@ class ResolutionCongruenceVerifier:
     def verify(self, kalshi_market: Dict, polymarket_market: Dict) -> MatchVerdict:
         k_dl = _extract_deadline(_raw_rules(kalshi_market))
         p_dl = _extract_deadline(_raw_rules(polymarket_market))
+        # (a) Deadline mismatch is a hard reject (different settlement window).
         if k_dl is not None and p_dl is not None:
             skew = abs(k_dl - p_dl)
             if skew > self.tolerance_days:
@@ -861,8 +883,22 @@ class ResolutionCongruenceVerifier:
                     (f"deadline_mismatch skew={skew}d (>{self.tolerance_days})",),
                     self.name,
                 )
-            return MatchVerdict(True, UNKNOWN, 0.6, (f"deadline_ok skew={skew}d",), self.name)
-        return MatchVerdict(True, UNKNOWN, 0.3, ("deadline_unverified",), self.name)
+            base = (f"deadline_ok skew={skew}d",)
+            conf = 0.6
+        else:
+            base = ("deadline_unverified",)
+            conf = 0.3
+        # (b) Definitional divergence: one venue carves out exceptions the other
+        # doesn't (Polymarket's "...will NOT qualify" arrest list vs Kalshi's
+        # one-liner). Same deadline, different resolution FUNCTION → basis risk.
+        # NOT a hard reject (recall: verbose-vs-terse rules are often equivalent);
+        # flag UNCERTAIN so the tool holds it for review / the LLM tiebreaker
+        # adjudicates, rather than auto-allowlisting an un-hedged bet.
+        if _has_exclusion_clause(kalshi_market) != _has_exclusion_clause(polymarket_market):
+            return MatchVerdict(True, UNKNOWN, conf,
+                                base + ("exclusion_clause_asymmetry_review",),
+                                self.name, uncertain=True)
+        return MatchVerdict(True, UNKNOWN, conf, base, self.name)
 
 
 class AllowlistVerifier:

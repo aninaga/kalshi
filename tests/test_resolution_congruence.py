@@ -102,6 +102,38 @@ def test_passes_when_no_deadline_extractable():
     assert verdict.passed and "unverified" in verdict.reasons[0]
 
 
+def test_exclusion_clause_asymmetry_flags_uncertain():
+    # Same deadline, but Polymarket carves out exceptions ("...will NOT qualify")
+    # that Kalshi's one-liner doesn't — the arrest basis-risk. Not a hard reject
+    # (recall), but flagged UNCERTAIN so it's held from auto-allowlist / sent to
+    # the LLM tiebreaker.
+    v = ResolutionCongruenceVerifier()
+    verdict = v.verify(
+        _mk("Will Tom Homan be arrested before Jan 2027?",
+            "If Tom Homan is arrested before Jan 1, 2027, then Yes. Voluntarily "
+            "surrendering pursuant to an indictment without an arrest warrant is sufficient."),
+        _mk("Will Tom Homan be arrested before 2027?",
+            "resolve Yes if arrested by December 31, 2026. A qualifying arrest includes "
+            "house arrest or electronic monitoring. The following scenarios will not "
+            "qualify: being named in an indictment without arrest."),
+    )
+    assert verdict.passed and verdict.uncertain
+    assert any("exclusion_clause_asymmetry" in r for r in verdict.reasons)
+
+
+def test_symmetric_rules_not_flagged():
+    # Neither side has an exclusion clause → clean pass, not uncertain.
+    v = ResolutionCongruenceVerifier()
+    verdict = v.verify(
+        _mk("Will Flavio Bolsonaro win the 2026 Brazilian presidential election?",
+            "If Flavio Bolsonaro wins the 2026 Brazilian presidential election, then Yes."),
+        _mk("Will Flavio Bolsonaro win the 2026 Brazilian presidential election?",
+            "A presidential election is scheduled in Brazil on October 4, 2026. "
+            "Resolves according to the candidate that wins this election."),
+    )
+    assert verdict.passed and not verdict.uncertain
+
+
 def test_tolerance_is_configurable():
     strict = ResolutionCongruenceVerifier(tolerance_days=0)
     # 1-day phrasing gap is rejected under zero tolerance...
