@@ -51,6 +51,7 @@ UNKNOWN = "unknown"      # could not resolve
 _NEGATION_TOKENS = frozenset({
     "not", "no", "never", "without", "fail", "fails", "failed",
     "miss", "misses", "missed", "lose", "loses", "lost",
+    "negative", "decline", "decrease", "down",
 })
 
 # Direction words for threshold markets (over/under, above/below).
