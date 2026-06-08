@@ -63,26 +63,22 @@ def test_polarity_plain_identical_is_aligned():
 
 # --- ResolutionCriteriaVerifier --------------------------------------------- #
 
-def test_resolution_rejects_different_year_close_times():
-    # A DIFFERENT resolution year is a different event.
+def test_resolution_does_not_reject_on_close_time_alone():
+    # Close-time is informational only — the two venues legitimately list very
+    # different close dates for the SAME event (election day vs certification,
+    # and Kalshi often certifies in the NEXT calendar year). A 16k-candidate
+    # audit showed close-time rejection destroyed recall on identical-title
+    # pairs, so ResolutionCriteriaVerifier never rejects on close-time; the
+    # authoritative date signal is the YEAR token in the title (numeric veto).
     v = ResolutionCriteriaVerifier()
-    verdict = v.verify(
-        _mkt("X happens", close_time="2026-06-01T00:00:00"),
-        _mkt("X happens", close_time="2028-06-01T00:00:00"),
-    )
-    assert not verdict.passed
-
-
-def test_resolution_accepts_large_same_year_close_skew():
-    # The two venues legitimately list different close dates for the SAME event
-    # (election day vs certification / far-out resolve-by), so a months-long
-    # same-year skew must NOT reject — this was a recall killer on live data.
-    v = ResolutionCriteriaVerifier()
-    verdict = v.verify(
+    assert v.verify(
         _mkt("X happens", close_time="2026-01-01T00:00:00"),
         _mkt("X happens", close_time="2026-06-01T00:00:00"),
-    )
-    assert verdict.passed
+    ).passed
+    assert v.verify(
+        _mkt("X happens", close_time="2026-12-01T00:00:00"),
+        _mkt("X happens", close_time="2027-02-01T00:00:00"),  # certification spillover
+    ).passed
 
 
 def test_resolution_rejects_threshold_mismatch():
@@ -126,10 +122,11 @@ def test_allowlist_unknown_pair_flagged_not_allowlisted(tmp_path):
 # --- CompositeVerifier ------------------------------------------------------ #
 
 def test_composite_fails_when_any_verifier_fails():
+    # A scope mismatch (one names a state the other doesn't) must fail the chain.
     c = CompositeVerifier()
     verdict = c.verify(
-        _mkt("X happens", close_time="2026-01-01T00:00:00"),
-        _mkt("X happens", close_time="2027-06-01T00:00:00"),
+        _mkt("Will the Republicans win the Senate in 2026"),
+        _mkt("Will the Republicans win the Montana Senate race in 2026"),
     )
     assert not verdict.passed
 

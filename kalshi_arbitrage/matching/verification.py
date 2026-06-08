@@ -237,6 +237,37 @@ _TEMPLATE_TOKENS = frozenset({
 })
 
 
+def _normalize_tokens(tokens: set) -> set:
+    """Canonicalize tokens so equivalent forms compare equal:
+      - congressional district codes: ma06 -> ma6 (strip zero-pad)
+      - league synonyms: 'mlb' <-> 'pro'+'baseball', 'nba' <-> 'pro'+'basketball'
+    """
+    from .gazetteer import _district_code
+    # Ordinal numeral <-> word (3rd<->third) so rank phrasing compares equal.
+    _ORD = {"1st": "first", "2nd": "second", "3rd": "third", "4th": "fourth",
+            "5th": "fifth"}
+    out = set()
+    for t in tokens:
+        d = _district_code(t)
+        if d:
+            out.add(d.replace("district_", ""))
+        else:
+            out.add(_ORD.get(t, t))
+    # League synonyms: collapse "pro baseball"/"major league baseball" -> mlb, etc.
+    syn = {
+        frozenset({"pro", "baseball"}): "mlb",
+        frozenset({"major", "league", "baseball"}): "mlb",
+        frozenset({"pro", "basketball"}): "nba",
+        frozenset({"pro", "football"}): "nfl",
+        frozenset({"pro", "hockey"}): "nhl",
+    }
+    for combo, canon in syn.items():
+        if combo <= out:
+            out -= combo
+            out.add(canon)
+    return out
+
+
 def _is_categorical(market: Dict) -> bool:
     """True if the title poses a multi-outcome question ("Who will...", "Which
     ...", "What will...") rather than a single-subject yes/no proposition.
@@ -415,8 +446,8 @@ class DistinguishingEntityVerifier:
             return MatchVerdict(False, UNKNOWN, 0.0,
                                 (f"office_mismatch k={sorted(k_off)} p={sorted(p_off)}",), self.name)
 
-        kt = set(_clean(kalshi_market).split()) - _BOILERPLATE
-        pt = set(_clean(polymarket_market).split()) - _BOILERPLATE
+        kt = _normalize_tokens(set(_clean(kalshi_market).split()) - _BOILERPLATE)
+        pt = _normalize_tokens(set(_clean(polymarket_market).split()) - _BOILERPLATE)
 
         # (B) Numeric/year veto: a year or numeric token present on BOTH sides
         # must agree. Different years (2026 vs 2028) → different event. (A shared
@@ -496,23 +527,19 @@ class ResolutionCriteriaVerifier:
     def verify(self, kalshi_market: Dict, polymarket_market: Dict) -> MatchVerdict:
         reasons: List[str] = []
 
-        # (a) Close-time check — ONLY reject when the resolution YEARS differ.
-        # Live data shows the two venues legitimately list very different close
-        # times for the SAME event (one uses election day, the other a far-out
-        # "resolve by" / certification date) — skews of weeks to months are
-        # common on identical-title pairs, so an hour-based skew limit destroys
-        # recall. A different YEAR is the reliable "different event" signal (and
-        # same-year title-numeric divergence is already caught elsewhere). Only
-        # applied when the skew is large enough that the year boundary is
-        # meaningful (> ~120 days), to avoid Dec/Jan edge flips.
+        # (a) Close-time is INFORMATIONAL ONLY — it is NOT used to reject.
+        # Audit of 16k live candidates showed the two venues' close_time fields
+        # are unreliable for same-event detection: Kalshi often certifies in the
+        # NEXT calendar year (close_time Jan-2027 for a 2026 election), so even a
+        # year-level close-time veto rejected identical-title true matches. The
+        # authoritative date signal is the YEAR token IN THE TITLE, already
+        # enforced by the numeric veto in DistinguishingEntityVerifier. We record
+        # the skew for diagnostics but never reject on it.
         k_close = _parse_time(kalshi_market.get("close_time"))
         p_close = _parse_time(polymarket_market.get("close_time"))
         if k_close and p_close:
             skew_h = abs((k_close - p_close).total_seconds()) / 3600.0
-            if k_close.year != p_close.year and skew_h > 120 * 24:
-                reasons.append(f"close_year_mismatch {k_close.year}!={p_close.year} ({skew_h:.0f}h)")
-                return MatchVerdict(False, UNKNOWN, 0.0, tuple(reasons), self.name)
-            reasons.append(f"close_time_skew={skew_h:.1f}h_ok")
+            reasons.append(f"close_time_skew={skew_h:.1f}h_info")
 
         # (b) Numeric thresholds (e.g. "above 4.5%" vs "4.25-4.50%").
         k_title = kalshi_market.get("title", "")

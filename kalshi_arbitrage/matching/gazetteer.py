@@ -92,8 +92,42 @@ def extract_scope_entities(clean_text: str) -> Set[str]:
             continue
         if tok in _US_STATE_SINGLE or tok in _COUNTRY_SINGLE:
             entities.add(tok)
+        else:
+            dist = _district_code(tok)
+            if dist:
+                entities.add(dist)
 
     return entities
+
+
+# US state postal codes, for congressional-district detection (clean_title
+# strips the hyphen so "CA-41" arrives as "ca41", "VT-AL" as "vtal").
+_STATE_POSTAL = frozenset({
+    "al", "ak", "az", "ar", "ca", "co", "ct", "de", "fl", "ga", "hi", "id",
+    "il", "in", "ia", "ks", "ky", "la", "me", "md", "ma", "mi", "mn", "ms",
+    "mo", "mt", "ne", "nv", "nh", "nj", "nm", "ny", "nc", "nd", "oh", "ok",
+    "or", "pa", "ri", "sc", "sd", "tn", "tx", "ut", "vt", "va", "wa", "wv",
+    "wi", "wy",
+})
+
+
+def _district_code(tok: str) -> str:
+    """Return a canonical district key if ``tok`` is a congressional district
+    code like "ca41" (CA-41) or "vtal" (VT at-large), else "".
+
+    Pattern: a 2-letter state postal code followed by 1-2 digits or "al"
+    (at-large). Used as a scope entity so a national race ("House in 2028")
+    never matches a single-district market ("VT-AL House seat").
+    """
+    if len(tok) < 3 or len(tok) > 4:
+        return ""
+    head, tail = tok[:2], tok[2:]
+    if head in _STATE_POSTAL and (tail == "al" or tail.isdigit()):
+        # Normalize zero-padding so "ma6" and "ma06" are the SAME district.
+        if tail.isdigit():
+            tail = str(int(tail))
+        return f"district_{head}{tail}"
+    return ""
 
 
 def is_national_scope(clean_text: str) -> bool:
