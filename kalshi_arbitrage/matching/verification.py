@@ -216,6 +216,18 @@ _PREDICATE_QUALIFIERS = frozenset({
 })
 
 
+def _is_categorical(market: Dict) -> bool:
+    """True if the title poses a multi-outcome question ("Who will...", "Which
+    ...", "What will...") rather than a single-subject yes/no proposition.
+
+    Such a Kalshi market enumerates candidates as separate contracts and must
+    not pair with a specific-subject binary on the other venue.
+    """
+    title = (market.get("title") or "").strip().lower()
+    first = title.split()[0] if title.split() else ""
+    return first in {"who", "which"} or title.startswith("what will")
+
+
 # --------------------------------------------------------------------------- #
 #  Verifiers                                                                    #
 # --------------------------------------------------------------------------- #
@@ -306,6 +318,16 @@ class DistinguishingEntityVerifier:
 
     def verify(self, kalshi_market: Dict, polymarket_market: Dict) -> MatchVerdict:
         reasons: List[str] = []
+
+        # (A0) Categorical (multi-outcome) veto. A "Who will / Which X" market
+        # enumerates many candidates as separate contracts; it is NOT the same
+        # tradeable contract as a single-subject binary ("Will <specific> X").
+        # Matching them yields a structurally wrong "buy YES / sell YES" hedge.
+        k_cat = _is_categorical(kalshi_market)
+        p_cat = _is_categorical(polymarket_market)
+        if k_cat != p_cat:
+            return MatchVerdict(False, UNKNOWN, 0.0,
+                                (f"categorical_vs_binary k_cat={k_cat} p_cat={p_cat}",), self.name)
 
         # (A) Geography / scope veto. Use title + Kalshi subtitles for scope.
         # The scope SETS must be equal: if either venue names a place the other
