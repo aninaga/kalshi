@@ -42,6 +42,10 @@ class MarketAnalyzer:
         # criteria, inverted polarity) before they reach the execution path.
         self.match_verifier = CompositeVerifier() if Config.MATCH_VERIFICATION_ENABLED else None
         self.completeness_stats_rejected_matches = 0
+        # Optional candidate capture for recall auditing (set ARB_CAPTURE_CANDIDATES
+        # to a file path to record every above-threshold pair + verdict).
+        self._candidate_capture = os.environ.get('ARB_CAPTURE_CANDIDATES') or None
+        self._candidate_capture_seen = set()
 
         # Performance optimization caches
         self._polymarket_term_index = defaultdict(set)  # term -> set of market_ids
@@ -813,6 +817,41 @@ class MarketAnalyzer:
             for term in key_terms:
                 self._polymarket_term_index[term].add(market_id)
     
+    def _capture_candidate(self, k_market: Dict, p_market: Dict, similarity: float, verdict) -> None:
+        """Append one above-threshold candidate + verdict to the capture file.
+
+        Records the raw titles, rules, scope subtitles, similarity, and the
+        verifier's pass/fail + reasons so a human can audit recall (true matches
+        wrongly rejected) and precision (false matches wrongly accepted).
+        """
+        kid = str(k_market.get('id', '')); pid = str(p_market.get('id', ''))
+        key = (kid, pid)
+        if key in self._candidate_capture_seen:
+            return
+        self._candidate_capture_seen.add(key)
+        k_raw = k_market.get('raw_data', {}) or {}
+        p_raw = p_market.get('raw_data', {}) or {}
+        row = {
+            'kalshi_id': kid, 'polymarket_id': pid,
+            'kalshi_title': k_market.get('title', ''),
+            'polymarket_title': p_market.get('title', ''),
+            'similarity': round(float(similarity), 4),
+            'passed': bool(verdict.passed) if verdict else None,
+            'reasons': list(verdict.reasons) if verdict else [],
+            'polarity': verdict.polarity if verdict else None,
+            'kalshi_rules': str(k_raw.get('rules_primary', ''))[:300],
+            'polymarket_rules': str(p_raw.get('description', ''))[:300],
+            'kalshi_subtitle': str(k_raw.get('yes_sub_title', '')),
+            'kalshi_event_ticker': str(k_raw.get('event_ticker', '')),
+            'kalshi_close_time': k_market.get('close_time'),
+            'polymarket_close_time': p_market.get('close_time'),
+        }
+        try:
+            with open(self._candidate_capture, 'a') as fh:
+                fh.write(json.dumps(row) + '\n')
+        except OSError as e:
+            logger.debug(f"candidate capture write failed: {e}")
+
     async def _process_kalshi_batch_optimized(self, kalshi_batch: List[Dict], batch_id: int = 0) -> List[Dict]:
         """Optimized batch processing using adaptive limits and completeness tracking."""
         batch_matches = []
@@ -884,6 +923,12 @@ class MarketAnalyzer:
                     verdict = None
                     if self.match_verifier is not None:
                         verdict = self.match_verifier.verify(k_market, p_market)
+                        # Optional capture (ARB_CAPTURE_CANDIDATES=path): record
+                        # EVERY above-threshold candidate + its verdict so the
+                        # verifier's accept/reject decisions can be audited for
+                        # recall (false negatives) on real data.
+                        if self._candidate_capture is not None:
+                            self._capture_candidate(k_market, p_market, similarity, verdict)
                         if not verdict.passed:
                             self.completeness_stats_rejected_matches += 1
                             continue

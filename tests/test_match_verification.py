@@ -63,20 +63,24 @@ def test_polarity_plain_identical_is_aligned():
 
 # --- ResolutionCriteriaVerifier --------------------------------------------- #
 
-def test_resolution_rejects_divergent_close_times():
-    v = ResolutionCriteriaVerifier(max_close_skew_hours=24)
+def test_resolution_rejects_different_year_close_times():
+    # A DIFFERENT resolution year is a different event.
+    v = ResolutionCriteriaVerifier()
     verdict = v.verify(
-        _mkt("X happens", close_time="2026-01-01T00:00:00"),
         _mkt("X happens", close_time="2026-06-01T00:00:00"),
+        _mkt("X happens", close_time="2028-06-01T00:00:00"),
     )
     assert not verdict.passed
 
 
-def test_resolution_accepts_close_times_within_tolerance():
-    v = ResolutionCriteriaVerifier(max_close_skew_hours=24)
+def test_resolution_accepts_large_same_year_close_skew():
+    # The two venues legitimately list different close dates for the SAME event
+    # (election day vs certification / far-out resolve-by), so a months-long
+    # same-year skew must NOT reject — this was a recall killer on live data.
+    v = ResolutionCriteriaVerifier()
     verdict = v.verify(
         _mkt("X happens", close_time="2026-01-01T00:00:00"),
-        _mkt("X happens", close_time="2026-01-01T05:00:00"),
+        _mkt("X happens", close_time="2026-06-01T00:00:00"),
     )
     assert verdict.passed
 

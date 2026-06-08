@@ -221,6 +221,20 @@ _PREDICATE_QUALIFIERS = frozenset({
     "impeached", "indicted", "convicted", "acquitted",
 })
 
+# Generic event/structural words that recur across contests and are NOT the
+# distinguishing subject (the team/person/topic is). Removed before the
+# "distinct subjects" check so an event template ("qualify stage IEM Cologne
+# Major") doesn't mask a different competitor, and a lone leftover template word
+# ("Team", "Major", "MoM") doesn't falsely split a true match.
+_TEMPLATE_TOKENS = frozenset({
+    "team", "major", "minor", "cup", "open", "series", "match", "stage",
+    "tournament", "championship", "league", "qualify", "qualifier", "qualified",
+    "round", "final", "finals", "group", "playoffs", "playoff", "bracket",
+    "record", "edition", "tour", "event", "title", "medal", "award",
+    "rise", "rose", "fall", "fell", "mom", "yoy", "month", "monthly",
+    "core", "headline", "report", "data", "number", "level", "value",
+})
+
 
 def _is_categorical(market: Dict) -> bool:
     """True if the title poses a multi-outcome question ("Who will...", "Which
@@ -414,19 +428,34 @@ class DistinguishingEntityVerifier:
                                 (f"numeric_mismatch k={sorted(k_nums)} p={sorted(p_nums)}",),
                                 self.name)
 
-        # (C) Distinguishing-ENTITY overlap on the ALPHABETIC tokens only (the
-        # subject/identity). Numeric tokens are excluded so a shared year can't
-        # inflate two different subjects ("Letitia James" vs "James Clapper").
-        ke = {w for w in kt if w.isalpha()}
-        pe = {w for w in pt if w.isalpha()}
+        # (C) Distinguishing-ENTITY check on the ALPHABETIC tokens (subject /
+        # identity). Numeric tokens are excluded so a shared year can't inflate
+        # different subjects. The decisive rule: after removing matched tokens
+        # and generic template words, if BOTH sides still carry a distinct
+        # substantive token, they name DIFFERENT subjects — reject. This catches
+        # "TYLOO" vs "BetBoom" (event template "qualify stage IEM Cologne"
+        # matches, but the team differs) and "Kash Patel" vs "Joe Biden", while
+        # passing "Vitality"=="Vitality" and "Team Falcons"=="Falcons" (only one
+        # side has a leftover template word).
+        # Entity tokens: anything with a letter (keeps alphanumeric team/ticker
+        # names like "g2", "b8", "ma06"); pure-numeric tokens (years) are
+        # excluded — they're handled by the numeric veto above.
+        ke = {w for w in kt if any(c.isalpha() for c in w)}
+        pe = {w for w in pt if any(c.isalpha() for c in w)}
         if not ke or not pe:
             return MatchVerdict(True, UNKNOWN, 0.3, ("no_entity_tokens",), self.name)
+        k_only = {w for w in ke if not _token_matches(w, pe)} - _TEMPLATE_TOKENS
+        p_only = {w for w in pe if not _token_matches(w, ke)} - _TEMPLATE_TOKENS
+        if k_only and p_only:
+            return MatchVerdict(False, UNKNOWN, 0.0,
+                                (f"distinct_subjects k={sorted(k_only)} p={sorted(p_only)}",),
+                                self.name)
+        # Secondary: require a reasonable fraction of the smaller set to match
+        # (guards the case where one side is a strict superset of unrelated
+        # template words).
         smaller, larger = (ke, pe) if len(ke) <= len(pe) else (pe, ke)
         matched = sum(1 for w in smaller if _token_matches(w, larger))
         overlap = matched / len(smaller)
-        # Require a high fraction of the smaller entity set to match. A 2-token
-        # name ("bill clinton") matching only 1 token of another ("hillary
-        # clinton") is 0.5 — must be rejected, so the bar sits above 0.5.
         if overlap < self.min_overlap:
             return MatchVerdict(False, UNKNOWN, 0.0,
                                 (f"entity_overlap={overlap:.2f} sm={sorted(smaller)}",), self.name)
@@ -466,15 +495,23 @@ class ResolutionCriteriaVerifier:
     def verify(self, kalshi_market: Dict, polymarket_market: Dict) -> MatchVerdict:
         reasons: List[str] = []
 
-        # (a) Close-time proximity — a year/date defines the event.
+        # (a) Close-time check — ONLY reject when the resolution YEARS differ.
+        # Live data shows the two venues legitimately list very different close
+        # times for the SAME event (one uses election day, the other a far-out
+        # "resolve by" / certification date) — skews of weeks to months are
+        # common on identical-title pairs, so an hour-based skew limit destroys
+        # recall. A different YEAR is the reliable "different event" signal (and
+        # same-year title-numeric divergence is already caught elsewhere). Only
+        # applied when the skew is large enough that the year boundary is
+        # meaningful (> ~120 days), to avoid Dec/Jan edge flips.
         k_close = _parse_time(kalshi_market.get("close_time"))
         p_close = _parse_time(polymarket_market.get("close_time"))
         if k_close and p_close:
             skew_h = abs((k_close - p_close).total_seconds()) / 3600.0
-            if skew_h > self.max_close_skew_hours:
-                reasons.append(f"close_time_skew={skew_h:.1f}h")
+            if k_close.year != p_close.year and skew_h > 120 * 24:
+                reasons.append(f"close_year_mismatch {k_close.year}!={p_close.year} ({skew_h:.0f}h)")
                 return MatchVerdict(False, UNKNOWN, 0.0, tuple(reasons), self.name)
-            reasons.append(f"close_time_ok={skew_h:.1f}h")
+            reasons.append(f"close_time_skew={skew_h:.1f}h_ok")
 
         # (b) Numeric thresholds (e.g. "above 4.5%" vs "4.25-4.50%").
         k_title = kalshi_market.get("title", "")
