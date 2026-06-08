@@ -27,19 +27,24 @@ if str(_ROOT) not in sys.path:
 
 from nba_odds_study import batch, schedule  # noqa: E402
 
-# Moneyline-only: the substitution-latency edge is a win-prob signal; fetching
-# the totals markets doubles Kalshi load for no benefit here. Keep this in sync
-# with the `kinds` passed to batch.sub_reactions downstream (same cache key).
+# Default moneyline-only (win-prob signal). Pass --kinds total (or winner,total)
+# to build the over/under markets. The cache key includes kinds, so each kind
+# set is a distinct shard — keep downstream consumers in sync.
 KINDS = {"winner"}
 
 
-def _build_one(game: dict) -> tuple[dict, bool, str]:
+def _build_one(game: dict, kinds: set[str]) -> tuple[dict, bool, str]:
     try:
-        d = batch.load_or_build(game, kinds=KINDS)
+        d = batch.load_or_build(game, kinds=kinds)
         n_sub = len(d.subs)
-        wp_cols = [c for c in ("kalshi_home_winprob", "pm_home_winprob") if c in d.minute]
-        has_wp = bool(wp_cols) and d.minute[wp_cols].notna().any().any()
-        return game, has_wp, f"{n_sub} subs wp={has_wp}"
+        # "usable" = has the price series this kind set needs.
+        if "total" in kinds and "winner" not in kinds:
+            ok_cols = [c for c in d.minute.columns if "implied_total" in c or c == "proj_total"]
+            usable = bool(len(d.odds_long)) if hasattr(d, "odds_long") else True
+        else:
+            wp_cols = [c for c in ("kalshi_home_winprob", "pm_home_winprob") if c in d.minute]
+            usable = bool(wp_cols) and d.minute[wp_cols].notna().any().any()
+        return game, usable, f"{n_sub} subs usable={usable}"
     except Exception as e:  # noqa: BLE001
         return game, False, f"FAIL {str(e)[:70]}"
 
@@ -50,19 +55,21 @@ def main() -> None:
     ap.add_argument("--end", required=True)
     ap.add_argument("--workers", type=int, default=6)
     ap.add_argument("--limit", type=int, default=None)
+    ap.add_argument("--kinds", default="winner", help="comma-sep: winner,total")
     a = ap.parse_args()
+    kinds = {k.strip() for k in a.kinds.split(",") if k.strip()}
 
     games = schedule.completed_games(a.start, a.end)
     if a.limit:
         games = games[: a.limit]
-    print(f"{len(games)} completed games in {a.start}..{a.end}; prefetching with {a.workers} workers",
-          flush=True)
+    print(f"{len(games)} completed games in {a.start}..{a.end}; kinds={sorted(kinds)} "
+          f"workers={a.workers}", flush=True)
 
     t0 = time.time()
     ok = wp = 0
     done = 0
     with ThreadPoolExecutor(max_workers=a.workers) as ex:
-        futs = {ex.submit(_build_one, g): g for g in games}
+        futs = {ex.submit(_build_one, g, kinds): g for g in games}
         for fut in as_completed(futs):
             game, has_wp, msg = fut.result()
             done += 1
