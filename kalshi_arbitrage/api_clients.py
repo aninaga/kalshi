@@ -46,9 +46,33 @@ class KalshiClient:
             return float(value)
         except (TypeError, ValueError):
             return None
-    
-    def _normalize_kalshi_levels(self, levels: List[Any]) -> List[Dict[str, float]]:
-        """Normalize Kalshi orderbook levels to {price, size} in dollars."""
+
+    @staticmethod
+    def _fp(market: Dict[str, Any], base: str, default: float = 0.0) -> float:
+        """Read a Kalshi field that migrated to '<base>_fp' / '<base>_dollars'.
+
+        Kalshi deprecated the flat names (volume, yes_bid, last_price, ...) to
+        return null and moved the values to fixed-point ('<base>_fp', whole
+        counts as strings) and dollar ('<base>_dollars', already 0..1 as strings)
+        fields. Tries new names first, falls back to the legacy name, parses
+        strings to float, never raises.
+        """
+        for key in (f"{base}_fp", f"{base}_dollars", base):
+            if market.get(key) is not None:
+                try:
+                    return float(market[key])
+                except (TypeError, ValueError):
+                    continue
+        return default
+
+    def _normalize_kalshi_levels(self, levels: List[Any],
+                                 already_dollars: bool = False) -> List[Dict[str, float]]:
+        """Normalize Kalshi orderbook levels to {price, size} in dollars.
+
+        ``already_dollars=True`` for the migrated ``orderbook_fp`` arrays whose
+        prices are already in dollars (0..1); the legacy flat ``yes``/``no``
+        arrays were in cents and still get converted.
+        """
         normalized = []
         if not levels:
             return normalized
@@ -65,7 +89,8 @@ class KalshiClient:
                 size = float(size)
             except (TypeError, ValueError):
                 continue
-            price = self._cents_to_dollars(price, default=0.0)
+            if not already_dollars:
+                price = self._cents_to_dollars(price, default=0.0)
             normalized.append({'price': price, 'size': size})
         return normalized
         
@@ -486,16 +511,23 @@ class KalshiClient:
                     if response.status == 200:
                         data = await response.json()
                         market_data = data.get('market', {})
-                        
-                        # Extract price information
-                        yes_bid = market_data.get('yes_bid', 0)
-                        yes_ask = market_data.get('yes_ask', 0) 
-                        
+
+                        # Migrated field names: yes_bid_dollars / yes_ask_dollars
+                        # are ALREADY in dollars (0..1) — do NOT divide by 100. The
+                        # _fp helper falls back to legacy cents names, which the
+                        # >1 guard below normalizes.
+                        yes_bid = self._fp(market_data, 'yes_bid', default=0.0)
+                        yes_ask = self._fp(market_data, 'yes_ask', default=0.0)
+                        if yes_bid > 1:
+                            yes_bid = yes_bid / 100.0
+                        if yes_ask > 1:
+                            yes_ask = yes_ask / 100.0
+
                         prices = {
-                            'yes_price': yes_bid / 100.0 if yes_bid else 0.5,
-                            'no_price': (100 - yes_ask) / 100.0 if yes_ask else 0.5,
-                            'yes_ask': yes_ask / 100.0 if yes_ask else 0.5,
-                            'yes_bid': yes_bid / 100.0 if yes_bid else 0.5,
+                            'yes_price': yes_bid if yes_bid else 0.5,
+                            'no_price': (1.0 - yes_ask) if yes_ask else 0.5,
+                            'yes_ask': yes_ask if yes_ask else 0.5,
+                            'yes_bid': yes_bid if yes_bid else 0.5,
                             'timestamp': time.time(),
                             'source': 'rest_fallback'
                         }
@@ -549,33 +581,7 @@ class KalshiClient:
                 async with self._orderbook_rest_session.get(url) as resp:
                         if resp.status == 200:
                             data = await resp.json()
-                            orderbook = data.get('orderbook', data)
-                            # Kalshi REST format: yes/no are flat arrays [[price_cents, qty], ...]
-                            # yes = resting bids for YES (ascending price)
-                            # no  = resting bids for NO  (ascending price)
-                            # A NO bid at X cents == YES ask at (100-X) cents
-                            yes_raw = orderbook.get('yes')  # may be list or None
-                            no_raw = orderbook.get('no')    # may be list or None
-
-                            yes_bids = self._normalize_kalshi_levels(yes_raw if isinstance(yes_raw, list) else [])
-                            no_bids = self._normalize_kalshi_levels(no_raw if isinstance(no_raw, list) else [])
-
-                            # Derive YES asks from NO bids: NO bid at X → YES ask at (1-X)
-                            yes_asks = [{'price': round(1.0 - lvl['price'], 4), 'size': lvl['size']}
-                                        for lvl in no_bids if lvl['price'] > 0.0]
-
-                            # Derive NO asks from YES bids: YES bid at X → NO ask at (1-X)
-                            no_asks = [{'price': round(1.0 - lvl['price'], 4), 'size': lvl['size']}
-                                       for lvl in yes_bids if lvl['price'] > 0.0]
-
-                            normalized = {
-                                'yes_asks': yes_asks,
-                                'yes_bids': yes_bids,
-                                'no_asks': no_asks,
-                                'no_bids': no_bids,
-                                'timestamp': time.time(),
-                                'source': 'rest_fallback'
-                            }
+                            normalized = self._parse_orderbook_payload(data)
                             self.orderbook_cache[market_ticker] = normalized
                             return normalized
                         else:
@@ -584,6 +590,49 @@ class KalshiClient:
         except Exception as e:
             logger.debug(f"REST orderbook fetch error for {market_ticker}: {e}")
             return None
+
+    def _parse_orderbook_payload(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Parse a Kalshi REST orderbook response into yes/no asks+bids (dollars).
+
+        Kalshi migrated the structure to nested fixed-point/dollars:
+            data['orderbook']['orderbook_fp'] = {
+              'yes_dollars': [[price_dollars_str, size_str], ...],  # YES bids
+              'no_dollars':  [[price_dollars_str, size_str], ...],  # NO  bids
+            }
+        Prices are ALREADY in dollars (0..1) — no /100. A NO bid at X == a YES
+        ask at (1-X). Falls back to the legacy flat 'yes'/'no' cents arrays only
+        when the new structure is absent (graceful, never crashes).
+        """
+        orderbook = data.get('orderbook', data) or {}
+        ob_fp = orderbook.get('orderbook_fp') or {}
+        yes_raw = ob_fp.get('yes_dollars')
+        no_raw = ob_fp.get('no_dollars')
+        legacy = yes_raw is None and no_raw is None
+        if legacy:
+            # Pre-migration shape: flat 'yes'/'no' arrays in cents.
+            yes_raw = orderbook.get('yes')
+            no_raw = orderbook.get('no')
+
+        yes_bids = self._normalize_kalshi_levels(
+            yes_raw if isinstance(yes_raw, list) else [], already_dollars=not legacy)
+        no_bids = self._normalize_kalshi_levels(
+            no_raw if isinstance(no_raw, list) else [], already_dollars=not legacy)
+
+        # Derive YES asks from NO bids: NO bid at X → YES ask at (1-X)
+        yes_asks = [{'price': round(1.0 - lvl['price'], 4), 'size': lvl['size']}
+                    for lvl in no_bids if lvl['price'] > 0.0]
+        # Derive NO asks from YES bids: YES bid at X → NO ask at (1-X)
+        no_asks = [{'price': round(1.0 - lvl['price'], 4), 'size': lvl['size']}
+                   for lvl in yes_bids if lvl['price'] > 0.0]
+
+        return {
+            'yes_asks': yes_asks,
+            'yes_bids': yes_bids,
+            'no_asks': no_asks,
+            'no_bids': no_bids,
+            'timestamp': time.time(),
+            'source': 'rest_fallback',
+        }
 
 class PolymarketClient:
     """Hybrid Polymarket client: REST bootstrap + WebSocket real-time data."""

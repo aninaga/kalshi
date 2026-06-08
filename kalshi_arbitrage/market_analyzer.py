@@ -633,6 +633,14 @@ class MarketAnalyzer:
                 if hasattr(self, 'kalshi_client') and market_id in self.kalshi_client.price_cache:
                     price_data = self.kalshi_client.price_cache[market_id]
                 
+                # Live quote/metadata live in the RAW Kalshi object (under
+                # 'raw_data'), under the migrated field names (yes_bid_dollars,
+                # volume_fp, ...). Prefer fresh WS price data when present, else
+                # the REST raw object.
+                raw = market.get('raw_data') or market
+                yes_bid = price_data.get('yes_bid')
+                if yes_bid is None:
+                    yes_bid = self._kalshi_price(raw, 'yes_bid', 0.5)
                 processed_market = {
                     'id': market_id,
                     'title': market_title,
@@ -640,10 +648,10 @@ class MarketAnalyzer:
                     'platform': 'kalshi',
                     'status': market.get('status', 'active'),
                     'close_time': market.get('close_time'),
-                    'yes_price': price_data.get('yes_bid', 0.5),  # Use WebSocket price data
-                    'no_price': 1.0 - price_data.get('yes_bid', 0.5),  # Complement
-                    'volume': self._safe_float(market.get('volume', 0)),
-                    'open_interest': self._safe_float(market.get('open_interest', 0)),
+                    'yes_price': yes_bid,
+                    'no_price': 1.0 - yes_bid,
+                    'volume': self._kalshi_count(raw, 'volume', 0.0),
+                    'open_interest': self._kalshi_count(raw, 'open_interest', 0.0),
                     'raw_data': market
                 }
                 
@@ -2339,7 +2347,33 @@ class MarketAnalyzer:
             return float(value)
         except (ValueError, TypeError):
             return 0.0
-    
+
+    @staticmethod
+    def _kalshi_count(market: Dict, base: str, default: float = 0.0) -> float:
+        """Read a Kalshi fixed-point count field (volume_fp, open_interest_fp)
+        with legacy fallback; values may be strings."""
+        for key in (f"{base}_fp", base):
+            if market.get(key) is not None:
+                try:
+                    return float(market[key])
+                except (TypeError, ValueError):
+                    continue
+        return default
+
+    @staticmethod
+    def _kalshi_price(market: Dict, base: str, default: float = 0.5) -> float:
+        """Read a Kalshi dollar price field (yes_bid_dollars, ...) with legacy
+        fallback. The *_dollars fields are already 0..1; legacy cents (>1) are
+        divided by 100."""
+        for key in (f"{base}_dollars", base):
+            if market.get(key) is not None:
+                try:
+                    v = float(market[key])
+                    return v / 100.0 if v > 1 else v
+                except (TypeError, ValueError):
+                    continue
+        return default
+
     async def _save_scan_results(self, scan_report: Dict):
         """Save scan results to disk for historical analysis."""
         try:
