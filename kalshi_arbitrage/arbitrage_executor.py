@@ -406,7 +406,19 @@ class ArbitrageExecutor:
     def _build_result(self, opp_id: str, opp: Dict, buy: OrderOutcome,
                       sell: OrderOutcome, filled: float, t0: float,
                       hedge_info: Optional[Dict]) -> ExecutionResult:
-        gross = sell.avg_price * filled - buy.avg_price * filled
+        # PnL depends on the strategy. For a COMPLEMENTARY arb both "legs" are
+        # BUYS of complementary outcomes that together pay out exactly $1 per
+        # matched pair, so gross = $1*filled - (buy + sell)*filled. The
+        # same-outcome (buy-low/sell-high) accounting (sell - buy) would mislabel
+        # it as a ~92% loss and trip the daily-loss halt — a real bug caught by
+        # paper-executing a complementary opportunity end to end.
+        if opp.get('strategy_type') == 'complementary':
+            cost_per_pair = buy.avg_price + sell.avg_price
+            gross = filled * 1.0 - cost_per_pair * filled
+            margin_basis = cost_per_pair * filled
+        else:
+            gross = sell.avg_price * filled - buy.avg_price * filled
+            margin_basis = buy.avg_price * filled
         net = gross - buy.fees - sell.fees
         self._daily_loss -= net  # net positive → reduces daily loss
         latency = int((time.time() - t0) * 1000)
@@ -427,7 +439,7 @@ class ArbitrageExecutor:
             sell_fees=sell.fees,
             gross_profit=gross,
             net_profit=net,
-            profit_margin=(net / (buy.avg_price * filled)) if filled > 0 and buy.avg_price > 0 else 0,
+            profit_margin=(net / margin_basis) if margin_basis > 0 else 0,
             latency_ms=latency,
             timestamp=time.time(),
             execution_id=exec_id,
