@@ -10,6 +10,12 @@ class Config:
     
     # Analysis Parameters
     MIN_PROFIT_THRESHOLD = 0.02  # 2% minimum profit threshold
+    # Price-realism CEILING. Genuine same-event cross-venue arb on identical
+    # contracts is empirically sub-15% (usually sub-5%); a 30-60% "edge" is a
+    # false match (different proposition/threshold) or a stale leg, never real
+    # arbitrage. The economics layer rejects opportunities above this so the
+    # autonomous machine can't fire an un-hedged trade on a phantom edge.
+    MAX_PLAUSIBLE_PROFIT_MARGIN = 0.15
     # 0.78: live data shows genuine equivalent markets score 0.79-0.85 (e.g.
     # "Republicans win Vermont governor race" vs "Republican party win the
     # governorship in Vermont"), so 0.85 cut most true matches. The Phase A

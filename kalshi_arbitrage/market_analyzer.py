@@ -1718,7 +1718,17 @@ class MarketAnalyzer:
         # Only return opportunities above threshold
         if profit_margin < Config.MIN_PROFIT_THRESHOLD:
             return None
-            
+        # Price-realism cap: a genuine same-event cross-venue edge is sub-15%;
+        # a 30-60% "margin" is a near-certain false match (different proposition,
+        # e.g. "score the MOST goals" vs "a goal") or a stale leg, NOT arbitrage.
+        # Reject so the autonomous machine never fires an un-hedged directional
+        # trade on a phantom edge.
+        if profit_margin > Config.MAX_PLAUSIBLE_PROFIT_MARGIN:
+            logger.warning(
+                "Rejecting implausible edge %.1f%% (>%.0f%%) as likely false match/stale: %s",
+                profit_margin * 100, Config.MAX_PLAUSIBLE_PROFIT_MARGIN * 100, strategy)
+            return None
+
         return {
             'strategy': strategy,
             'buy_platform': buy_platform,
@@ -1857,6 +1867,13 @@ class MarketAnalyzer:
         profit_margin = total_profit / total_cost if total_cost > 0 else 0
 
         if profit_margin < Config.MIN_PROFIT_THRESHOLD:
+            return None
+        # Price-realism cap (see same-outcome path): reject implausibly large
+        # complementary "edges" as false matches / stale legs, not arbitrage.
+        if profit_margin > Config.MAX_PLAUSIBLE_PROFIT_MARGIN:
+            logger.warning(
+                "Rejecting implausible complementary edge %.1f%% (>%.0f%%) as likely false match: %s",
+                profit_margin * 100, Config.MAX_PLAUSIBLE_PROFIT_MARGIN * 100, strategy)
             return None
 
         weighted_cost_a = sum(t['buy_price_a'] * t['volume'] for t in trades) / total_volume
