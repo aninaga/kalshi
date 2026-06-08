@@ -182,8 +182,15 @@ def _token_matches(word: str, larger: set) -> bool:
         pre = word[:4]
         for lw in larger:
             if len(lw) >= 4 and (lw.startswith(pre) or word.startswith(lw[:4])):
-                return True
-            if len(lw) >= 4 and (word in lw or lw in word):
+                # Shared 4-char prefix, BUT reject if one carries a negating/
+                # ordinal qualifier the other lacks (hottest vs secondhottest,
+                # which would otherwise match on substring) — handled by the
+                # length-ratio guard: a true variant is similar length.
+                if min(len(word), len(lw)) / max(len(word), len(lw)) >= 0.6:
+                    return True
+            # Substring only when the shorter token is itself >= 5 chars (a real
+            # name component like "myung" in "jaemyung"), not a short common word.
+            if len(lw) >= 5 and len(word) >= 5 and (word in lw or lw in word):
                 return True
     for lw in larger:
         if len(word) >= 4 and len(lw) >= 4 and _ratio(word, lw) >= 0.9:
@@ -195,6 +202,18 @@ def _ratio(a: str, b: str) -> float:
     """Pure-stdlib similarity ratio (no deps) for single-token spelling variants."""
     from difflib import SequenceMatcher
     return SequenceMatcher(None, a, b).ratio()
+
+
+# Words that, when present on only ONE side, change the PROPOSITION (not the
+# subject): ordinals/superlatives ranking, and outcome-stage verbs. Same subject
+# + a divergent qualifier here = different question (e.g. "hottest" vs
+# "second-hottest" year; "on the ballot" vs "win").
+_PREDICATE_QUALIFIERS = frozenset({
+    "hottest", "coldest", "highest", "lowest", "biggest", "largest", "smallest",
+    "secondhottest", "secondhighest", "secondlowest", "second", "third",
+    "ballot", "nominee", "nominated", "primary", "runoff", "reelection",
+    "impeached", "indicted", "convicted", "acquitted",
+})
 
 
 # --------------------------------------------------------------------------- #
@@ -300,18 +319,48 @@ class DistinguishingEntityVerifier:
                                 (f"scope_mismatch k={sorted(k_scope)} p={sorted(p_scope)}",),
                                 self.name)
 
-        # (B) Distinguishing-entity overlap.
         kt = set(_clean(kalshi_market).split()) - _BOILERPLATE
         pt = set(_clean(polymarket_market).split()) - _BOILERPLATE
-        if not kt or not pt:
-            # Nothing to distinguish on — let other verifiers decide.
-            return MatchVerdict(True, UNKNOWN, 0.3, ("no_distinguishing_tokens",), self.name)
-        smaller, larger = (kt, pt) if len(kt) <= len(pt) else (pt, kt)
+
+        # (B) Numeric/year veto: a year or numeric token present on BOTH sides
+        # must agree. Different years (2026 vs 2028) → different event. (A shared
+        # year is template, not identity, so it's excluded from the entity
+        # overlap below.)
+        k_nums = {w for w in kt if any(c.isdigit() for c in w)}
+        p_nums = {w for w in pt if any(c.isdigit() for c in w)}
+        if k_nums and p_nums and not (k_nums & p_nums):
+            return MatchVerdict(False, UNKNOWN, 0.0,
+                                (f"numeric_mismatch k={sorted(k_nums)} p={sorted(p_nums)}",),
+                                self.name)
+
+        # (C) Distinguishing-ENTITY overlap on the ALPHABETIC tokens only (the
+        # subject/identity). Numeric tokens are excluded so a shared year can't
+        # inflate two different subjects ("Letitia James" vs "James Clapper").
+        ke = {w for w in kt if w.isalpha()}
+        pe = {w for w in pt if w.isalpha()}
+        if not ke or not pe:
+            return MatchVerdict(True, UNKNOWN, 0.3, ("no_entity_tokens",), self.name)
+        smaller, larger = (ke, pe) if len(ke) <= len(pe) else (pe, ke)
         matched = sum(1 for w in smaller if _token_matches(w, larger))
         overlap = matched / len(smaller)
+        # Require a high fraction of the smaller entity set to match. A 2-token
+        # name ("bill clinton") matching only 1 token of another ("hillary
+        # clinton") is 0.5 — must be rejected, so the bar sits above 0.5.
         if overlap < self.min_overlap:
             return MatchVerdict(False, UNKNOWN, 0.0,
-                                (f"distinguishing_entity_overlap={overlap:.2f}",), self.name)
+                                (f"entity_overlap={overlap:.2f} sm={sorted(smaller)}",), self.name)
+
+        # (D) Predicate-qualifier veto: same subject, DIFFERENT proposition.
+        # An ordinal/superlative/outcome qualifier present on one side but not
+        # EXACTLY on the other changes what's being asked ("hottest" vs
+        # "second-hottest" year; "on the ballot" vs "win"). Use EXACT set
+        # difference (not fuzzy _token_matches) so "secondhottest" is not
+        # smoothed into "hottest".
+        q_mismatch = (ke ^ pe) & _PREDICATE_QUALIFIERS
+        if q_mismatch:
+            return MatchVerdict(False, UNKNOWN, 0.0,
+                                (f"predicate_qualifier_mismatch {sorted(q_mismatch)}",), self.name)
+
         return MatchVerdict(True, UNKNOWN, 0.7,
                             (f"entity_overlap={overlap:.2f}",), self.name)
 

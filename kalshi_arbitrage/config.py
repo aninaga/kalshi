@@ -218,7 +218,7 @@ class Config:
     # Distinguishing-entity overlap: the smaller non-boilerplate token set must
     # be at least this fraction covered by the other (same subject/scope). The
     # false positives (Patel vs Biden) land ~0.33; true variants ~1.0.
-    MATCH_MIN_DISTINGUISHING_OVERLAP = 0.5
+    MATCH_MIN_DISTINGUISHING_OVERLAP = 0.6
     # Min term containment when BOTH venues expose resolution rules text.
     MATCH_MIN_RULES_CONTAINMENT = 0.4
     # Operator allow/deny list of verified pairs.
