@@ -69,3 +69,13 @@ _(filled after running)_
 ## 5. Verdict
 
 _(filled after running)_
+
+## Coordinator preliminary result (n=267 cached, fire-4 finished by coordinator)
+The fire-4 agent stalled waiting on its data build; coordinator ran the eval.
+Spread continuation (anchoring) PRELIMINARY, full population (pre-registered):
+- cost 0c: +6.18c/ct, CI [+0.19, +12.17]
+- cost 2c: +4.18c/ct, CI [-1.81, +10.17]  (gate FAIL on CI lo + season/parity stability)
+- monthly walk-forward: 2/2 months net-positive at 2c (Oct +1.03, Nov +5.21)
+VERDICT (preliminary): PROMISING / NEEDS_DATA — positive point estimate, mechanism
+mirrors the CERTIFIED totals anchoring edge, but under-powered at n=267 (same as
+totals at n=199 pre-certification). Building the FULL season to attempt certification.
