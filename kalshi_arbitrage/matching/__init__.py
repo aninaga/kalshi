@@ -12,6 +12,11 @@ from .labels import (
     load_labeled_pairs,
     save_labeled_pairs,
 )
+from .llm_tiebreaker import (
+    LLMTiebreaker,
+    TiebreakResult,
+    resolve_uncertain_batch,
+)
 from .verification import (
     ALIGNED,
     INVERTED,
@@ -38,6 +43,9 @@ __all__ = [
     "OutcomePolarityVerifier",
     "ResolutionCriteriaVerifier",
     "default_verifiers",
+    "LLMTiebreaker",
+    "TiebreakResult",
+    "resolve_uncertain_batch",
     "LabeledPair",
     "TRUE_MATCH",
     "FALSE_MATCH",

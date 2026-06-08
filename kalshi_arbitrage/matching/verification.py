@@ -68,6 +68,11 @@ class MatchVerdict:
     confidence: float = 0.0          # 0..1 — how sure the verifier is
     reasons: tuple = field(default_factory=tuple)  # human-readable explanations
     verifier: str = ""               # which verifier produced this verdict
+    # The deterministic rules let this PASS, but it sits in the genuinely
+    # ambiguous residue (e.g. asymmetric time anchor) where a title rule can't
+    # separate true matches from false ones without hurting recall. An optional
+    # LLM tiebreaker resolves these; absent a tiebreaker the pass stands.
+    uncertain: bool = False
 
     def to_dict(self) -> Dict:
         return {
@@ -76,6 +81,7 @@ class MatchVerdict:
             "confidence": round(self.confidence, 4),
             "reasons": list(self.reasons),
             "verifier": self.verifier,
+            "uncertain": self.uncertain,
         }
 
 
@@ -296,6 +302,50 @@ def _month_period_scope(title: str) -> Optional[str]:
         if re.search(rf"\b{m}\s+20\d\d\b", t) or re.search(rf"\b20\d\d\s+{m}\b", t):
             return m
     return None
+
+
+_YEAR_RE = re.compile(r"\b(?:19|20)\d\d\b")
+_DEADLINE_RE = re.compile(
+    r"\b(?:by|before|after|until)\s+("
+    + "|".join(sorted(_MONTHS))
+    + r")\b",
+    re.IGNORECASE,
+)
+_MONTH_RE = re.compile(r"\b(" + "|".join(sorted(_MONTHS)) + r")\b", re.IGNORECASE)
+
+
+def _time_anchor(title: str) -> tuple:
+    """A normalized (years, month-period) signature of a title's time scope.
+
+    ``years`` is the set of explicit 4-digit years; the second element folds any
+    month that scopes the event (a deadline "by September 30" or a bare month).
+    Two titles whose anchors are equal name the same period; when they differ
+    and the deterministic year-veto can't reject (it only fires when BOTH name
+    explicit, disjoint years), the pair is genuinely ambiguous.
+    """
+    years = frozenset(m.group(0) for m in _YEAR_RE.finditer(title))
+    months = frozenset(m.lower() for m in _DEADLINE_RE.findall(title))
+    if not months:
+        months = frozenset(m.group(1).lower() for m in _MONTH_RE.finditer(title))
+    return years, months
+
+
+def _time_anchors_uncertain(k_title: str, p_title: str) -> bool:
+    """True when the two titles' time anchors are NOT deterministically equal,
+    yet also NOT rejectable by the year-veto (which needs both sides to name
+    explicit, differing years). This is exactly the residue that produces the
+    irreducible false positives — "in 2028" vs "by September 30", "fight next"
+    vs "fight in 2026" — alongside the many true matches that legitimately state
+    the year on only one side. A deterministic rule can't separate the two, so
+    we flag it for the optional LLM tiebreaker rather than guess.
+    """
+    ky, km = _time_anchor(k_title)
+    py, pm = _time_anchor(p_title)
+    # Both name explicit years that disagree → the year-veto already rejects; not
+    # ambiguous (and never reaches here as a passing pair anyway).
+    if ky and py and not (ky & py):
+        return False
+    return (ky, km) != (py, pm)
 
 
 def _normalize_tokens(tokens: set) -> set:
@@ -608,8 +658,20 @@ class DistinguishingEntityVerifier:
             return MatchVerdict(False, UNKNOWN, 0.0,
                                 (f"predicate_qualifier_mismatch {sorted(q_mismatch)}",), self.name)
 
-        return MatchVerdict(True, UNKNOWN, 0.7,
-                            (f"entity_overlap={overlap:.2f}",), self.name)
+        # Same subject and the deterministic rules accept, but if the two time
+        # anchors disagree in a way the year-veto can't reject ("in 2028" vs
+        # "by September 30"; "next" vs "in 2026"), this is the genuinely
+        # ambiguous residue: flag it uncertain so an optional LLM tiebreaker can
+        # adjudicate. The pass STANDS by default — without a tiebreaker we keep
+        # recall (the same shape covers 40+ true matches) at the cost of the
+        # rare false positive.
+        uncertain = _time_anchors_uncertain(
+            kalshi_market.get("title", ""), polymarket_market.get("title", "")
+        )
+        reasons = (f"entity_overlap={overlap:.2f}",)
+        if uncertain:
+            reasons = reasons + ("uncertain_time_anchor",)
+        return MatchVerdict(True, UNKNOWN, 0.7, reasons, self.name, uncertain=uncertain)
 
 
 class ResolutionCriteriaVerifier:
@@ -769,6 +831,7 @@ class CompositeVerifier:
         verifiers: Optional[Sequence[MatchVerifier]] = None,
         reject_unknown_polarity: Optional[bool] = None,
         require_allowlist: bool = False,
+        tiebreaker: Optional["object"] = None,
     ):
         self.verifiers = list(verifiers) if verifiers is not None else default_verifiers()
         self.reject_unknown_polarity = (
@@ -777,12 +840,22 @@ class CompositeVerifier:
             else Config.MATCH_REJECT_UNKNOWN_POLARITY
         )
         self.require_allowlist = require_allowlist
+        # Optional same-event judge for the ambiguous residue. Anything with a
+        # ``.judge(kalshi_market, polymarket_market) -> TiebreakResult`` method
+        # and an ``.enabled`` flag (e.g. ``LLMTiebreaker``). When None or
+        # disabled, uncertain pairs simply keep their deterministic verdict.
+        # NOTE: a per-pair tiebreaker here is convenient for evaluation/tests;
+        # the live detection loop prefers the BATCHED path (resolve all of a
+        # scan's uncertain pairs in one cached call) — see
+        # ``llm_tiebreaker.resolve_uncertain_batch``.
+        self.tiebreaker = tiebreaker
 
     def verify(self, kalshi_market: Dict, polymarket_market: Dict) -> MatchVerdict:
         reasons: List[str] = []
         polarity = UNKNOWN
         polarity_conf = -1.0
         allowlisted = False
+        uncertain = False
         confidences: List[float] = []
 
         for verifier in self.verifiers:
@@ -792,6 +865,7 @@ class CompositeVerifier:
             if not verdict.passed:
                 return MatchVerdict(False, verdict.polarity, 0.0, tuple(reasons), self.name)
             confidences.append(verdict.confidence)
+            uncertain = uncertain or verdict.uncertain
 
             if vname == AllowlistVerifier.name and "approved_by_operator" in verdict.reasons:
                 allowlisted = True
@@ -806,7 +880,24 @@ class CompositeVerifier:
             return MatchVerdict(False, UNKNOWN, 0.0, tuple(reasons + ["unknown_polarity_rejected"]), self.name)
 
         confidence = min(confidences) if confidences else 0.0
-        return MatchVerdict(True, polarity, confidence, tuple(reasons), self.name)
+
+        # An operator-approved pair is authoritative — never escalate it.
+        if uncertain and not allowlisted and self.tiebreaker is not None \
+                and getattr(self.tiebreaker, "enabled", False):
+            result = self.tiebreaker.judge(kalshi_market, polymarket_market)
+            if result is not None:
+                reasons.append(f"llm_tiebreaker:{result.reason}")
+                if not result.same_event:
+                    return MatchVerdict(False, UNKNOWN, result.confidence,
+                                        tuple(reasons), self.name)
+                # Same event — let the LLM's polarity win if the rules left it open.
+                if polarity == UNKNOWN and result.polarity != UNKNOWN:
+                    polarity = result.polarity
+                return MatchVerdict(True, polarity, max(confidence, result.confidence),
+                                    tuple(reasons), self.name, uncertain=False)
+
+        return MatchVerdict(True, polarity, confidence, tuple(reasons), self.name,
+                            uncertain=uncertain)
 
 
 def default_verifiers() -> List[MatchVerifier]:

@@ -6,7 +6,13 @@ shared 40-pair calibration set that reached 98% four-way agreement. This is the
 statistical-power ground truth: it guards against precision OR recall
 regressions across the full distribution of live market types (elections by
 district, esports tournament stages, crypto, arrests, economic prints with
-thresholds, sports leagues). Measured at commit: precision 0.985, recall 1.000.
+thresholds, sports leagues). Measured at commit: precision 0.9925, recall
+1.000 (2 residual false positives, both the asymmetric time-anchor case — "in
+2028" vs "by September 30", "fight next" vs "in 2026"). Those 2 are the
+genuinely-ambiguous residue an OPTIONAL LLM tiebreaker resolves to precision
+1.000 when an ANTHROPIC_API_KEY is present (see test_llm_tiebreaker.py); this
+gate measures the always-on DETERMINISTIC path, which must never depend on a
+network call.
 """
 
 import sys

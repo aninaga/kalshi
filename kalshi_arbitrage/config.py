@@ -224,6 +224,28 @@ class Config:
     # Operator allow/deny list of verified pairs.
     MATCH_ALLOWLIST_FILE = "matching/match_allowlist.json"
 
+    # --- LLM tiebreaker (optional) ---
+    # The deterministic verifier resolves 99%+ of pairs. A small residue is
+    # genuinely ambiguous from the titles alone — the classic case is an
+    # ASYMMETRIC TIME ANCHOR (one side says "in 2028", the other "by September
+    # 30"; or "fight next" vs "fight in 2026"). The deterministic year-veto can
+    # only reject when BOTH sides name explicit, differing years, so these slip
+    # through as false positives, yet 40+ TRUE matches share the same
+    # "year-on-one-side-only" shape — so no title rule can separate them without
+    # killing recall. For those, we escalate to a single Claude call that judges
+    # same-event. OFF by default and a NO-OP unless an API key is present, so the
+    # deterministic path is always the default and the bot never depends on a
+    # network call to trade.
+    MATCH_LLM_TIEBREAKER_ENABLED = True
+    # Cheapest model that suits a short same-event judgement (Haiku 4.5,
+    # $1/$5 per 1M, 200K ctx). Override via env if desired.
+    MATCH_LLM_TIEBREAKER_MODEL = os.environ.get(
+        "MATCH_LLM_TIEBREAKER_MODEL", "claude-haiku-4-5"
+    )
+    # API key is read from the environment only (never committed). When absent,
+    # the tiebreaker no-ops and the deterministic verdict stands unchanged.
+    MATCH_LLM_TIEBREAKER_API_KEY_ENV = "ANTHROPIC_API_KEY"
+
     # --- Execution settings ---
     # Default = FULL PAPER PIPELINE. The executor runs end-to-end (build orders,
     # pre-flight, simulated fills via SimulatedGateway, hedge logic, capture,

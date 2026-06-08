@@ -11,7 +11,13 @@ from collections import defaultdict
 import heapq
 from .api_clients import KalshiClient, PolymarketClient
 from .utils import clean_title, get_similarity_score, extract_stat_types, thresholds_compatible
-from .matching import CompositeVerifier, INVERTED, UNKNOWN
+from .matching import (
+    CompositeVerifier,
+    INVERTED,
+    UNKNOWN,
+    LLMTiebreaker,
+    resolve_uncertain_batch,
+)
 from .config import Config
 from .mock_execution import MockExecutionEngine, FeeModel
 from .confirmed_pnl import ConfirmedPnLTracker
@@ -41,6 +47,14 @@ class MarketAnalyzer:
         # similarity threshold to reject false positives (divergent resolution
         # criteria, inverted polarity) before they reach the execution path.
         self.match_verifier = CompositeVerifier() if Config.MATCH_VERIFICATION_ENABLED else None
+        # Optional LLM tiebreaker for the genuinely-ambiguous residue (asymmetric
+        # time anchors). A no-op unless ANTHROPIC_API_KEY is set and the SDK is
+        # installed, so the deterministic verdict is always the default. The
+        # per-pair verifier flags these ``uncertain``; we resolve a whole scan's
+        # uncertain pairs in ONE batched, prompt-cached call after matching.
+        self.match_tiebreaker = (
+            LLMTiebreaker() if Config.MATCH_VERIFICATION_ENABLED else None
+        )
         self.completeness_stats_rejected_matches = 0
         # Optional candidate capture for recall auditing (set ARB_CAPTURE_CANDIDATES
         # to a file path to record every above-threshold pair + verdict).
@@ -747,6 +761,18 @@ class MarketAnalyzer:
             logger.info(f"Completed batch {i+1}/{len(batch_results)} - found {len(result)} matches")
         
         logger.info(f"Found {len(matches)} potential market matches above {Config.SIMILARITY_THRESHOLD} threshold")
+
+        # LLM tiebreaker post-pass: resolve the scan's genuinely-ambiguous
+        # pairs (flagged ``uncertain`` by the deterministic verifier) in a
+        # single batched, prompt-cached call. No-op without an API key, so the
+        # deterministic matches pass through unchanged.
+        if self.match_tiebreaker is not None and getattr(self.match_tiebreaker, "enabled", False):
+            before = len(matches)
+            matches = resolve_uncertain_batch(matches, self.match_tiebreaker)
+            if len(matches) != before:
+                logger.info(
+                    f"LLM tiebreaker dropped {before - len(matches)} different-event pair(s)"
+                )
         return matches
     
     def _process_kalshi_batch(self, kalshi_batch: List[Dict], polymarket_markets: List[Dict], batch_id: int = 0) -> List[Dict]:
