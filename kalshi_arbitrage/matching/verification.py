@@ -91,7 +91,7 @@ class MatchVerifier(Protocol):
 
 def _tokens(market: Dict) -> set:
     """Distinguishing (non-boilerplate) tokens of a market's clean title."""
-    text = market.get("clean_title") or clean_title(market.get("title", ""))
+    text = clean_title(market.get("title") or market.get("clean_title") or "")
     return set(text.split()) - _BOILERPLATE
 
 
@@ -146,8 +146,14 @@ def _rules_text(market: Dict) -> str:
 
 
 def _clean(market: Dict) -> str:
-    """Cleaned title for a market (cached or computed)."""
-    return market.get("clean_title") or clean_title(market.get("title", ""))
+    """Canonically-cleaned title for a market.
+
+    Always re-normalize the raw title with utils.clean_title rather than trust
+    the venue's pre-set clean_title — the per-venue cleaners differ (one keeps
+    hyphens/'?', e.g. "second-hottest", "record?"), which would corrupt the
+    token sets the entity/qualifier checks rely on.
+    """
+    return clean_title(market.get("title") or market.get("clean_title") or "")
 
 
 def _scope_text(market: Dict) -> str:
@@ -244,8 +250,8 @@ class OutcomePolarityVerifier:
     name = "outcome_polarity"
 
     def verify(self, kalshi_market: Dict, polymarket_market: Dict) -> MatchVerdict:
-        k_title = kalshi_market.get("clean_title") or clean_title(kalshi_market.get("title", ""))
-        p_title = polymarket_market.get("clean_title") or clean_title(polymarket_market.get("title", ""))
+        k_title = clean_title(kalshi_market.get("title") or kalshi_market.get("clean_title") or "")
+        p_title = clean_title(polymarket_market.get("title") or polymarket_market.get("clean_title") or "")
 
         reasons: List[str] = []
 
