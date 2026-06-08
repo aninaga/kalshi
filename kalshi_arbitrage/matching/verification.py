@@ -337,6 +337,22 @@ _PREDICATE_QUALIFIERS = frozenset({
 _SUPERLATIVE_RE = re.compile(r"(?<!at )\b(most|fewest)\s+([a-z]+)", re.IGNORECASE)
 
 
+# Partial-scope quantifier: "win ANY county" (∃ — carry at least one sub-unit) is
+# a far weaker proposition than "win the [statewide] election" (the aggregate).
+# Present on one side only ⇒ different question. Observed live as "Becerra win
+# any county" vs "Becerra win the California primary" (27% phantom "edge").
+_PARTIAL_SCOPE_RE = re.compile(
+    r"\b(?:win|carry|take|flip|lead)\s+(?:any|at least one|a single|one)\s+"
+    r"(?:count(?:y|ies)|district|precinct|state|township|ward|parish|borough|municipalit(?:y|ies))\b",
+    re.IGNORECASE,
+)
+
+
+def _partial_scope_asymmetry(a: str, b: str) -> bool:
+    """A 'win any <sub-unit>' partial-scope claim on exactly one side."""
+    return bool(_PARTIAL_SCOPE_RE.search(a)) != bool(_PARTIAL_SCOPE_RE.search(b))
+
+
 def _superlative_asymmetry(a: str, b: str) -> Optional[str]:
     al, bl = a.lower(), b.lower()
     ra = _SUPERLATIVE_RE.search(al)
@@ -737,6 +753,11 @@ class DistinguishingEntityVerifier:
         rank = _superlative_asymmetry(k_title_raw, p_title_raw)
         if rank:
             return MatchVerdict(False, UNKNOWN, 0.0, (f"superlative_asymmetry {rank!r}",), self.name)
+
+        # Partial-scope veto: "win ANY county" (carry ≥1 sub-unit) is not "win the
+        # election" (the aggregate). One side only ⇒ different proposition.
+        if _partial_scope_asymmetry(k_title_raw, p_title_raw):
+            return MatchVerdict(False, UNKNOWN, 0.0, ("partial_scope_asymmetry",), self.name)
 
         # (C) Distinguishing-ENTITY check on the ALPHABETIC tokens (subject /
         # identity). Numeric tokens are excluded so a shared year can't inflate

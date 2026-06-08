@@ -152,6 +152,26 @@ def test_composite_rejects_superlative_proposition_mismatch():
     ).passed
 
 
+def test_composite_rejects_partial_scope_proposition():
+    # "win ANY county" (carry >=1 sub-unit) is a far weaker proposition than
+    # "win the [statewide] primary" (the aggregate) — a 27% live phantom "edge".
+    c = CompositeVerifier()
+    assert not c.verify(
+        _mkt("Will Xavier Becerra win any county in the 2026 California gubernatorial primary"),
+        _mkt("Will Xavier Becerra win the 2026 California gubernatorial primary"),
+    ).passed
+
+
+def test_partial_scope_does_not_overfire():
+    # "another country leave OPEC" must NOT trip the partial-scope veto (different
+    # verb/noun); a plain state-race match is unaffected.
+    c = CompositeVerifier()
+    assert c.verify(
+        _mkt("Will another country leave OPEC in 2026"),
+        _mkt("Will another country leave OPEC in 2026"),
+    ).passed
+
+
 def test_superlative_veto_only_on_shared_noun():
     # "win the most SEATS" vs "win the ELECTION" ranks a noun the other side
     # doesn't contest (parliamentary-equivalent) — must NOT be split, or recall
