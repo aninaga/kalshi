@@ -220,6 +220,13 @@ _PREDICATE_QUALIFIERS = frozenset({
     "secondhottest", "secondhighest", "secondlowest", "second", "third",
     "ballot", "nominee", "nominated", "primary", "runoff", "reelection",
     "impeached", "indicted", "convicted", "acquitted",
+    # Sub-event / stage qualifiers: "win the first ROUND" is not "win the
+    # election"; "qualify for PLAYOFFS" is not "qualify to STAGE 3"; appearing on
+    # only one side changes the proposition.
+    "round", "playoffs", "playoff", "stage", "semifinal", "semifinals",
+    "quarterfinal", "quarterfinals",
+    # "FINISH 1st" is a placement, not the same as "WIN".
+    "finish",
 })
 
 # Generic event/structural words that recur across contests and are NOT the
@@ -234,6 +241,8 @@ _TEMPLATE_TOKENS = frozenset({
     "record", "edition", "tour", "event", "title", "medal", "award",
     "rise", "rose", "fall", "fell", "mom", "yoy", "month", "monthly",
     "core", "headline", "report", "data", "number", "level", "value",
+    # League/division tokens — the team/city is the subject, not the league.
+    "mlb", "nba", "nfl", "nhl", "al", "nl", "worldcup",
 })
 
 
@@ -253,18 +262,24 @@ def _normalize_tokens(tokens: set) -> set:
             out.add(d.replace("district_", ""))
         else:
             out.add(_ORD.get(t, t))
-    # League synonyms: collapse "pro baseball"/"major league baseball" -> mlb, etc.
+    # Multi-word synonyms: collapse equivalent phrasings to one canonical token.
     syn = {
         frozenset({"pro", "baseball"}): "mlb",
         frozenset({"major", "league", "baseball"}): "mlb",
         frozenset({"pro", "basketball"}): "nba",
         frozenset({"pro", "football"}): "nfl",
         frozenset({"pro", "hockey"}): "nhl",
+        frozenset({"fifa", "world", "cup"}): "worldcup",
+        frozenset({"mens", "world", "cup"}): "worldcup",
     }
     for combo, canon in syn.items():
         if combo <= out:
             out -= combo
             out.add(canon)
+    # Single-token synonyms (league/division abbreviations).
+    single = {"american": "al", "national": "nl", "americanleague": "al",
+              "nationalleague": "nl"}
+    out = {single.get(w, w) for w in out}
     return out
 
 
@@ -287,6 +302,9 @@ _OFFICE_PHRASES = {
     ("attorney", "general"): "attorney_general",
     ("secretary", "of", "state"): "secretary_of_state",
     ("lieutenant", "governor"): "lieutenant_governor",
+    ("lt", "gov"): "lieutenant_governor",
+    ("lt", "governor"): "lieutenant_governor",
+    ("lieutenant", "gov"): "lieutenant_governor",
 }
 _OFFICE_SINGLE = {
     "governor": "governor", "governorship": "governor",
@@ -449,16 +467,31 @@ class DistinguishingEntityVerifier:
         kt = _normalize_tokens(set(_clean(kalshi_market).split()) - _BOILERPLATE)
         pt = _normalize_tokens(set(_clean(polymarket_market).split()) - _BOILERPLATE)
 
-        # (B) Numeric/year veto: a year or numeric token present on BOTH sides
-        # must agree. Different years (2026 vs 2028) → different event. (A shared
-        # year is template, not identity, so it's excluded from the entity
-        # overlap below.)
-        k_nums = {w for w in kt if any(c.isdigit() for c in w)}
-        p_nums = {w for w in pt if any(c.isdigit() for c in w)}
-        if k_nums and p_nums and not (k_nums & p_nums):
+        # (B) Numeric veto — handle YEARS and QUANTITIES separately.
+        # Years (4-digit 19xx/20xx) date the event; quantities (thresholds like
+        # "4000 measles cases", "8+ points") define the outcome. Each kind, when
+        # present on both sides, must agree. Critically, a shared YEAR must not
+        # mask a different QUANTITY ("more than 4000" vs "at least 5000" both in
+        # 2026): split them so 4000!=5000 still rejects.
+        def _split_nums(toks):
+            years, qty = set(), set()
+            for w in toks:
+                digits = "".join(c for c in w if c.isdigit())
+                if not digits:
+                    continue
+                if len(digits) == 4 and digits[:2] in ("19", "20") and w == digits:
+                    years.add(digits)
+                else:
+                    qty.add(w)
+            return years, qty
+        k_years, k_qty = _split_nums(kt)
+        p_years, p_qty = _split_nums(pt)
+        if k_years and p_years and not (k_years & p_years):
             return MatchVerdict(False, UNKNOWN, 0.0,
-                                (f"numeric_mismatch k={sorted(k_nums)} p={sorted(p_nums)}",),
-                                self.name)
+                                (f"year_mismatch k={sorted(k_years)} p={sorted(p_years)}",), self.name)
+        if k_qty and p_qty and not (k_qty & p_qty):
+            return MatchVerdict(False, UNKNOWN, 0.0,
+                                (f"quantity_mismatch k={sorted(k_qty)} p={sorted(p_qty)}",), self.name)
 
         # (C) Distinguishing-ENTITY check on the ALPHABETIC tokens (subject /
         # identity). Numeric tokens are excluded so a shared year can't inflate
