@@ -69,7 +69,13 @@ def _fetch_all_odds(km, pmk, start, end):
 
     def k_job(d):
         out = []
-        for c in kalshi_hist.fetch_candles(d["series"], d["ticker"], start, end):
+        try:
+            candles = kalshi_hist.fetch_candles(d["series"], d["ticker"], start, end)
+        except Exception:  # noqa: BLE001
+            # Best-effort per market: one throttled candle fetch must not sink
+            # the whole game. The PM leg still carries the win-prob signal.
+            return out
+        for c in candles:
             if c["mid"] is None:
                 continue
             out.append({"ts": c["ts"], "platform": "kalshi", "kind": d["kind"],
@@ -137,8 +143,16 @@ def build(date: str, away_tri: str, home_tri: str, kinds: set[str] | None = None
     g = espn.fetch_game(eid, date)
     start, end = g.first_ts - PRE_GAME_SEC, g.last_ts + POST_GAME_SEC
 
-    km = kalshi_hist.enumerate_markets(date, away_tri, home_tri) \
-        if platforms is None or "kalshi" in platforms else []
+    if platforms is None or "kalshi" in platforms:
+        try:
+            km = kalshi_hist.enumerate_markets(date, away_tri, home_tri)
+        except Exception:  # noqa: BLE001
+            # Kalshi best-effort: a throttled/missing historical tier must not
+            # sink a game Polymarket can still price. kalshi_home_winprob is
+            # empty for ~all 2025-26 games anyway; PM is the primary source.
+            km = []
+    else:
+        km = []
     pmk = pm.enumerate_markets(date, away_tri, home_tri) \
         if platforms is None or "polymarket" in platforms else []
     if kinds:
