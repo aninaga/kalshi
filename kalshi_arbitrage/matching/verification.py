@@ -246,6 +246,58 @@ _TEMPLATE_TOKENS = frozenset({
 })
 
 
+_MONTHS = frozenset({
+    "january", "february", "march", "april", "may", "june", "july", "august",
+    "september", "october", "november", "december",
+})
+
+
+_NAME_PAIR_SKIP = frozenset({
+    "will", "the", "grand", "final", "world", "cup", "iem", "pro", "national",
+    "american", "league", "stage", "major", "minor", "open", "series", "team",
+    "united", "states", "north", "south", "new", "saudi",
+})
+
+
+def _added_name_pair(my_title: str, other_title: str) -> Optional[str]:
+    """A full personal name (two consecutive Capitalized words) present in
+    ``my_title`` but absent from ``other_title`` — a DIFFERENT person/entity
+    that changes the event ("...fight Charles Oliveira" vs "...fight next").
+
+    Conservative by design: requires TWO consecutive capitalized name tokens so
+    it never fires on a lone capitalized common noun (Braves, September) — a
+    full-name addition is a reliable "different subject" signal, validated to
+    trigger on zero true matches in the labeled corpus.
+    """
+    other_l = other_title.lower()
+    words = my_title.split()
+    for i in range(len(words) - 1):
+        w1 = re.sub(r"[^a-zA-Z]", "", words[i])
+        w2 = re.sub(r"[^a-zA-Z]", "", words[i + 1])
+        if (len(w1) >= 3 and len(w2) >= 3 and w1[:1].isupper() and w2[:1].isupper()
+                and w1.lower() not in _NAME_PAIR_SKIP and w2.lower() not in _NAME_PAIR_SKIP
+                and w1.lower() not in other_l and w2.lower() not in other_l):
+            return f"{w1} {w2}"
+    return None
+
+
+def _month_period_scope(title: str) -> Optional[str]:
+    """Return a month if it SCOPES the event's period ("June 2026 hottest"),
+    distinguishing it from a deadline ("...join by June 30"). A period-scoping
+    month makes a single-month market a DIFFERENT event from a full-year one;
+    a deadline month does not. Returns None when the month is a deadline or
+    absent.
+    """
+    t = title.lower()
+    for m in _MONTHS:
+        if re.search(rf"\b(?:by|before|after|until) {m}\b", t):
+            return None  # deadline phrasing — not a period scope
+    for m in _MONTHS:
+        if re.search(rf"\b{m}\s+20\d\d\b", t) or re.search(rf"\b20\d\d\s+{m}\b", t):
+            return m
+    return None
+
+
 def _normalize_tokens(tokens: set) -> set:
     """Canonicalize tokens so equivalent forms compare equal:
       - congressional district codes: ma06 -> ma6 (strip zero-pad)
@@ -492,6 +544,26 @@ class DistinguishingEntityVerifier:
         if k_qty and p_qty and not (k_qty & p_qty):
             return MatchVerdict(False, UNKNOWN, 0.0,
                                 (f"quantity_mismatch k={sorted(k_qty)} p={sorted(p_qty)}",), self.name)
+
+        # Month-period scope: a single-MONTH market ("June 2026 hottest") is a
+        # different event than a full-year one — but only when the month SCOPES
+        # the period, not when it's a deadline ("...by June 30", which is the
+        # same event with a cutoff). Reject only on a genuine period mismatch.
+        k_month = _month_period_scope(kalshi_market.get("title", ""))
+        p_month = _month_period_scope(polymarket_market.get("title", ""))
+        if k_month != p_month and (k_month or p_month):
+            return MatchVerdict(False, UNKNOWN, 0.0,
+                                (f"month_period_mismatch k={k_month} p={p_month}",), self.name)
+
+        # Added-name veto: one side names a full person (two consecutive
+        # capitalized words) the other lacks → different subject specificity
+        # ("fight Charles Oliveira" vs "fight next").
+        k_title_raw = kalshi_market.get("title", "")
+        p_title_raw = polymarket_market.get("title", "")
+        added = _added_name_pair(k_title_raw, p_title_raw) or _added_name_pair(p_title_raw, k_title_raw)
+        if added:
+            return MatchVerdict(False, UNKNOWN, 0.0,
+                                (f"added_name {added!r}",), self.name)
 
         # (C) Distinguishing-ENTITY check on the ALPHABETIC tokens (subject /
         # identity). Numeric tokens are excluded so a shared year can't inflate
