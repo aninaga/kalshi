@@ -19,11 +19,20 @@ walk-forward collapses 7/9 → 3/8 months (see `research/TOTALS_REFINE_FINDINGS.
 This is the same failure mode as the original project's i+1 latency bug —
 optimistic execution manufactures phantom edges.
 
-**Net result: there is currently NO tradeable certified NBA edge in this data.**
-The spreads "STRONG" result used the identical 0.50-fill assumption and is under a
-realistic-execution re-check (expected to be the same artifact). Treat every
-result below that quotes a 0.50/flat-cost fill as a STATISTICAL signal only, not a
-tradeable edge, until re-scored on real listed-strike prices + fees.
+**Net result: NO gate-CERTIFIED tradeable NBA edge in this data.** But the
+realistic re-check split the two anchoring edges apart:
+- **totals** — pure 0.50-fill artifact, net **−1.00¢/ct**, dead. RETRACTED.
+- **spreads** — NOT a pure artifact. Real fill mid is 0.5187 (not 0.50), so
+  **+5.22¢ of genuine residual gross survives**; realistic taker net is
+  **+1.88¢/ct** (1.5¢ half-spread + 2% fee; +3.43¢ at zero spread). It still
+  **fails the gate** (bootstrap CI lo < 0 at any nonzero spread; season/parity
+  stability fail; walk-forward 5/8) — so PROMISING-BUT-UNCERTIFIED and marginal
+  as a taker. The one real residual mispricing found; would need **maker fills**
+  (to dodge the half-spread + 2% taker) or **more seasons** to certify. See
+  `research/SPREADS_FINDINGS.md` → "REALISTIC EXECUTION RE-CHECK".
+
+Treat every result that quotes a 0.50/flat-cost fill as a STATISTICAL signal
+only, not a tradeable edge, until re-scored on real listed-strike prices + fees.
 
 ## TL;DR
 
