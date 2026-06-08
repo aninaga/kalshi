@@ -177,6 +177,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("find-arb", help="find genuine fee-clearing live arb -> allowlist", add_help=False)
     sub.add_parser("monitor", help="continuous fee-aware capture monitor (paper)", add_help=False)
     sub.add_parser("backtest-arb", help="retroactive capturable arb over the past N days", add_help=False)
+    sub.add_parser("analyze-ledger", help="summarize a monitor --ledger paper session", add_help=False)
     sub.add_parser("machine", help="one-command: discover -> allowlist -> paper-harvest", add_help=False)
 
     return p
@@ -190,6 +191,7 @@ _PASSTHROUGH = {
     "monitor": "tools.monitor_arb",
     "backtest-arb": "tools.backtest_arb",
     "machine": "tools.run_machine",
+    "analyze-ledger": "tools.analyze_ledger",
 }
 
 

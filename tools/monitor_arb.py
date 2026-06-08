@@ -65,9 +65,28 @@ def main(argv=None) -> int:
     ap.add_argument("--allowlist", type=str, default=None)
     ap.add_argument("--ledger", type=str, default=None,
                     help="Append each captured episode (paper fill) as JSONL to this path.")
+    ap.add_argument("--execute", action="store_true",
+                    help="Route each newly-opened gap through the ArbitrageExecutor "
+                         "(paper unless EXECUTION_MODE=live AND allowlisted AND armed).")
     ap.add_argument("--refresh-watchlist", type=float, default=1800,
                     help="Re-discover the watch-list every N seconds (markets open/close).")
     args = ap.parse_args(argv)
+
+    executor = None
+    if args.execute:
+        import asyncio
+        from kalshi_arbitrage.arbitrage_executor import ArbitrageExecutor
+        executor = ArbitrageExecutor()
+        _loop = asyncio.new_event_loop()
+
+        def _fire(priced):
+            opp = lp.to_opportunity(priced)
+            try:
+                res = _loop.run_until_complete(executor.execute_arbitrage(opp))
+                print(f"           EXEC {opp['opportunity_id']}: "
+                      f"{getattr(res, 'status', res)}", flush=True)
+            except Exception as exc:  # never let an exec error kill the monitor
+                print(f"           EXEC error: {exc}", flush=True)
 
     watch = _load_watchlist(args)
     if not watch:
@@ -104,6 +123,8 @@ def main(argv=None) -> int:
                                  "ticks": 1, "kt": r["kt"]}
                 print(f"{ts:<9} {'OPEN':<6} {r['net']:7.2f} {r['net_edge']*100:5.1f}% "
                       f"{r['size']:7.0f}  {r['kt'][:46]}", flush=True)
+                if executor is not None:
+                    _fire(r)
             else:
                 ep["peak_net"] = max(ep["peak_net"], r["net"])
                 ep["peak_edge"] = max(ep["peak_edge"], r["net_edge"])

@@ -256,6 +256,50 @@ def match_pairs(pm: List[Dict], ks: List[Dict]) -> List[Dict]:
     return pairs
 
 
+def to_opportunity(priced: Dict) -> Dict:
+    """Map a fee-aware priced pair (from ``price_pair``) to the opportunity dict
+    the ArbitrageExecutor consumes, for the COMPLEMENTARY ($1) strategy.
+
+    The two legs are a cross-venue buy of complementary outcomes A and B (A =
+    Kalshi-YES outcome). Exactly one leg is on each venue. We resolve which PM
+    token to buy and which Kalshi side from the polarity and the chosen sources:
+      - a_src=K: buy Kalshi-YES (=A) + buy the PM token for B; kalshi_side='yes'.
+      - b_src=K: buy Kalshi-NO  (=B) + buy the PM token for A; kalshi_side='no'.
+    PM token of A = yes-token if aligned else no-token; B is its complement.
+    The executor reads kalshi_side from the strategy string ('S3'/'Kalshi YES'
+    => 'yes', else 'no'), so the strategy label is set to match.
+    """
+    toks = {str(t.get("outcome", "")).lower(): t["token_id"] for t in priced["tokens"]}
+    yes_t = toks.get("yes") or priced["tokens"][0]["token_id"]
+    no_t = toks.get("no") or priced["tokens"][1]["token_id"]
+    inv = priced["polarity"] == INVERTED
+    a_token = no_t if inv else yes_t      # PM token for outcome A (Kalshi-YES outcome)
+    b_token = yes_t if inv else no_t      # PM token for outcome B (complement)
+
+    if priced["a_src"] == "K":            # Kalshi leg = A (yes); PM leg = B
+        kalshi_price, poly_price, pm_token = priced["avg_a"], priced["avg_b"], b_token
+        strategy = "Buy Kalshi YES + Buy Polymarket complement (S3)"
+    else:                                 # Kalshi leg = B (no); PM leg = A
+        kalshi_price, poly_price, pm_token = priced["avg_b"], priced["avg_a"], a_token
+        strategy = "Buy Polymarket + Buy Kalshi NO (S4)"
+
+    return {
+        "opportunity_id": f"arb-{priced['ktk']}-{str(pm_token)[:8]}",
+        "strategy_type": "complementary",
+        "strategy": strategy,
+        "total_profit": priced["net"],
+        "profit_margin": priced["net_edge"],
+        "kalshi_price": round(kalshi_price, 4),
+        "polymarket_price": round(poly_price, 4),
+        "polymarket_token": pm_token,
+        "max_tradeable_volume": priced["size"],
+        "match_data": {
+            "kalshi_market": {"id": priced["ktk"], "title": priced.get("kt", "")},
+            "polymarket_market": {"id": priced["pid"], "title": priced.get("pt", "")},
+        },
+    }
+
+
 def discover() -> List[Dict]:
     """Full sweep: fetch both catalogs and return verified same-event pairs."""
     return match_pairs(fetch_polymarket(), fetch_kalshi())
