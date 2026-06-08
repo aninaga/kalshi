@@ -325,13 +325,26 @@ _PREDICATE_QUALIFIERS = frozenset({
     "quarterfinal", "quarterfinals",
     # "FINISH 1st" is a placement, not the same as "WIN".
     "finish",
-    # Superlative quantifiers: "score the MOST goals" is a ranking, not the same
-    # proposition as "score A goal". Present on only one side ⇒ different
-    # question. (Observed live as a 64% phantom "edge".) NB: "least" is excluded
-    # because "at least N" is a threshold phrasing (== "more than N"), not a
-    # superlative — including it wrongly split true measles-threshold pairs.
-    "most", "fewest",
 })
+
+# Superlative/ranking words checked against the RAW title (not the
+# boilerplate-stripped token set — "most" is boilerplate and would never survive
+# to the qualifier veto). "score the MOST goals" is a ranking, not the same
+# proposition as "score A goal". Excludes the "at most/least" threshold idiom via
+# a lookbehind. Observed live as a 64% phantom "edge".
+_RANK_WORDS = ("most", "fewest", "leads", "leading")
+
+
+def _superlative_asymmetry(a: str, b: str) -> Optional[str]:
+    """A ranking word present (as a superlative, not 'at most/least') on exactly
+    one side — a different proposition (ranking vs occurrence)."""
+    al, bl = a.lower(), b.lower()
+    for w in _RANK_WORDS:
+        in_a = re.search(rf"(?<!at )\b{w}\b", al) is not None
+        in_b = re.search(rf"(?<!at )\b{w}\b", bl) is not None
+        if in_a != in_b:
+            return w
+    return None
 
 # Generic event/structural words that recur across contests and are NOT the
 # distinguishing subject (the team/person/topic is). Removed before the
@@ -712,6 +725,14 @@ class DistinguishingEntityVerifier:
         if added:
             return MatchVerdict(False, UNKNOWN, 0.0,
                                 (f"added_name {added!r}",), self.name)
+
+        # Superlative veto: a ranking word ("score the MOST goals") on one side
+        # only is a different proposition than the plain occurrence ("score A
+        # goal"). Checked on the RAW title because "most" is boilerplate and is
+        # stripped from the entity-token sets before the qualifier veto.
+        rank = _superlative_asymmetry(k_title_raw, p_title_raw)
+        if rank:
+            return MatchVerdict(False, UNKNOWN, 0.0, (f"superlative_asymmetry {rank!r}",), self.name)
 
         # (C) Distinguishing-ENTITY check on the ALPHABETIC tokens (subject /
         # identity). Numeric tokens are excluded so a shared year can't inflate

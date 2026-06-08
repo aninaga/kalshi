@@ -304,22 +304,36 @@ def main():
     print(f"Verified same-event pairs (matcher+congruence): {len(pairs)}", file=sys.stderr)
 
     import concurrent.futures
-    found, suspect = [], []
+    found, suspect, review = [], [], []
     with concurrent.futures.ThreadPoolExecutor(max_workers=16) as ex:
         for r in ex.map(lambda p: price_pair(p, args.pm_fee_bps), pairs):
             if not r or r["net"] < args.min_net_usd or r["net_edge"] < args.min_net_edge:
                 continue
-            (suspect if r["net_edge"] > args.max_net_edge else found).append(r)
+            if r["net_edge"] > args.max_net_edge:
+                suspect.append(r)          # implausible → likely false match
+            elif r.get("uncertain"):
+                review.append(r)           # basis-risk / ambiguous → human/LLM
+            else:
+                found.append(r)            # genuine, auto-allowlistable
     found.sort(key=lambda r: -r["net"])
+    review.sort(key=lambda r: -r["net"])
     suspect.sort(key=lambda r: -r["net_edge"])
 
-    print(f"\nGENUINE fee-clearing arb candidates: {len(found)} "
+    print(f"\nGENUINE fee-clearing arb candidates (auto-allowlistable): {len(found)} "
           f"(total net ${sum(r['net'] for r in found):.2f})\n")
     print(f"{'net$':>8} {'edge':>6} {'size':>7} {'capital':>9}  legs  market")
     for r in found[:args.limit]:
-        flag = " [uncertain→LLM]" if r.get("uncertain") else ""
         print(f"{r['net']:8.2f} {r['net_edge']*100:5.1f}% {r['size']:7.0f} "
-              f"{r['cost']:9.2f}  {r['a_src']}/{r['b_src']}  {r['kt'][:44]}{flag}")
+              f"{r['cost']:9.2f}  {r['a_src']}/{r['b_src']}  {r['kt'][:44]}")
+
+    if review:
+        print(f"\nHELD FOR REVIEW — plausible edge but UNCERTAIN resolution "
+              f"(deadline/definition basis-risk; NOT auto-allowlisted): {len(review)} "
+              f"(net ${sum(r['net'] for r in review):.2f})")
+        for r in review[:args.limit]:
+            print(f"  {r['net']:7.2f} {r['net_edge']*100:5.1f}%  {r['kt'][:46]}")
+        print("  → confirm both venues' rules resolve identically before allowlisting "
+              "(or enable the LLM tiebreaker).")
 
     if suspect:
         print(f"\nREJECTED as implausible (edge > {args.max_net_edge*100:.0f}% → likely "

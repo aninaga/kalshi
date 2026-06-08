@@ -142,10 +142,12 @@ def test_composite_require_allowlist_blocks_unlisted(tmp_path):
 
 def test_composite_rejects_superlative_proposition_mismatch():
     # "score the MOST goals" (a ranking) is not "score A goal" (an occurrence) —
-    # a real live 64% phantom "edge". Superlative on one side only => reject.
+    # a real live 64% phantom "edge". Both sides share "World Cup" so the ONLY
+    # distinguisher is the superlative — guards that the veto reads the RAW title
+    # ("most" is boilerplate and is stripped from the entity-token sets).
     c = CompositeVerifier()
     assert not c.verify(
-        _mkt("Will Christian Pulisic score the most goals for USMNT"),
+        _mkt("Will Christian Pulisic score the most goals at the 2026 World Cup"),
         _mkt("Will Christian Pulisic score a goal at the World Cup"),
     ).passed
 
