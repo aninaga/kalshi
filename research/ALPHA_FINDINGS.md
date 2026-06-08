@@ -4,6 +4,27 @@ _Date: 2026-06-08. Scope: the NBA in-game win-probability research system only
 (the Kalshi↔Polymarket arbitrage bot is developed separately and is untouched
 here)._
 
+## ⚠️ CORRECTION (2026-06-08, later) — the "certified totals edge" is EXECUTION-KILLED
+
+The full-season gate PASS for the totals pace-anchoring edge reported below was
+an **execution-model artifact** and is RETRACTED. The evaluator filled at the
+interpolated 0.50 at-the-money strike; the *real listed* over contract on the
+signal side prices ~**0.5555** (the market had already priced the pace signal).
+Under realistic execution — snap to the actual listed strike at its real quoted
+price, cross a ~1.5¢ half-spread, pay the Polymarket 2% taker fee — the edge goes
+from +8.21¢ to **net −1.00¢/contract**, the gate FAILS at every spread, and the
+walk-forward collapses 7/9 → 3/8 months (see `research/TOTALS_REFINE_FINDINGS.md`,
+`research/scripts/totals_realistic.py`). The gate and methodology were sound
+(DIAGNOSTIC_1: 0% false-positive); the **cost/fill model under-charged by ~7.5¢**.
+This is the same failure mode as the original project's i+1 latency bug —
+optimistic execution manufactures phantom edges.
+
+**Net result: there is currently NO tradeable certified NBA edge in this data.**
+The spreads "STRONG" result used the identical 0.50-fill assumption and is under a
+realistic-execution re-check (expected to be the same artifact). Treat every
+result below that quotes a 0.50/flat-cost fill as a STATISTICAL signal only, not a
+tradeable edge, until re-scored on real listed-strike prices + fees.
+
 ## TL;DR
 
 I rebuilt the data layer, fetched a **full fresh season** (1,319 games,
