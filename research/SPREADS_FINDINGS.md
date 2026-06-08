@@ -79,3 +79,24 @@ Spread continuation (anchoring) PRELIMINARY, full population (pre-registered):
 VERDICT (preliminary): PROMISING / NEEDS_DATA — positive point estimate, mechanism
 mirrors the CERTIFIED totals anchoring edge, but under-powered at n=267 (same as
 totals at n=199 pre-certification). Building the FULL season to attempt certification.
+
+## FULL-SEASON RESULT (coordinator, n=1297, direction pre-registered)
+Built all ~1305 spread games and re-scored (the DIAGNOSTIC_1 power table predicted
+n=267 was uncertifiable, not fake). Spread continuation (anchoring):
+- cost 0c: +7.67c/ct, CI [+4.97, +10.37]
+- cost 2c: +5.67c/ct, CI [+2.97, +8.37]   <- DECISIVE block-bootstrap CI lo > 0
+- cost 3c: +4.67c/ct, CI [+1.97, +7.37]
+- cost 4c: +3.67c/ct, CI [+0.97, +6.37]   <- still CI lo > 0 at 4c
+- monthly walk-forward: 8/9 months net-positive at 2c (only June n=2 negative)
+- FULL gate @2c: FAILS on ONE sub-gate only — parity_split (even_ci_lo=-0.0183 marginal,
+  odd=+0.0502, no overlap). All other criteria (bootstrap CI, n>=200, knockouts,
+  season-split) pass.
+
+VERDICT: STRONG SECOND ANCHORING EDGE. Point estimate (+5.67c@2c) matches the
+certified totals edge (+6.21c@2c); decisive block-bootstrap CI is positive at all
+costs to 4c; 8/9 OOS months. Not FULLY gate-certified — blocked solely by the
+conservative parity stability sub-gate, which DIAGNOSTIC_1 showed is low-power at
+one-season n (a real +6c edge fails the full gate ~40% of the time at n~1300).
+The anchoring family (line lags live game-state) GENERALIZES totals -> spreads.
+Same caveats as totals: full-pop gate includes train (OOS rests on pre-registration
++ walk-forward); confirm realistic fills (the totals-refine agent is hardening this).
