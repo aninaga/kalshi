@@ -170,10 +170,35 @@ def build_parser() -> argparse.ArgumentParser:
     lv.add_argument("action", choices=["status", "arm", "disarm"], default="status", nargs="?")
     lv.set_defaults(func=_cmd_live)
 
+    # --- live cross-venue arb tools (share kalshi_arbitrage.live_probe) --- #
+    # Registered for top-level --help discoverability; main() routes them to the
+    # tool's own argparse BEFORE this parser runs (see _PASSTHROUGH), so flags
+    # like "--duration 60" pass through verbatim. Run `kalshi-arb <cmd> --help`.
+    sub.add_parser("find-arb", help="find genuine fee-clearing live arb -> allowlist", add_help=False)
+    sub.add_parser("monitor", help="continuous fee-aware capture monitor (paper)", add_help=False)
+    sub.add_parser("backtest-arb", help="retroactive capturable arb over the past N days", add_help=False)
+    sub.add_parser("machine", help="one-command: discover -> allowlist -> paper-harvest", add_help=False)
+
     return p
 
 
+# Passthrough subcommands → their tool's main(argv). Routed BEFORE argparse so
+# the tool's own flags (incl. leading "--opt") reach it verbatim — argparse
+# REMAINDER drops a leading optional, so we bypass it for these.
+_PASSTHROUGH = {
+    "find-arb": "tools.find_live_arb",
+    "monitor": "tools.monitor_arb",
+    "backtest-arb": "tools.backtest_arb",
+    "machine": "tools.run_machine",
+}
+
+
 def main(argv=None) -> int:
+    import sys as _sys
+    argv = _sys.argv[1:] if argv is None else list(argv)
+    if argv and argv[0] in _PASSTHROUGH:
+        import importlib
+        return importlib.import_module(_PASSTHROUGH[argv[0]]).main(argv[1:]) or 0
     args = build_parser().parse_args(argv)
     return args.func(args)
 

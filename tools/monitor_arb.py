@@ -46,7 +46,14 @@ def _load_watchlist(args) -> list:
     return pairs
 
 
-def main():
+def _record(ledger_path, rec):
+    if not ledger_path:
+        return
+    with open(ledger_path, "a") as fh:
+        fh.write(json.dumps(rec) + "\n")
+
+
+def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--interval", type=float, default=20.0, help="Poll seconds (default 20).")
@@ -56,14 +63,16 @@ def main():
     ap.add_argument("--pm-fee-bps", type=int, default=getattr(lp.Config, "POLYMARKET_ESTIMATED_FEE_RATE_BPS", 1000))
     ap.add_argument("--duration", type=float, default=0, help="Seconds to run (0 = until Ctrl-C).")
     ap.add_argument("--allowlist", type=str, default=None)
+    ap.add_argument("--ledger", type=str, default=None,
+                    help="Append each captured episode (paper fill) as JSONL to this path.")
     ap.add_argument("--refresh-watchlist", type=float, default=1800,
                     help="Re-discover the watch-list every N seconds (markets open/close).")
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
 
     watch = _load_watchlist(args)
     if not watch:
         print("Empty watch-list; nothing to monitor.", file=sys.stderr)
-        return
+        return 0
 
     import concurrent.futures
     open_eps: dict = {}      # ktk -> {start, peak_net, peak_edge, ticks}
@@ -107,6 +116,10 @@ def main():
             captured_total += ep["peak_net"]
             print(f"{ts:<9} {'CLOSE':<6} {ep['peak_net']:7.2f} {ep['peak_edge']*100:5.1f}% "
                   f"{'':>7}  {ep['kt'][:40]} (open {dur/60:.1f}m, {ep['ticks']} ticks)", flush=True)
+            _record(args.ledger, {"ts": ts, "ktk": ktk, "market": ep["kt"],
+                                  "peak_net": round(ep["peak_net"], 4),
+                                  "peak_edge": round(ep["peak_edge"], 5),
+                                  "open_minutes": round(dur / 60, 2), "ticks": ep["ticks"]})
 
         if args.duration and now - t_start >= args.duration:
             break
@@ -114,10 +127,19 @@ def main():
 
     elapsed = (time.time() - t_start) / 3600.0
     still_open = sum(e["peak_net"] for e in open_eps.values())
+    # Flush still-open episodes to the ledger so a bounded run is fully recorded.
+    ts = datetime.now(timezone.utc).strftime("%H:%M:%S")
+    for ktk, ep in open_eps.items():
+        _record(args.ledger, {"ts": ts, "ktk": ktk, "market": ep["kt"],
+                              "peak_net": round(ep["peak_net"], 4),
+                              "peak_edge": round(ep["peak_edge"], 5),
+                              "open_minutes": round((time.time() - ep["start"]) / 60, 2),
+                              "ticks": ep["ticks"], "still_open": True})
     print(f"\nMonitored {elapsed:.2f}h | episodes closed={closed} open={len(open_eps)} | "
           f"capturable net ~${captured_total + still_open:.2f} "
           f"(best-entry-per-episode, fee-aware @ {args.pm_fee_bps}bps PM)", flush=True)
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

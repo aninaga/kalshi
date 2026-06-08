@@ -33,7 +33,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from kalshi_arbitrage import live_probe as lp
 
 
-def main():
+def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--min-net-edge", type=float, default=0.005, help="Min net edge/$1 (0.5%%).")
@@ -44,7 +44,7 @@ def main():
                     default=getattr(lp.Config, "POLYMARKET_ESTIMATED_FEE_RATE_BPS", 1000))
     ap.add_argument("--limit", type=int, default=40)
     ap.add_argument("--output", type=str, default=None, help="Write allowlist JSON of survivors.")
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
 
     t0 = time.time()
     print("Fetching live catalogs...", file=sys.stderr)
@@ -100,4 +100,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main() or 0)

@@ -87,7 +87,7 @@ def backtest_pair(pair: dict, days: int, interval_min: int, pm_flat: float) -> d
     return {**pair, "best_edge": best_edge, "size": size, "net": best_edge * size}
 
 
-def main():
+def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--days", type=int, default=7)
@@ -96,7 +96,7 @@ def main():
                     help="PM flat taker rate (0.0 = real today; 0.02 = conservative).")
     ap.add_argument("--max-net-edge", type=float, default=0.15)
     ap.add_argument("--limit", type=int, default=40)
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
 
     print(f"Discovering verified pairs...", file=sys.stderr)
     pairs = lp.discover()
@@ -128,4 +128,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main() or 0)
