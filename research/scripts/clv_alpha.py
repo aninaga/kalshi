@@ -249,6 +249,7 @@ def main():
                     help="force a side; default fits on train, applies pre-registered continuation elsewhere")
     ap.add_argument("--workers", type=int, default=8)
     ap.add_argument("--limit", type=int, default=None)
+    ap.add_argument("--dump-trades", default=None, help="parquet path to save the trades frame")
     a = ap.parse_args()
 
     games = _split_games(a.start, a.end, a.split)
@@ -277,6 +278,10 @@ def main():
             print(f"   drift mean={tr['drift'].mean():+.4f} |drift| mean={tr['drift'].abs().mean():.4f} "
                   f"long_home_frac={(tr['side']=='long_home').mean():.2f} "
                   f"home_win_rate={tr['home_won'].mean():.3f}", flush=True)
+        if a.dump_trades and not tr.empty:
+            outp = a.dump_trades if len(sides) == 1 else a.dump_trades.replace(".parquet", f"_{side}.parquet")
+            tr.to_parquet(outp)
+            print(f"   dumped {len(tr)} trades -> {outp}", flush=True)
         print(flush=True)
 
 
