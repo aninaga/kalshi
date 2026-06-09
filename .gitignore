@@ -148,3 +148,6 @@ market_data/live_*.json
 market_data/polymarket_us_*.json
 market_data/polymarket_us_*.csv
 market_data/polymarket_anirudh_*.csv
+
+# Claude Code agent worktrees + local settings
+.claude/
