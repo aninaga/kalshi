@@ -173,7 +173,7 @@ class PolymarketGateway:
         if not armed:
             return OrderOutcome.failed(POLYMARKET, req.size, reason, coid)
         side = "BUY" if req.action == "buy" else "SELL"
-        order_type = req.tif if req.tif in ("FOK", "GTC", "GTD") else Config.POLYMARKET_ORDER_TYPE
+        order_type = req.tif if req.tif in ("FOK", "FAK", "GTC", "GTD") else Config.POLYMARKET_ORDER_TYPE
         ttl = req.ttl_seconds or Config.POLYMARKET_ORDER_TTL_SECONDS
 
         resp = await self.client.place_order(
@@ -209,8 +209,9 @@ class PolymarketGateway:
         status = STATUS_FILLED if filled >= req.size * 0.999 else (STATUS_PARTIAL if filled > 0 else STATUS_FAILED)
         # Best-effort on-chain trade/tx ids; the reconciler re-fetches the
         # authoritative trades (and fees) from the data-api via order_id.
-        tx = (resp.get("transactionsHashes") or resp.get("transactionHashes")
-              or resp.get("tradeIds") or []) if isinstance(resp, dict) else []
+        tx = (resp.get("tradeIDs") or resp.get("tradeIds")
+              or resp.get("transactionsHashes") or resp.get("transactionHashes")
+              or []) if isinstance(resp, dict) else []
         trade_ids = [str(t) for t in tx if t] if isinstance(tx, list) else []
         return OrderOutcome(
             venue=POLYMARKET, status=status, requested_size=req.size,
