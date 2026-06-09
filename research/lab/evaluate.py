@@ -63,6 +63,7 @@ def evaluate(
     cost_sweep=(0.0, 0.01, 0.02, 0.03, 0.04),
     walkforward: bool = True,
     adversarial: bool = True,
+    ledger_path: Optional[str] = None,
 ) -> GateResult:
     """Evaluate ``trades`` through the promotion gate plus the lab's extra views.
 
@@ -84,6 +85,14 @@ def evaluate(
         If True, gate each calendar month independently.
     adversarial : bool
         If True, run the four honesty checks.
+    ledger_path : str | None
+        Optional path to the research ledger. When provided, the Deflated-Sharpe
+        multiple-testing correction is deflated against the REAL trial count N and
+        cross-trial Sharpe variance the org has run (via ``lab.governance``),
+        instead of the cold-start placeholder (N=1, V[SR]=1.0). When omitted, the
+        behavior is byte-identical to the historical default. DSR is informational
+        in the gate, so this only tightens the *reported* hurdle — it never changes
+        or weakens any decisive (block-bootstrap / cluster-knockout) gate.
 
     Returns
     -------
@@ -111,7 +120,19 @@ def evaluate(
             reasons=["no trades" if df.empty else "fewer than 2 trades"],
         )
 
-    base = _score(df, extra_cost=0.0)
+    # N-aware DSR governance: deflate against the real research record when a
+    # ledger is supplied; otherwise fall back to the cold-start placeholders.
+    if ledger_path:
+        from research.lab import governance
+        gov = governance.governance_params(ledger_path)
+    else:
+        gov = {"n_trials": 1, "sharpe_variance": 1.0,
+               "n_trials_source": "cold-start placeholder (no ledger_path)",
+               "sharpe_variance_source": "cold-start placeholder (no ledger_path)"}
+
+    base = _score(df, extra_cost=0.0,
+                  n_trials=gov["n_trials"],
+                  sharpe_variance=gov["sharpe_variance"])
 
     result = GateResult(
         passed=base["passed"],
@@ -121,6 +142,7 @@ def evaluate(
         n=base["n"],
         n_games=base["n_games"],
         reasons=list(base["reasons"]),
+        governance=gov,
     )
 
     # --- cost sweep (monotone decreasing in cost) ---
@@ -142,7 +164,8 @@ def evaluate(
 # ---------------------------------------------------------------------------
 
 
-def _score(df: pd.DataFrame, *, extra_cost: float, n_trials: int = 1) -> dict:
+def _score(df: pd.DataFrame, *, extra_cost: float, n_trials: int = 1,
+           sharpe_variance: float = 1.0) -> dict:
     """Map a trades DataFrame onto ``evaluate_trial`` and return a flat dict.
 
     ``extra_cost`` is subtracted from each trade's (already-net) pnl, in
@@ -156,6 +179,7 @@ def _score(df: pd.DataFrame, *, extra_cost: float, n_trials: int = 1) -> dict:
         val_home_team_per_trade=df["home_team"].to_numpy(),
         val_primary_team_per_trade=df["primary_team"].to_numpy(),
         n_total_trials_in_registry=n_trials,
+        sharpe_variance_in_registry=sharpe_variance,
         cost_per_trade_assumed=extra_cost,
     )
     return {

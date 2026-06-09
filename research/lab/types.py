@@ -137,6 +137,7 @@ class GateResult:
     walkforward: dict = field(default_factory=dict)   # month -> {n, cents, ci_lo}
     adversarial: dict = field(default_factory=dict)    # check -> {passed, detail}
     cost_sweep: dict = field(default_factory=dict)     # cost_c -> {cents, ci_lo, gate}
+    governance: dict = field(default_factory=dict)     # DSR N / V[SR] + provenance sources
 
 
 @dataclass
