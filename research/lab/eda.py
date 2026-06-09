@@ -11,7 +11,26 @@ from __future__ import annotations
 import numpy as np
 
 from research.lab import signals
-from research.lab.types import WINNER
+from research.lab.types import SPREAD, TOTAL, WINNER
+
+
+def _market_gap(panel) -> np.ndarray | None:
+    """Market-aware anchoring gap (projection − implied level), or None.
+
+    ``signals.anchoring_gap`` projects from TOTAL points (its contract), so it
+    is only meaningful for the totals book. For SPREAD we project the signed
+    margin; WINNER has no pace-anchoring gap (its diagnostic is calibration).
+    """
+    if panel.market == TOTAL:
+        return np.asarray(signals.anchoring_gap(panel), float)
+    if panel.market == SPREAD:
+        e = np.asarray(panel.elapsed_sec, float)
+        mid = np.asarray(panel.mid, float)
+        margin = np.asarray(panel.margin, float)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            proj = np.where(e > 120.0, margin * 2880.0 / e, np.nan)
+        return proj - mid
+    return None  # WINNER: no anchoring gap
 
 
 def scan(panels: list, *, market: str | None = None) -> dict:
@@ -29,11 +48,13 @@ def scan(panels: list, *, market: str | None = None) -> dict:
     gaps, stales, mids, realized = [], [], [], []
     for p in panels:
         try:
-            g = np.asarray(signals.anchoring_gap(p), float)
+            g = _market_gap(p)
             s = np.asarray(signals.staleness_min(p), float)
         except Exception:  # noqa: BLE001 — a malformed panel must not sink the scan
             continue
-        gaps.append(g[np.isfinite(g)])
+        if g is not None:
+            g = np.asarray(g, float)
+            gaps.append(g[np.isfinite(g)])
         stales.append(s[np.isfinite(s)])
         if mkt == WINNER and p.home_won is not None:
             m = np.asarray(p.mid, float)
