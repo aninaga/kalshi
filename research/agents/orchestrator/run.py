@@ -80,6 +80,11 @@ RATE_LIMIT_PAUSE_SEC = 600  # 10 minutes per plan v2 §codex_dispatcher
 # Plan v2 §2.2 research-direction rotation. Kept here as a list of short
 # markdown blurbs; the actual codex worker prompt is generic and reads the
 # direction text from ``direction.md`` in its scratch dir.
+#
+# This is now the LEGACY hard-coded rotation: it is a FALLBACK. The loop prefers
+# OPEN hypotheses from the dynamic registry (``research.lab.hypothesis``) and
+# only drops back to this list when the registry is empty or absent. See
+# :func:`_select_directions`.
 DIRECTION_ROTATION: list[dict[str, str]] = [
     {
         "name": "calibration_gaps",
@@ -281,14 +286,61 @@ def _save_state(state_path: Path, state: dict[str, Any]) -> None:
     state_path.write_text(json.dumps(state, indent=2, sort_keys=True), encoding="utf-8")
 
 
-def _pick_direction(state: dict[str, Any]) -> dict[str, str]:
+def _hypothesis_to_direction(h) -> dict[str, str]:
+    """Map a ``research.lab.types.Hypothesis`` row onto a rotation entry.
+
+    The registry stores a structured idea (mechanism / observable signal /
+    pre-registered direction); flatten it into the ``{name, blurb}`` shape the
+    rest of the loop (and :func:`_compose_direction_md`) expects. ``name`` uses
+    the hypothesis id (stable dedupe hash) so the direction log / packets trace
+    back to the registry row.
+    """
+    parts = [h.mechanism.strip()]
+    if getattr(h, "signal_desc", ""):
+        parts.append(f"Signal: {h.signal_desc.strip()}")
+    if getattr(h, "direction", ""):
+        parts.append(f"Pre-registered direction: {h.direction.strip()}")
+    return {
+        "name": (h.id or h.hash()),
+        "blurb": " ".join(parts),
+        "market": h.market,
+    }
+
+
+def _select_directions() -> list[dict[str, str]]:
+    """Rotation to draw directions from, preferring the dynamic registry.
+
+    Pulls OPEN hypotheses from ``research.lab.hypothesis`` (the runtime
+    replacement for the hard-coded menu). Degrades gracefully to the legacy
+    ``DIRECTION_ROTATION`` list when the registry module is absent (not yet
+    merged in this worktree) or returns no open hypotheses.
+    """
+    try:
+        from research.lab import hypothesis as _hyp  # lazy: may not be merged
+    except ImportError:
+        return list(DIRECTION_ROTATION)
+    try:
+        open_hyps = _hyp.open_hypotheses()
+    except Exception:  # noqa: BLE001 — never let registry I/O break the loop
+        return list(DIRECTION_ROTATION)
+    directions = [_hypothesis_to_direction(h) for h in open_hyps]
+    return directions or list(DIRECTION_ROTATION)
+
+
+def _pick_direction(
+    state: dict[str, Any],
+    rotation: list[dict[str, str]] | None = None,
+) -> dict[str, str]:
     """Return the next direction in the rotation and advance state.
 
-    Mutates ``state`` in-place (caller persists).
+    ``rotation`` defaults to :func:`_select_directions` (registry-backed with a
+    legacy fallback). Mutates ``state`` in-place (caller persists).
     """
-    idx = int(state.get("direction_rotation_index", 0)) % len(DIRECTION_ROTATION)
-    direction = DIRECTION_ROTATION[idx]
-    state["direction_rotation_index"] = (idx + 1) % len(DIRECTION_ROTATION)
+    if rotation is None:
+        rotation = _select_directions()
+    idx = int(state.get("direction_rotation_index", 0)) % len(rotation)
+    direction = rotation[idx]
+    state["direction_rotation_index"] = (idx + 1) % len(rotation)
     return direction
 
 
@@ -676,6 +728,13 @@ def run_loop(cfg: LoopConfig, logger: logging.Logger) -> int:
 
     # --- Rotation state ---------------------------------------------------
     state = _load_state(cfg.state_path)
+    rotation = _select_directions()
+    using_registry = rotation != DIRECTION_ROTATION
+    logger.info(
+        "direction rotation: %d entries (%s)",
+        len(rotation),
+        "registry-backed" if using_registry else "legacy fallback",
+    )
 
     # --- Loop -------------------------------------------------------------
     trial_count = 0
@@ -716,7 +775,7 @@ def run_loop(cfg: LoopConfig, logger: logging.Logger) -> int:
             break
 
         # --- Pick direction (creative mode every Nth iteration) ---
-        direction = _pick_direction(state)
+        direction = _pick_direction(state, rotation)
         _save_state(cfg.state_path, state)
         creative_now = (
             cfg.creative_every > 0

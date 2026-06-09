@@ -52,6 +52,11 @@ class Direction:
 
 # Markets × mechanisms. Ordered by my prior of where edge survives: less-watched
 # books first, level/anchoring mechanisms over timing (honest i+1 kills timing).
+#
+# These are the LEGACY hard-coded directions. They are now a FALLBACK: the loop
+# prefers OPEN hypotheses from the dynamic registry (`research.lab.hypothesis`)
+# and only drops back to this list when the registry is empty or absent. See
+# `_select_directions`.
 DIRECTIONS = [
     Direction("totals_extend", "totals",
               "Extend the certified pace-anchoring totals edge: quarter-conditioned "
@@ -70,6 +75,46 @@ DIRECTIONS = [
               "Late-game totals: fouling/clock effects make the final-minutes total "
               "predictable vs a line that stops updating; honest i+1, hold to settlement."),
 ]
+
+
+def _hypothesis_to_direction(h) -> Direction:
+    """Map a `research.lab.types.Hypothesis` row onto a `Direction`.
+
+    The registry stores a structured idea (mechanism / observable signal /
+    pre-registered direction); flatten it into the free-text ``hypothesis``
+    blurb a worker reads from ``direction.md``. ``key`` uses the hypothesis id
+    (stable dedupe hash) so ledger rows trace back to the registry row.
+    """
+    parts = [h.mechanism.strip()]
+    if getattr(h, "signal_desc", ""):
+        parts.append(f"Signal: {h.signal_desc.strip()}")
+    if getattr(h, "direction", ""):
+        parts.append(f"Pre-registered direction: {h.direction.strip()}")
+    return Direction(
+        key=(h.id or h.hash()),
+        market=h.market,
+        hypothesis=" ".join(parts),
+    )
+
+
+def _select_directions() -> list[Direction]:
+    """Directions to rotate through, preferring the dynamic registry.
+
+    Pulls OPEN hypotheses from ``research.lab.hypothesis`` (the runtime
+    replacement for the hard-coded menu). Degrades gracefully to the legacy
+    ``DIRECTIONS`` list when the registry module is absent (not yet merged in
+    this worktree) or returns no open hypotheses.
+    """
+    try:
+        from research.lab import hypothesis as _hyp  # lazy: may not be merged
+    except ImportError:
+        return list(DIRECTIONS)
+    try:
+        open_hyps = _hyp.open_hypotheses()
+    except Exception:  # noqa: BLE001 — never let registry I/O break the loop
+        return list(DIRECTIONS)
+    directions = [_hypothesis_to_direction(h) for h in open_hyps]
+    return directions or list(DIRECTIONS)
 
 
 def _load_state() -> dict:
@@ -144,8 +189,10 @@ def main(argv=None) -> int:
     state = _load_state()
     LEDGER.parent.mkdir(parents=True, exist_ok=True)
 
+    directions = _select_directions()
+
     for w in range(a.waves):
-        direction = DIRECTIONS[state["dir_idx"] % len(DIRECTIONS)]
+        direction = directions[state["dir_idx"] % len(directions)]
         if a.dry_run:
             n = a.workers
             plan_reason = "dry-run (limits not polled)"
