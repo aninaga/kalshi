@@ -35,13 +35,15 @@
 > turn the whole position negative. The honest expected value, after basis risk and
 > lockup, is far thinner than the gross capturable, and can be negative.
 >
-> **4. Fee model (minor, flagged not fixed).** Polymarket's official current
-> taker fee is per-category *parabolic* (`contracts × feeRate × P(1−P)`, feeRate
-> 0–0.072), not the flat-2%-of-notional the code uses. The code's model is the
-> wrong shape — it modestly *under-charges* the low-priced legs where edges live
-> (so it slightly overstates capturable, ~a few %) and over-charges high-priced
-> legs. Left as-is (it's tested + conservative-in-aggregate) pending a coordinated
-> change to `FeeModel.polymarket_taker_fee` + the research harness + `test_arb_ws5`.
+> **4. Fee model — FIXED 2026-06-09.** The code now charges Polymarket's
+> official per-category *parabolic* taker fee (`contracts × feeRate × P(1−P)`,
+> feeRate 0–0.07 by category; docs.polymarket.com/trading/fees) in
+> `FeeModel.polymarket_taker_fee`, the research harness
+> (`OFFICIAL_2026` cost profile), and the live probe (default 500 bps =
+> the highest non-crypto category). The legacy flat-2%-of-notional piece does
+> not exist in the official schedule and was removed — it over-charged the
+> extreme-priced legs where durable arb lives, so shadow numbers recorded
+> before this date *understate* the capturable edge there.
 >
 > **Bottom line:** the *code* is sound and the gross capturable is real, but the
 > *strategy* is gated by legality (issue 1) and dominated by basis risk (issue 2).

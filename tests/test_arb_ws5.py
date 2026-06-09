@@ -82,21 +82,39 @@ class TestSnapshotStore(unittest.TestCase):
         self.assertEqual(len(pd.read_parquet(s.snapshots_path)), 6)
 
 
-class TestPolymarketFlatFee(unittest.TestCase):
-    def test_flat_fee_present_and_matches_research_harness(self):
+class TestPolymarketOfficialFee(unittest.TestCase):
+    """Pins the OFFICIAL Polymarket taker fee: C × rate × p × (1−p).
+
+    Verified against docs.polymarket.com/trading/fees (2026-06-09). The legacy
+    model added a flat 2%-of-notional piece that does not exist in the official
+    schedule and over-charged extreme-priced legs — exactly where durable
+    cross-venue arb lives.
+    """
+
+    def test_official_parabolic_values(self):
         FeeModel = _load("mock_execution", "mock_execution.py").FeeModel
-        from research.harness.cost_profile import PESSIMISTIC, use_profile
+        # Peak of the parabola: 100 × 0.10 × 0.5 × 0.5 = 2.5 (no flat piece).
+        self.assertAlmostEqual(FeeModel.polymarket_taker_fee(0.5, 100.0, 1000), 2.5, places=5)
+        # Default Config rate (500 bps = 0.05, Economics/Other category).
+        self.assertAlmostEqual(FeeModel.polymarket_taker_fee(0.5, 100.0, 500), 1.25, places=5)
+        # Extreme price: 100 × 0.05 × 0.02 × 0.98 = 0.098 — near-zero, NOT
+        # the legacy 0.02×notional flat charge.
+        self.assertAlmostEqual(FeeModel.polymarket_taker_fee(0.02, 100.0, 500), 0.098, places=5)
+        # Geopolitics is a genuine zero-fee category.
+        self.assertEqual(FeeModel.polymarket_taker_fee(0.5, 100.0, 0), 0.0)
+        # Minimum charged fee: tiny positive raw rounds up to 0.00001.
+        self.assertEqual(FeeModel.polymarket_taker_fee(0.001, 0.01, 500), 0.00001)
+
+    def test_matches_research_harness_under_official_profile(self):
+        FeeModel = _load("mock_execution", "mock_execution.py").FeeModel
+        from research.harness.cost_profile import OFFICIAL_2026, use_profile
         from research.harness.realistic_fills import _polymarket_taker_fee
 
-        price, size, bps = 0.5, 100.0, 1000
-        fee = FeeModel.polymarket_taker_fee(price, size, bps)
-        # The 2% flat piece alone is 0.02 * (0.5*100) = 1.0, so a curve-only
-        # model (the bug) would return ~0.78 < 0.9. The fix must clear this.
-        self.assertGreater(fee, 0.9)
-        # And it must match the research harness fee model (same 1000bps + 2%).
-        with use_profile(PESSIMISTIC):
-            ref = _polymarket_taker_fee(price, size, bps)
-        self.assertAlmostEqual(fee, ref, places=4)
+        with use_profile(OFFICIAL_2026):
+            for price in (0.02, 0.35, 0.5, 0.65, 0.97):
+                fee = FeeModel.polymarket_taker_fee(price, 100.0, 500)
+                ref = _polymarket_taker_fee(price, 100.0, 500)
+                self.assertAlmostEqual(fee, ref, places=5, msg=f"price={price}")
 
 
 if __name__ == "__main__":

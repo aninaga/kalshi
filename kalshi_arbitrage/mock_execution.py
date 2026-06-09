@@ -113,43 +113,35 @@ class FeeModel:
 
     @staticmethod
     def polymarket_taker_fee(price: float, size: float, fee_rate_bps: int) -> float:
-        """Polymarket taker fee = curve piece + flat-on-notional piece.
+        """Official Polymarket taker fee: ``C × feeRate × P × (1−P)`` (USDC).
 
-        The flat 2% taker fee applies to EVERY taker fill regardless of the
-        per-token curve rate. Omitting it (the prior behaviour, which also
-        early-returned 0 when fee_rate_bps<=0) understated PM cost by ~an order
-        of magnitude and contradicted the Phase-−1 "C fails at 4¢ PM-honest"
-        finding. Mirrors research.harness.realistic_fills._polymarket_taker_fee.
+        Verified against docs.polymarket.com/trading/fees (fetched 2026-06-09):
+        takers pay ``shares × rate × p × (1−p)`` with a PER-CATEGORY rate
+        (Geopolitics 0, Sports 0.03, Politics/Finance/Tech/Mentions 0.04,
+        Economics/Culture/Weather/Other 0.05, Crypto 0.07); makers are never
+        charged; fees round to 5 decimals with a 0.00001 USDC minimum charged.
+        Same parabolic shape as Kalshi's curve — ~0 at the extreme prices where
+        durable cross-venue arb concentrates. ``fee_rate_bps`` is the category
+        rate in basis points (500 = 0.05; conservative default in
+        ``Config.POLYMARKET_ESTIMATED_FEE_RATE_BPS``); a per-token live rate
+        from ``PolymarketFeeClient`` plugs in directly.
 
-        KNOWN DISCREPANCY (web-verified mid-2026, NOT yet applied — flagged for a
-        deliberate change): Polymarket's OFFICIAL current taker fee is per-category
-        PARABOLIC, `fee = contracts * feeRate * P*(1-P)` (buy-leg only, maker=0),
-        with feeRate by category — Geopolitics 0, Sports ~0.03, Politics/Finance/
-        Tech ~0.04, Crypto ~0.072 (help.polymarket.com/articles/13364478). The
-        flat-2%-of-notional model here is the wrong SHAPE: it UNDER-charges the
-        low-priced legs where arb edges live (a 4¢ leg: flat $0.80 vs real ~$1.54
-        per 1000) — so it modestly OVERSTATES capturable on those — and
-        OVER-charges high-priced legs. Net effect is small and bidirectional.
-        Switching requires updating this fn + research.harness.realistic_fills +
-        test_arb_ws5 together; left as a tested, conservative-in-aggregate model
-        pending that coordinated change. See docs/MACHINE.md.
+        Replaced the legacy curve+flat-2%-of-notional model on 2026-06-09
+        (coordinated with research.harness.realistic_fills + test_arb_ws5):
+        the flat piece does not exist in the official schedule and over-charged
+        extreme-priced legs by ~an order of magnitude, understating the
+        capturable edge exactly where it lives. Rate 0 (Geopolitics) is a
+        genuine zero-fee category, not a missing-data sentinel.
         """
+        if not fee_rate_bps or fee_rate_bps <= 0:
+            return 0.0
         p = Decimal(str(price))
         c = Decimal(str(size))
-        trade_value = p * c
-
-        # Curve piece (per-token rate; matches the Polymarket fee table at 1000 bps).
-        curve = Decimal('0')
-        if fee_rate_bps and fee_rate_bps > 0:
-            fee_rate = Decimal(fee_rate_bps) / Decimal('4000')
-            curve = trade_value * fee_rate * (p * (Decimal('1') - p)) ** Decimal('2')
-
-        # Flat taker piece — applies to ALL taker fills, independent of the curve.
-        flat_rate = Decimal(str(getattr(Config, 'POLYMARKET_FLAT_TAKER_RATE', 0.02)))
-        flat = trade_value * flat_rate
-
-        # Minimum fee precision is 0.0001 USDC
-        fee = (curve + flat).quantize(Decimal('0.0001'), rounding=ROUND_HALF_UP)
+        rate = Decimal(fee_rate_bps) / Decimal('10000')
+        raw = c * rate * p * (Decimal('1') - p)
+        fee = raw.quantize(Decimal('0.00001'), rounding=ROUND_HALF_UP)
+        if raw > 0 and fee < Decimal('0.00001'):
+            fee = Decimal('0.00001')   # minimum charged per the fee schedule
         return float(fee)
 
 

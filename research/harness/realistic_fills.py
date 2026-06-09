@@ -134,35 +134,37 @@ def _kalshi_taker_fee(price: float, size: float) -> float:
 
 
 def _polymarket_curve_fee(price: float, size: float, fee_rate_bps: int) -> float:
-    """Polymarket's curve-fee piece: `(fee_rate_bps/4000) * size * price * (price*(1-price))^2`.
+    """Official Polymarket parabolic taker fee: ``C × (bps/10000) × p × (1−p)``.
 
     Identical formula to
-    `kalshi_arbitrage.mock_execution.FeeModel.polymarket_taker_fee`.
-    Returns USDC dollars. For `fee_rate_bps=1000` (the default we use), this
-    produces a small number at extreme prices (the curve peaks at price=0.5).
+    `kalshi_arbitrage.mock_execution.FeeModel.polymarket_taker_fee` — verified
+    against docs.polymarket.com/trading/fees (2026-06-09). Per-category rate in
+    bps: Geopolitics 0, Sports 300, Politics/Finance/Tech/Mentions 400,
+    Economics/Culture/Weather/Other 500, Crypto 700. Same shape as Kalshi's
+    curve: peaks at p=0.5, ~0 at the extremes. Returns USDC dollars.
+
+    (2026-06-09: replaced the legacy ``(rate/4000)·tv·(p(1−p))²`` shape; trials
+    recorded before this date were charged the legacy curve + 2% flat.)
     """
     if fee_rate_bps <= 0:
         return 0.0
     p = Decimal(str(price))
     c = Decimal(str(size))
-    trade_value = p * c
-    fee_rate = Decimal(fee_rate_bps) / Decimal("4000")
-    exponent = Decimal("2")
-    fee = trade_value * fee_rate * (p * (Decimal("1") - p)) ** exponent
-    fee = fee.quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP)
+    fee_rate = Decimal(fee_rate_bps) / Decimal("10000")
+    fee = c * fee_rate * p * (Decimal("1") - p)
+    fee = fee.quantize(Decimal("0.00001"), rounding=ROUND_HALF_UP)
     return float(fee)
 
 
-# Polymarket's published taker rate is 2% on notional, on top of the curve.
-# The curve fee in `mock_execution.FeeModel.polymarket_taker_fee` only
-# captures the curve component; without the flat piece, the model
-# underestimates PM cost by an order of magnitude and contradicts the
-# Phase -1 "C fails at 4 cents PM-honest" finding. The spec explicitly
-# instructs: "When in doubt, ADD a fee piece rather than miss one."
-POLYMARKET_FLAT_TAKER_RATE = 0.02  # 2% of notional, taker side.
+# Legacy knob: the official schedule has NO flat-on-notional piece (verified
+# 2026-06-09). Kept as a profile-driven conservatism knob — PESSIMISTIC still
+# charges it on top so prior "worst-case" framing stays worst-case; OFFICIAL
+# profiles set it to 0.
+POLYMARKET_FLAT_TAKER_RATE = 0.02  # 2% of notional, taker side (legacy knob).
 
-# Default PM fee_rate_bps when token-specific live data is unavailable.
-POLYMARKET_DEFAULT_FEE_RATE_BPS = 1000
+# Default PM fee_rate_bps when token-specific live data is unavailable
+# (= highest non-crypto official category rate; conservative).
+POLYMARKET_DEFAULT_FEE_RATE_BPS = 500
 
 
 def _polymarket_taker_fee(
@@ -170,11 +172,12 @@ def _polymarket_taker_fee(
     size: float,
     fee_rate_bps: Optional[int] = None,
 ) -> float:
-    """Polymarket's full taker fee: curve piece + flat-on-notional piece.
+    """Polymarket's full taker fee: official parabolic + profile flat knob.
 
-    Both the curve piece's ``fee_rate_bps`` and the flat-rate ``%-of-notional``
-    are read from the active CostProfile when not overridden. The pre-profile
-    defaults (1000 bps curve, 2% flat) live in :data:`PESSIMISTIC`.
+    The parabolic piece's ``fee_rate_bps`` and the flat ``%-of-notional``
+    conservatism knob are read from the active CostProfile when not
+    overridden. The official 2026 schedule has no flat piece; profiles that
+    keep it are deliberately over-charging.
 
     Returns USDC dollars.
     """

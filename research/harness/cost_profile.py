@@ -121,11 +121,25 @@ CALIBRATED_PM = CostProfile(
     depth_per_level=_load_calibrated_depth(),
 )
 
+# Official venue fee schedules as of 2026-06 (docs.polymarket.com/trading/fees,
+# verified 2026-06-09): parabolic PM taker fee at the highest non-crypto
+# category rate (500 bps = Economics/Culture/Weather/Other; Politics is 400,
+# Geopolitics 0), NO flat piece, full Kalshi curve. The honest "what the venues
+# actually charge" profile.
+OFFICIAL_2026 = CostProfile(
+    name="official_2026",
+    spread_bps=100,                 # 1¢ half-spread (2¢ round-trip)
+    pm_curve_fee_rate_bps=500,
+    pm_flat_taker_rate=0.0,         # official schedule has no flat piece
+    kalshi_taker_multiplier=1.0,
+)
+
 _BUILTIN: dict[str, CostProfile] = {
     "pessimistic": PESSIMISTIC,
     "live_pm": LIVE_PM,
     "zero": ZERO_COST,
     "calibrated_pm": CALIBRATED_PM,
+    "official_2026": OFFICIAL_2026,
 }
 
 
@@ -187,6 +201,7 @@ __all__ = [
     "LIVE_PM",
     "ZERO_COST",
     "CALIBRATED_PM",
+    "OFFICIAL_2026",
     "get_active_profile",
     "set_active_profile",
     "use_profile",

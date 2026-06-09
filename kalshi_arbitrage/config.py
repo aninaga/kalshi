@@ -66,7 +66,12 @@ class Config:
 
     # Data-quality controls for opportunity estimation
     REQUIRE_REAL_ORDERBOOKS_FOR_ESTIMATED = True
-    POLYMARKET_ESTIMATED_FEE_RATE_BPS = 1000
+    # Official PM taker fee is C*rate*P*(1-P) with PER-CATEGORY rate
+    # (docs.polymarket.com/trading/fees, verified 2026-06-09): Geopolitics 0,
+    # Sports 300, Politics/Finance/Tech/Mentions 400, Economics/Culture/
+    # Weather/Other 500, Crypto 700 bps. Default = highest non-crypto rate
+    # (conservative) until per-market category mapping is wired.
+    POLYMARKET_ESTIMATED_FEE_RATE_BPS = 500
     POLYMARKET_PRICE_MIN = 0.0
     POLYMARKET_PRICE_MAX = 1.0
     # (B3) Drop a cached book older than this from the ESTIMATED-opportunity path
@@ -288,7 +293,8 @@ class Config:
     # --- Execution hardening (Phase B) ---
     # Distinct Polymarket order TTL (previously the Kalshi TTL was reused — a bug).
     POLYMARKET_ORDER_TTL_SECONDS = 5
-    POLYMARKET_FLAT_TAKER_RATE = 0.02  # flat 2% taker piece (see FeeModel)
+    # (POLYMARKET_FLAT_TAKER_RATE removed 2026-06-09: the official fee schedule
+    # has NO flat-on-notional piece — see FeeModel.polymarket_taker_fee.)
     # Idempotency + retries for transient order-placement failures.
     EXECUTION_MAX_RETRIES = 2
     EXECUTION_RETRY_BASE_DELAY = 0.5   # seconds; exponential backoff base

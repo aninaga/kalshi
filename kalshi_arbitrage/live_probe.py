@@ -61,7 +61,7 @@ def walk_complementary(
     ladder_b: List[Tuple[float, float]],
     a_is_kalshi: bool,
     b_is_kalshi: bool,
-    pm_fee_bps: int = 1000,
+    pm_fee_bps: int = 500,
 ) -> Optional[Dict]:
     """Walk two ascending ask ladders (outcome A, outcome B on opposite venues),
     accumulating size while each marginal contract is net-positive AFTER fees.
@@ -136,7 +136,7 @@ def pm_asks(token: str) -> list:
     return sorted((float(a["price"]), float(a["size"])) for a in (b or {}).get("asks", []))
 
 
-def price_pair(pair: Dict, pm_fee_bps: int = 1000) -> Optional[Dict]:
+def price_pair(pair: Dict, pm_fee_bps: int = 500) -> Optional[Dict]:
     """Fetch synchronized books for a verified pair and price the cross-venue
     complementary arb. ``pair`` carries ktk, tokens, polarity (from a verdict)."""
     kyes, kno = kalshi_book(pair["ktk"])
