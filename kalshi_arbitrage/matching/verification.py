@@ -36,6 +36,7 @@ from ..utils import (
     _BOILERPLATE,
     clean_title,
     extract_prop_threshold,
+    get_similarity_score,
     thresholds_compatible,
 )
 from .gazetteer import extract_scope_entities, is_national_scope
@@ -273,6 +274,53 @@ def _named_authorities(market: Dict) -> tuple:
     )
     found = frozenset(tag for tag, rx in _AUTHORITY_PATTERNS if rx.search(text))
     return found, len(text.strip()) >= 20
+
+
+# Sub-competition qualifiers (league / conference / playoff round). A tier term
+# on ONE side only means the two markets sit at different rungs of the same
+# tournament ladder — e.g. the AL pennant is not the World Series, even though
+# every World Series participant first wins a pennant. Full phrases are
+# case-insensitive; bare acronyms are case-sensitive ("AL"/"NL" must be caps so
+# "Al Gore" can never fire). Deliberately EXCLUDES top-tier names ("World
+# Series", "Super Bowl"): Kalshi paraphrases those ("Pro Baseball/Football
+# Championship"), and an unqualified championship on both sides is the top tier
+# by default — only a sub-tier qualifier creates the asymmetry that matters.
+_TIER_PATTERNS: tuple = tuple(
+    (tag, re.compile(pat, flags))
+    for tag, pat, flags in (
+        ("american_league", r"\bAmerican League\b", re.IGNORECASE),
+        ("american_league", r"\bALCS\b", 0),
+        ("american_league", r"\bAL\b", 0),
+        ("national_league", r"\bNational League\b", re.IGNORECASE),
+        ("national_league", r"\bNLCS\b", 0),
+        ("national_league", r"\bNL\b", 0),
+        ("afc", r"\bAFC\b", 0),
+        ("nfc", r"\bNFC\b", 0),
+        ("eastern_conference", r"\bEastern Conference\b", re.IGNORECASE),
+        ("western_conference", r"\bWestern Conference\b", re.IGNORECASE),
+        ("wild_card", r"\bwild card\b", re.IGNORECASE),
+        ("division_series", r"\bDivision Series\b", re.IGNORECASE),
+        ("play_in", r"\bplay-in\b", re.IGNORECASE),
+    )
+)
+
+
+def _competition_tiers(market: Dict) -> frozenset:
+    """Sub-competition tier qualifiers named in the title + rules text."""
+    text = _raw_rules(market)
+    return frozenset(tag for tag, rx in _TIER_PATTERNS if rx.search(text))
+
+
+# "Wins the most seats" — the plurality-of-seats criterion used for
+# parliamentary elections, where it genuinely diverges from "wins the
+# election" (coalition government). Kept narrow (seats only) so plain
+# vote-plurality races are untouched.
+_SEATS_PLURALITY_RX = re.compile(
+    r"\b(?:(?:most|greatest number of|plurality of(?: the)?|highest number of)"
+    r"\s+seats?|seats?\s+plurality)\b",
+    re.IGNORECASE,
+)
+_SEAT_WORD_RX = re.compile(r"\bseats?\b", re.IGNORECASE)
 
 
 def _extract_deadline(text: str) -> Optional[int]:
@@ -965,6 +1013,28 @@ class ResolutionCriteriaVerifier:
                 containment = shared / len(smaller)
                 min_cont = getattr(Config, "MATCH_MIN_RULES_CONTAINMENT", 0.4)
                 if containment < min_cont:
+                    # At near-identical TITLES the pair names the same
+                    # proposition prima facie, and low containment is almost
+                    # always a STYLE gap — Kalshi's one-line "If X, then Yes"
+                    # vs Polymarket's multi-paragraph legalese (live audit
+                    # 2026-06-09: 33 exact-title "next PM of Romania/Israel"
+                    # pairs hard-rejected at containment 0.33-0.36). That can
+                    # still hide real definitional/window asymmetry, so flag
+                    # UNCERTAIN (held-for-review, never auto-clean) instead of
+                    # rejecting. Below the title bar, low containment keeps its
+                    # original meaning — different events that share a template
+                    # — and stays a hard reject.
+                    kt_clean = (kalshi_market.get("clean_title")
+                                or clean_title(k_title))
+                    pt_clean = (polymarket_market.get("clean_title")
+                                or clean_title(p_title))
+                    title_sim = get_similarity_score(kt_clean, pt_clean)
+                    if title_sim >= 0.95:
+                        reasons.append(
+                            f"rules_divergent_review containment={containment:.2f} "
+                            f"title_sim={title_sim:.2f}")
+                        return MatchVerdict(True, UNKNOWN, 0.4, tuple(reasons),
+                                            self.name, uncertain=True)
                     reasons.append(f"rules_divergent containment={containment:.2f}")
                     return MatchVerdict(False, UNKNOWN, 0.0, tuple(reasons), self.name)
                 reasons.append(f"rules_ok containment={containment:.2f}")
@@ -1056,6 +1126,38 @@ class ResolutionCongruenceVerifier:
                                 base + (f"resolution_authority_asymmetry_review "
                                         f"one_sided={diff}",),
                                 self.name, uncertain=True)
+        # (e) Competition-tier asymmetry: a sub-competition qualifier (league /
+        # conference / round) on ONE side only means the two markets sit at
+        # different tiers of the same tournament — hierarchically related, not
+        # identical (live audit 2026-06-09: Kalshi "Pro Baseball Championship"
+        # [= World Series] matched PM "American League Championship Series"
+        # [= AL pennant] and was labeled clean). Flag UNCERTAIN, not reject:
+        # the asymmetry can also be a genuine paraphrase ("win the AFC
+        # Championship" vs "reach the Super Bowl"), which review can clear.
+        k_tier = _competition_tiers(kalshi_market)
+        p_tier = _competition_tiers(polymarket_market)
+        if k_tier ^ p_tier:
+            diff = ",".join(sorted(k_tier ^ p_tier))
+            return MatchVerdict(True, UNKNOWN, conf,
+                                base + (f"competition_tier_asymmetry_review "
+                                        f"one_sided={diff}",),
+                                self.name, uncertain=True)
+        # (f) Seats-plurality asymmetry: one venue resolves on winning the MOST
+        # SEATS while the other never mentions seats at all. In parliamentary
+        # systems "winning the election" (forming government / providing the
+        # head of government) and "winning the most seats" genuinely diverge
+        # (live audit: PM Berlin-2026 pins "greatest number of seats"; Kalshi's
+        # rules are the tautology "If CDU wins ... resolves to Yes"). Narrowly
+        # scoped to seats so US first-past-the-post races ("most votes") are
+        # untouched.
+        k_seats = bool(_SEATS_PLURALITY_RX.search(_raw_rules(kalshi_market)))
+        p_seats = bool(_SEATS_PLURALITY_RX.search(_raw_rules(polymarket_market)))
+        if k_seats != p_seats:
+            other = _raw_rules(kalshi_market if p_seats else polymarket_market)
+            if not _SEAT_WORD_RX.search(other):
+                return MatchVerdict(True, UNKNOWN, conf,
+                                    base + ("seats_plurality_asymmetry_review",),
+                                    self.name, uncertain=True)
         return MatchVerdict(True, UNKNOWN, conf, base, self.name)
 
 

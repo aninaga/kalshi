@@ -329,7 +329,10 @@ def match_pairs(pm: List[Dict], ks: List[Dict]) -> List[Dict]:
                 continue
             p = pmp[j]
             key = (m.get("ticker"), p["id"])
-            if key in seen or get_similarity_score(ct, p["clean"]) < Config.SIMILARITY_THRESHOLD:
+            if key in seen:
+                continue
+            sim = get_similarity_score(ct, p["clean"])
+            if sim < Config.SIMILARITY_THRESHOLD:
                 continue
             pd = {"id": p["id"], "title": p["title"], "clean_title": p["clean"],
                   "close_time": p["close"], "raw_data": {"description": p["desc"]}}
@@ -347,8 +350,39 @@ def match_pairs(pm: List[Dict], ks: List[Dict]) -> List[Dict]:
             # and reverify_pair needs it to re-run the verifier across restarts.
             pairs.append({"ktk": m.get("ticker"), "kt": title, "pt": p["title"],
                           "tokens": p["tokens"], "pid": p["id"], "pdesc": p["desc"],
+                          "sim": round(sim, 4),
                           "polarity": verdict.polarity, "uncertain": verdict.uncertain})
-    return pairs
+    return _arbitrate_conflicts(pairs)
+
+
+def _arbitrate_conflicts(pairs: List[Dict]) -> List[Dict]:
+    """One binary market equals AT MOST one binary market on the other venue.
+
+    When the same Kalshi ticker (or the same PM condition id) appears in
+    multiple verified pairings, at most one of them can be the same event —
+    the others are near-miss lookalikes that cleared similarity (live audit
+    2026-06-09: Kalshi "Racing Bulls" matched both PM "Racing Bulls" and PM
+    "Red Bull Racing"; Kalshi's World Series market and its AL-pennant market
+    both matched PM's ALCS market). Keep the highest-similarity pairing per
+    market as-is and demote every other pairing to uncertain (held-for-review,
+    never auto-clean) rather than dropping it: occasionally BOTH counterparts
+    are genuine duplicates of the same event, which review can clear.
+    """
+    best: Dict[tuple, float] = {}
+    for p in pairs:
+        for side in ("ktk", "pid"):
+            key = (side, p.get(side))
+            best[key] = max(best.get(key, 0.0), p.get("sim", 0.0))
+    out = []
+    for p in pairs:
+        demoted = [side for side in ("ktk", "pid")
+                   if p.get("sim", 0.0) < best[(side, p.get(side))]]
+        if demoted and not p.get("uncertain"):
+            p = {**p, "uncertain": True, "conflict": ",".join(demoted)}
+        elif demoted:
+            p = {**p, "conflict": ",".join(demoted)}
+        out.append(p)
+    return out
 
 
 _PDESC_CACHE: Dict[str, str] = {}
