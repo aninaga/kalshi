@@ -35,6 +35,14 @@
 > turn the whole position negative. The honest expected value, after basis risk and
 > lockup, is far thinner than the gross capturable, and can be negative.
 >
+> **4. Fee model (minor, flagged not fixed).** Polymarket's official current
+> taker fee is per-category *parabolic* (`contracts × feeRate × P(1−P)`, feeRate
+> 0–0.072), not the flat-2%-of-notional the code uses. The code's model is the
+> wrong shape — it modestly *under-charges* the low-priced legs where edges live
+> (so it slightly overstates capturable, ~a few %) and over-charges high-priced
+> legs. Left as-is (it's tested + conservative-in-aggregate) pending a coordinated
+> change to `FeeModel.polymarket_taker_fee` + the research harness + `test_arb_ws5`.
+>
 > **Bottom line:** the *code* is sound and the gross capturable is real, but the
 > *strategy* is gated by legality (issue 1) and dominated by basis risk (issue 2).
 > The shadow run measures gross capturable at real depth; it does NOT price in

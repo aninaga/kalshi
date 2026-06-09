@@ -120,6 +120,19 @@ class FeeModel:
         early-returned 0 when fee_rate_bps<=0) understated PM cost by ~an order
         of magnitude and contradicted the Phase-−1 "C fails at 4¢ PM-honest"
         finding. Mirrors research.harness.realistic_fills._polymarket_taker_fee.
+
+        KNOWN DISCREPANCY (web-verified mid-2026, NOT yet applied — flagged for a
+        deliberate change): Polymarket's OFFICIAL current taker fee is per-category
+        PARABOLIC, `fee = contracts * feeRate * P*(1-P)` (buy-leg only, maker=0),
+        with feeRate by category — Geopolitics 0, Sports ~0.03, Politics/Finance/
+        Tech ~0.04, Crypto ~0.072 (help.polymarket.com/articles/13364478). The
+        flat-2%-of-notional model here is the wrong SHAPE: it UNDER-charges the
+        low-priced legs where arb edges live (a 4¢ leg: flat $0.80 vs real ~$1.54
+        per 1000) — so it modestly OVERSTATES capturable on those — and
+        OVER-charges high-priced legs. Net effect is small and bidirectional.
+        Switching requires updating this fn + research.harness.realistic_fills +
+        test_arb_ws5 together; left as a tested, conservative-in-aggregate model
+        pending that coordinated change. See docs/MACHINE.md.
         """
         p = Decimal(str(price))
         c = Decimal(str(size))
