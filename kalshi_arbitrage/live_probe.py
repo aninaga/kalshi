@@ -30,6 +30,12 @@ UA = {"User-Agent": getattr(Config, "HTTP_USER_AGENT", None)
 KBASE = "https://api.elections.kalshi.com/trade-api/v2"
 PM_CLOB = "https://clob.polymarket.com"
 
+# Two genuinely-complementary outcomes of the same event have ask prices that
+# sum to ~$1 (a real cross-venue arb edge is only a few %). Below this floor the
+# legs are not complementary — a polarity error / false match — so reject rather
+# than report a phantom edge. Genuine arbs sit ~0.94-0.99; phantoms ~0.1-0.4.
+_MIN_COMPLEMENTARY_SUM = 0.80
+
 
 def get(url: str, timeout: int = 25):
     try:
@@ -151,10 +157,19 @@ def price_pair(pair: Dict, pm_fee_bps: int = 1000) -> Optional[Dict]:
     B = kno if b_is_k else pm_B
     if not A or not B:
         return None
+    # Polarity fail-safe (economics-level, polarity-INDEPENDENT): two genuinely
+    # complementary outcomes of the same event have P(A)+P(B)=1, so their ask
+    # prices must sum to ~$1 (a real arb edge is only a few %). A sum far below 1
+    # means the two legs are NOT complementary — a polarity error or false match
+    # would otherwise fabricate a huge phantom edge (e.g. buying NO on both
+    # venues sums to ~0.17). Reject rather than trust the polarity flag alone.
+    if (A[0][0] + B[0][0]) < _MIN_COMPLEMENTARY_SUM:
+        return None
     res = walk_complementary(A, B, a_is_k, b_is_k, pm_fee_bps)
     if not res:
         return None
     res.update({**pair, "a_src": "K" if a_is_k else "P", "b_src": "K" if b_is_k else "P"})
+    res["implausible"] = res["net_edge"] > getattr(Config, "MAX_PLAUSIBLE_PROFIT_MARGIN", 0.15)
     return res
 
 

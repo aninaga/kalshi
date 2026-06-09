@@ -126,8 +126,9 @@ def main(argv=None) -> int:
             if ep is None:
                 open_eps[ktk] = {"start": now, "peak_net": r["net"], "peak_edge": r["net_edge"],
                                  "ticks": 1, "kt": r["kt"]}
+                tag = " [BASIS-RISK]" if r.get("uncertain") else ""
                 print(f"{ts:<9} {'OPEN':<6} {r['net']:7.2f} {r['net_edge']*100:5.1f}% "
-                      f"{r['size']:7.0f}  {r['kt'][:46]}", flush=True)
+                      f"{r['size']:7.0f}  {r['kt'][:40]}{tag}", flush=True)
                 if executor is not None:
                     _fire(r)
             else:
@@ -151,11 +152,18 @@ def main(argv=None) -> int:
         # standing arbs (which never "close") so the dataset accrues continuously.
         if args.snapshot_every and now - last_snapshot >= args.snapshot_every:
             last_snapshot = now
+            # Separate clean (risk-free) from basis-risk (uncertain resolution,
+            # e.g. arrests) so the headline capturable isn't overstated.
+            clean = {k: r for k, r in live.items() if not r.get("uncertain")}
+            unc = {k: r for k, r in live.items() if r.get("uncertain")}
             _record(args.ledger, {
                 "ts": ts, "kind": "snapshot", "epoch": round(now, 1),
-                "open_count": len(live),
-                "open_net": round(sum(r["net"] for r in live.values()), 4),
-                "by_market": {k: round(r["net"], 2) for k, r in live.items()},
+                "open_count": len(clean),
+                "open_net": round(sum(r["net"] for r in clean.values()), 4),
+                "open_count_uncertain": len(unc),
+                "open_net_uncertain": round(sum(r["net"] for r in unc.values()), 4),
+                "by_market": {k: round(r["net"], 2) for k, r in clean.items()},
+                "by_market_uncertain": {k: round(r["net"], 2) for k, r in unc.items()},
             })
 
         if args.duration and now - t_start >= args.duration:

@@ -55,3 +55,22 @@ def test_no_arb_when_sum_exceeds_one():
     res = walk_complementary(_lvl(0.60, 100), _lvl(0.60, 100),
                              a_is_kalshi=False, b_is_kalshi=True, pm_fee_bps=0)
     assert res is None
+
+
+def test_price_pair_polarity_failsafe(monkeypatch):
+    # Same live books, two polarities: ALIGNED is a genuine arb (legs sum ~0.93),
+    # INVERTED buys the same real outcome on both venues (legs sum ~0.17) — the
+    # phantom the auditor demonstrated. The complementary-sum floor must reject
+    # the phantom while keeping the genuine one. (Guards the silent-polarity bug.)
+    from kalshi_arbitrage import live_probe as lp
+    # Kalshi: yes_ask 0.89, no_ask 0.13.  PM: yes-token ask 0.97, no-token ask 0.04.
+    monkeypatch.setattr(lp, "kalshi_book", lambda tk: ([(0.89, 500)], [(0.13, 500)]))
+    monkeypatch.setattr(lp, "pm_asks",
+                        lambda tok: [(0.97, 500)] if tok == "y" else [(0.04, 500)])
+    pair = {"ktk": "K", "polarity": "aligned",
+            "tokens": [{"outcome": "Yes", "token_id": "y"}, {"outcome": "No", "token_id": "n"}]}
+    genuine = lp.price_pair(pair, pm_fee_bps=0)
+    assert genuine is not None and genuine["net"] > 0      # real arb survives
+
+    phantom = lp.price_pair({**pair, "polarity": "inverted"}, pm_fee_bps=0)
+    assert phantom is None                                  # phantom rejected by the floor

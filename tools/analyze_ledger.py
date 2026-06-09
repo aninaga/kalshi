@@ -72,12 +72,16 @@ def main(argv=None) -> int:
     # Time-series snapshots: capturable $ at real depth, sampled over time.
     if snaps:
         import statistics
-        nets = [float(r.get("open_net") or 0) for r in snaps]
+        nets = [float(r.get("open_net") or 0) for r in snaps]           # clean / risk-free
+        unc = [float(r.get("open_net_uncertain") or 0) for r in snaps]  # basis-risk (held-for-review)
         counts = [int(r.get("open_count") or 0) for r in snaps]
         span_h = (snaps[-1].get("epoch", 0) - snaps[0].get("epoch", 0)) / 3600.0
-        print(f"snapshots={len(snaps)} over {span_h:.1f}h | capturable net/snapshot: "
+        print(f"snapshots={len(snaps)} over {span_h:.1f}h | CLEAN (risk-free) capturable/snapshot: "
               f"mean=${statistics.mean(nets):.2f} median=${statistics.median(nets):.2f} "
               f"max=${max(nets):.2f} | open arbs: mean={statistics.mean(counts):.1f}")
+        if any(unc):
+            print(f"  basis-risk (uncertain resolution, NOT risk-free): "
+                  f"mean=${statistics.mean(unc):.2f} max=${max(unc):.2f} — confirm rules before trusting")
         # Which markets show up most across snapshots (persistent capturable edge).
         from collections import Counter
         seen = Counter()
