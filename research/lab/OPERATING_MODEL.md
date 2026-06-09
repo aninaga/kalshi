@@ -35,6 +35,33 @@ Every agentic boundary is a callable with a model-blind contract and a
 Inject a callable and it works. With nothing injected the loop is a deterministic
 no-op — it never invents ideas or fabricates verdicts.
 
+## Event-class families (beyond NBA)
+
+The data layer is a fifth seam: `research/lab/providers/` is a registry of
+**MarketDataProvider** implementations, one per event-class *family*
+(`nba`, `weather`, …). A provider owns its markets (plain strings), its cache,
+and its own locked `splits.json` (TEST never surfaced unless asked). The
+public `data.load_panels/load_panel/available` API is unchanged — the market
+string resolves the family. `Panel.duration_sec` carries each family's event
+clock (`None` = untimed → pace-style signals are NaN and never fire; the
+generic families — calibration, staleness/reactions, term-structure,
+cross-market — apply everywhere).
+
+The **family is also the governance partition**: `lab.governance` computes the
+Deflated-Sharpe `N` / `V[SR]` per family (pass `family=` to
+`evaluate`/`governance_params`), so darts thrown at one event class do not
+raise the hurdle for another. Records whose family is undeterminable count
+toward every family — partitioning can exclude only what provably belongs
+elsewhere, so it never weakens any hurdle. The analyst stamps
+`family` + `market` on every ledger row.
+
+Onboarding a new family = one provider module (enumerate events → build
+Panels with a REAL quote ladder) + a locked splits file. See
+`providers/weather.py` (Kalshi daily-high-temperature, the first non-NBA
+vertical: bucket book → cumulative boundary ladder with measured two-sided
+spreads) and `providers/_kalshi_fetch.py` (the generic series-agnostic
+Kalshi historical fetcher).
+
 ## How the operator runs it from chat
 
 1. **Originate.** Spawn an Opus subagent with `scout_prompt.md` + the EDA report;
