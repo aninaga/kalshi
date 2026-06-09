@@ -62,6 +62,81 @@ def test_monitor_ledger_records_episode(tmp_path, monkeypatch):
     assert rows[0]["ktk"] == "K1" and rows[0]["peak_net"] == 5.0
 
 
+def test_merge_watchlists_retains_pairs_dropped_by_catalog():
+    # PM /sampling-markets sheds near-resolved extreme-priced markets (observed
+    # live: the Musk pair vanished while its gap was ~8% gross) — a cached pair
+    # must survive a fresh discovery that no longer contains it.
+    from tools.monitor_arb import _merge_watchlists
+    fresh = [{"ktk": "K1", "pid": "P1"}]
+    cached = [{"ktk": "K1", "pid": "P1"},          # dup of fresh -> not doubled
+              {"ktk": "KMUSK", "pid": "PMUSK"},    # dropped by catalog -> retained
+              {"ktk": "KDEAD", "pid": "PDEAD"}]    # market closed -> pruned
+    merged = _merge_watchlists(fresh, cached, is_alive=lambda p: p["ktk"] != "KDEAD")
+    keys = [(p["ktk"], p["pid"]) for p in merged]
+    assert keys == [("K1", "P1"), ("KMUSK", "PMUSK")]
+
+
+def test_merge_watchlists_no_gate_retains_all():
+    from tools.monitor_arb import _merge_watchlists
+    merged = _merge_watchlists([], [{"ktk": "A", "pid": "B"}])
+    assert merged == [{"ktk": "A", "pid": "B"}]
+
+
+def test_kalshi_alive_fails_open_and_reads_status(monkeypatch):
+    from tools import monitor_arb
+    # Fetch error -> keep the pair (transient blip must not evict the cache).
+    monkeypatch.setattr(monitor_arb.lp, "get", lambda url, **kw: None)
+    assert monitor_arb._kalshi_alive({"ktk": "K"})
+    monkeypatch.setattr(monitor_arb.lp, "get",
+                        lambda url, **kw: {"market": {"status": "settled"}})
+    assert not monitor_arb._kalshi_alive({"ktk": "K"})
+    monkeypatch.setattr(monitor_arb.lp, "get",
+                        lambda url, **kw: {"market": {"status": "active"}})
+    assert monitor_arb._kalshi_alive({"ktk": "K"})
+
+
+def test_monitor_watchlist_cache_persists_and_merges(tmp_path, monkeypatch):
+    # First run discovers {K1}; second run discovers {} — with the cache, K1 must
+    # still be watched (and re-persisted) on the second run.
+    from tools import monitor_arb
+    pair = {"ktk": "K1", "pid": "P1", "kt": "T", "pt": "T", "tokens": [],
+            "polarity": "aligned"}
+    monkeypatch.setattr(monitor_arb.lp, "price_pair", lambda p, bps: None)
+    monkeypatch.setattr(monitor_arb, "_kalshi_alive", lambda p: True)
+    cache = tmp_path / "watch.json"
+
+    monkeypatch.setattr(monitor_arb.lp, "discover", lambda: [pair])
+    assert monitor_arb.main(["--interval", "0", "--duration", "0.01",
+                             "--watchlist-cache", str(cache)]) == 0
+    assert [p["ktk"] for p in json.loads(cache.read_text())["pairs"]] == ["K1"]
+
+    monkeypatch.setattr(monitor_arb.lp, "discover", lambda: [])
+    assert monitor_arb.main(["--interval", "0", "--duration", "0.01",
+                             "--watchlist-cache", str(cache)]) == 0
+    assert [p["ktk"] for p in json.loads(cache.read_text())["pairs"]] == ["K1"]
+
+
+def test_watchlist_cache_respects_allowlist_removal(tmp_path, monkeypatch):
+    # Cache retention must not override the operator: a pair removed from the
+    # allowlist is dropped even though its market is still alive.
+    from tools import monitor_arb
+    keep = {"ktk": "K1", "pid": "P1", "kt": "T", "pt": "T", "tokens": [],
+            "polarity": "aligned"}
+    removed = {"ktk": "K2", "pid": "P2", "kt": "T2", "pt": "T2", "tokens": [],
+               "polarity": "aligned"}
+    cache = tmp_path / "watch.json"
+    cache.write_text(json.dumps({"pairs": [keep, removed]}))
+    allow = tmp_path / "allow.json"
+    allow.write_text(json.dumps({"approved": [{"kalshi": "K1", "polymarket": "P1"}]}))
+    monkeypatch.setattr(monitor_arb.lp, "discover", lambda: [])  # catalogs forgot both
+    monkeypatch.setattr(monitor_arb, "_kalshi_alive", lambda p: True)
+    monkeypatch.setattr(monitor_arb.lp, "price_pair", lambda p, bps: None)
+    assert monitor_arb.main(["--interval", "0", "--duration", "0.01",
+                             "--allowlist", str(allow),
+                             "--watchlist-cache", str(cache)]) == 0
+    assert [p["ktk"] for p in json.loads(cache.read_text())["pairs"]] == ["K1"]
+
+
 def test_run_machine_writes_allowlist_excluding_review(tmp_path, monkeypatch):
     from tools import run_machine
     genuine = {"ktk": "KG", "pid": "PG", "kt": "Genuine", "pt": "g", "polarity": "aligned",

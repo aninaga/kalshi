@@ -32,17 +32,73 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from kalshi_arbitrage import live_probe as lp
 
 
+def _merge_watchlists(fresh: list, cached: list, is_alive=None) -> list:
+    """Fresh discovery + previously-known pairs that fell out of the catalogs.
+
+    The PM catalog endpoint (/sampling-markets) silently drops near-resolved
+    extreme-priced markets — exactly where durable arb lives — so a verified
+    pair must stay watched until its market actually dies, not until the
+    catalog forgets it. ``is_alive(pair)`` gates retained-only pairs (None =
+    retain unconditionally)."""
+    seen = {(p["ktk"], p["pid"]) for p in fresh}
+    merged = list(fresh)
+    for p in cached:
+        key = (p.get("ktk"), p.get("pid"))
+        if key in seen:
+            continue
+        if is_alive is None or is_alive(p):
+            merged.append(p)
+            seen.add(key)
+    return merged
+
+
+def _kalshi_alive(pair: dict) -> bool:
+    """True while the pair's Kalshi market is still open (fail-open on a fetch
+    error — dropping a pair on a transient network blip defeats the cache)."""
+    d = lp.get(f"{lp.KBASE}/markets/{pair['ktk']}")
+    if not d:
+        return True
+    status = str((d.get("market") or {}).get("status") or "").lower()
+    return status in ("", "active", "open", "initialized")
+
+
 def _load_watchlist(args) -> list:
+    approved = None
     if args.allowlist and Path(args.allowlist).exists():
         data = json.loads(Path(args.allowlist).read_text())
         # Allowlist entries carry kalshi+polymarket ids; re-discover to attach
         # live tokens/polarity (cheap relative to the monitor's lifetime).
         approved = {(e["kalshi"], e["polymarket"]) for e in data.get("approved", [])}
         pairs = [p for p in lp.discover() if (p["ktk"], p["pid"]) in approved]
-        print(f"Watch-list: {len(pairs)} allowlisted pairs", file=sys.stderr)
-        return pairs
-    pairs = lp.discover()
-    print(f"Watch-list: {len(pairs)} freshly-discovered verified pairs", file=sys.stderr)
+        label = "allowlisted"
+    else:
+        pairs = lp.discover()
+        label = "freshly-discovered verified"
+
+    cache = Path(args.watchlist_cache) if getattr(args, "watchlist_cache", None) else None
+    if cache:
+        cached = []
+        if cache.exists():
+            try:
+                cached = json.loads(cache.read_text()).get("pairs", [])
+            except (json.JSONDecodeError, OSError):
+                cached = []
+        if approved is not None:
+            # Cache retention must not override the operator: a pair removed
+            # from the allowlist is dropped even if its market is still alive.
+            cached = [p for p in cached if (p.get("ktk"), p.get("pid")) in approved]
+        merged = _merge_watchlists(pairs, cached, is_alive=_kalshi_alive)
+        retained = len(merged) - len(pairs)
+        try:
+            cache.parent.mkdir(parents=True, exist_ok=True)
+            cache.write_text(json.dumps({"ts": time.time(), "pairs": merged}))
+        except OSError as exc:
+            print(f"watchlist cache write failed: {exc}", file=sys.stderr)
+        print(f"Watch-list: {len(pairs)} {label} pairs"
+              f" + {retained} retained from cache", file=sys.stderr)
+        return merged
+
+    print(f"Watch-list: {len(pairs)} {label} pairs", file=sys.stderr)
     return pairs
 
 
@@ -74,6 +130,11 @@ def main(argv=None) -> int:
                          "(paper unless EXECUTION_MODE=live AND allowlisted AND armed).")
     ap.add_argument("--refresh-watchlist", type=float, default=1800,
                     help="Re-discover the watch-list every N seconds (markets open/close).")
+    ap.add_argument("--watchlist-cache", type=str, default=None,
+                    help="Persist verified pairs to this JSON so pairs that drop out "
+                         "of the venue catalogs (e.g. PM /sampling-markets sheds "
+                         "near-resolved extreme-priced markets) stay watched until "
+                         "their Kalshi market actually closes. Survives restarts.")
     args = ap.parse_args(argv)
 
     executor = None

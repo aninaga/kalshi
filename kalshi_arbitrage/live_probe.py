@@ -29,6 +29,7 @@ UA = {"User-Agent": getattr(Config, "HTTP_USER_AGENT", None)
       or "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
 KBASE = "https://api.elections.kalshi.com/trade-api/v2"
 PM_CLOB = "https://clob.polymarket.com"
+GAMMA = "https://gamma-api.polymarket.com"
 
 # Two genuinely-complementary outcomes of the same event have ask prices that
 # sum to ~$1 (a real cross-venue arb edge is only a few %). Below this floor the
@@ -177,6 +178,26 @@ def price_pair(pair: Dict, pm_fee_bps: int = 1000) -> Optional[Dict]:
 #  Catalogs + matching                                                         #
 # --------------------------------------------------------------------------- #
 
+def _gamma_to_clob_row(m: Dict) -> Optional[Dict]:
+    """Map a Gamma ``/markets`` row to the CLOB sampling-markets shape that
+    ``match_pairs`` consumes. Gamma stores outcomes/clobTokenIds as JSON strings;
+    only active, non-closed, binary markets map (else None)."""
+    if not isinstance(m, dict) or m.get("closed") or not m.get("active"):
+        return None
+    try:
+        toks = json.loads(m.get("clobTokenIds") or "[]")
+        outs = json.loads(m.get("outcomes") or "[]")
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if len(toks) != 2 or len(outs) != 2:
+        return None
+    return {"condition_id": m.get("conditionId"), "question": m.get("question") or "",
+            "description": m.get("description") or "",
+            "end_date_iso": m.get("endDate"), "active": True, "closed": False,
+            "tokens": [{"token_id": str(toks[0]), "outcome": str(outs[0])},
+                       {"token_id": str(toks[1]), "outcome": str(outs[1])}]}
+
+
 def fetch_polymarket() -> List[Dict]:
     out, cur = [], ""
     while True:
@@ -188,7 +209,34 @@ def fetch_polymarket() -> List[Dict]:
         cur = d.get("next_cursor", "") if isinstance(d, dict) else ""
         if not cur or cur == "LTE=" or len(out) > 9000:
             break
-    return [m for m in out if m.get("active") and not m.get("closed") and len(m.get("tokens") or []) == 2]
+    rows = [m for m in out if m.get("active") and not m.get("closed") and len(m.get("tokens") or []) == 2]
+
+    # SUPPLEMENT: /sampling-markets only lists markets in the liquidity-rewards
+    # sampling set, and Polymarket drops near-resolved EXTREME-priced markets
+    # from it — exactly where durable arb lives. Observed live (2026-06-09): the
+    # Musk-trillionaire pair, the largest standing clean edge, vanished from
+    # sampling-markets when PM hit 97.75c while the cross-venue gap was still
+    # ~8% gross at depth. Top up with the Gamma catalog (top-volume active
+    # markets) so those markets stay discoverable.
+    # NB: Gamma silently caps ``limit`` at 100 rows/page regardless of what is
+    # requested — page by the ACTUAL returned length or the sweep stops at the
+    # top-100 (which is exactly how the Musk pair was missed a second time).
+    seen = {m.get("condition_id") for m in rows}
+    offset, page = 0, 100
+    while offset < 4000:
+        d = get(f"{GAMMA}/markets?active=true&closed=false&order=volumeNum"
+                f"&ascending=false&limit={page}&offset={offset}")
+        if not isinstance(d, list) or not d:
+            break
+        for g in d:
+            r = _gamma_to_clob_row(g)
+            if r and r["condition_id"] not in seen:
+                seen.add(r["condition_id"])
+                rows.append(r)
+        offset += len(d)
+        if len(d) < page:
+            break
+    return rows
 
 
 def fetch_kalshi() -> List[Dict]:

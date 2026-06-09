@@ -107,6 +107,23 @@ maximal mid-price and eats most gaps, so durable edge lives at extreme prices.
    `EXECUTION_MODE=live`, caps tiny (`LIVE_MAX_NOTIONAL_USD=5`,
    `LIVE_MAX_CONCURRENT_POSITIONS=1`). Reconcile fills, then scale slowly.
 
+## Catalog coverage gotcha (fixed, but know it)
+
+Polymarket's CLOB `/sampling-markets` only lists markets in the liquidity-rewards
+sampling set and **sheds near-resolved extreme-priced markets** — exactly where
+durable arb lives. Observed live (2026-06-09): the Musk-trillionaire pair — the
+largest standing clean edge — vanished from the catalog when PM hit 97.75¢ while
+the cross-venue gap was still ~8% gross at depth. Two defenses are now built in:
+
+1. `fetch_polymarket()` tops the catalog up from the Gamma API (top-volume active
+   markets), so extreme-priced markets stay discoverable.
+2. `monitor --watchlist-cache <file>` persists every verified pair and keeps
+   watching it until its **Kalshi market actually closes**, even if both catalogs
+   forget it (survives restarts; allowlist removals still win).
+
+The shadow deploy (`deploy/run_shadow.sh`) passes the cache by default
+(`SHADOW_WATCHLIST_CACHE`).
+
 ## What latency does and doesn't buy
 
 The genuine edges persist minutes-to-hours, so a $100/mo always-on instance with

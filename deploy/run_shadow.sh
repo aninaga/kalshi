@@ -11,6 +11,7 @@ export PYTHONUNBUFFERED=1
 LEDGER="${SHADOW_LEDGER:-market_data/shadow/ledger.jsonl}"
 ALLOWLIST="${SHADOW_ALLOWLIST:-market_data/matching/match_allowlist.json}"
 INTERVAL="${SHADOW_INTERVAL:-20}"
+WATCHCACHE="${SHADOW_WATCHLIST_CACHE:-market_data/shadow/watchlist.json}"
 
 mkdir -p "$(dirname "$LEDGER")"
 
@@ -21,4 +22,5 @@ export EXECUTION_MODE="${EXECUTION_MODE:-paper}"
 exec kalshi-arb monitor \
   --allowlist "$ALLOWLIST" \
   --ledger "$LEDGER" \
-  --interval "$INTERVAL"
+  --interval "$INTERVAL" \
+  --watchlist-cache "$WATCHCACHE"

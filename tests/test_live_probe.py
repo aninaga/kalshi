@@ -74,3 +74,88 @@ def test_price_pair_polarity_failsafe(monkeypatch):
 
     phantom = lp.price_pair({**pair, "polarity": "inverted"}, pm_fee_bps=0)
     assert phantom is None                                  # phantom rejected by the floor
+
+
+def test_gamma_row_maps_to_clob_shape():
+    # Gamma stores outcomes/clobTokenIds as JSON STRINGS; the mapper must produce
+    # the exact sampling-markets shape match_pairs consumes. This is the catalog
+    # top-up that keeps near-resolved extreme-priced markets (shed from
+    # /sampling-markets) discoverable — where durable arb lives.
+    from kalshi_arbitrage.live_probe import _gamma_to_clob_row
+    g = {"conditionId": "0xc1", "question": "Elon Musk trillionaire before 2027?",
+         "description": "Resolves YES if ...", "endDate": "2026-12-31",
+         "active": True, "closed": False,
+         "outcomes": '["Yes", "No"]', "clobTokenIds": '["111", "222"]'}
+    r = _gamma_to_clob_row(g)
+    assert r == {"condition_id": "0xc1", "question": "Elon Musk trillionaire before 2027?",
+                 "description": "Resolves YES if ...", "end_date_iso": "2026-12-31",
+                 "active": True, "closed": False,
+                 "tokens": [{"token_id": "111", "outcome": "Yes"},
+                            {"token_id": "222", "outcome": "No"}]}
+
+
+def test_gamma_row_rejects_closed_nonbinary_and_garbage():
+    from kalshi_arbitrage.live_probe import _gamma_to_clob_row
+    base = {"conditionId": "0xc1", "question": "q", "active": True, "closed": False,
+            "outcomes": '["Yes", "No"]', "clobTokenIds": '["1", "2"]'}
+    assert _gamma_to_clob_row({**base, "closed": True}) is None
+    assert _gamma_to_clob_row({**base, "active": False}) is None
+    assert _gamma_to_clob_row({**base, "clobTokenIds": '["1"]'}) is None       # non-binary
+    assert _gamma_to_clob_row({**base, "outcomes": "not json"}) is None        # garbage
+    assert _gamma_to_clob_row(None) is None
+
+
+def test_fetch_polymarket_tops_up_from_gamma(monkeypatch):
+    # A market missing from /sampling-markets but present in Gamma must appear in
+    # the catalog exactly once (dedup by condition_id).
+    from kalshi_arbitrage import live_probe as lp
+    sampling_row = {"condition_id": "0xa", "question": "A?", "active": True,
+                    "closed": False, "tokens": [{"token_id": "1", "outcome": "Yes"},
+                                                {"token_id": "2", "outcome": "No"}]}
+    gamma_dup = {"conditionId": "0xa", "question": "A?", "active": True, "closed": False,
+                 "outcomes": '["Yes", "No"]', "clobTokenIds": '["1", "2"]'}
+    gamma_new = {"conditionId": "0xmusk", "question": "Musk trillionaire?", "active": True,
+                 "closed": False, "outcomes": '["Yes", "No"]',
+                 "clobTokenIds": '["31", "32"]', "endDate": "2026-12-31",
+                 "description": ""}
+
+    def fake_get(url, **kw):
+        if "sampling-markets" in url:
+            return {"data": [sampling_row], "next_cursor": "LTE="}
+        if "gamma-api" in url:
+            return [gamma_dup, gamma_new] if "offset=0" in url else []
+        return None
+
+    monkeypatch.setattr(lp, "get", fake_get)
+    rows = lp.fetch_polymarket()
+    ids = [r["condition_id"] for r in rows]
+    assert ids == ["0xa", "0xmusk"]
+
+
+def test_fetch_polymarket_pages_past_gammas_100_row_cap(monkeypatch):
+    # Gamma silently caps limit at 100/page. The sweep must page by the ACTUAL
+    # returned length — a deep market (page 2) was missed when the loop assumed
+    # 500-row pages and stopped at the top-100.
+    from kalshi_arbitrage import live_probe as lp
+
+    def gamma_row(i):
+        return {"conditionId": f"0x{i}", "question": f"Q{i}?", "active": True,
+                "closed": False, "outcomes": '["Yes", "No"]',
+                "clobTokenIds": f'["{2*i}", "{2*i+1}"]'}
+
+    def fake_get(url, **kw):
+        if "sampling-markets" in url:
+            return {"data": [], "next_cursor": "LTE="}
+        if "gamma-api" in url:
+            off = int(url.split("offset=")[1])
+            if off == 0:
+                return [gamma_row(i) for i in range(100)]      # full page -> keep going
+            if off == 100:
+                return [gamma_row(100 + i) for i in range(40)]  # short page -> stop after
+            raise AssertionError(f"unexpected offset {off}")
+        return None
+
+    monkeypatch.setattr(lp, "get", fake_get)
+    rows = lp.fetch_polymarket()
+    assert len(rows) == 140
+    assert rows[-1]["condition_id"] == "0x139"
