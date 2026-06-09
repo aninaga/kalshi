@@ -40,6 +40,12 @@ from research.agents.usage import limits as L
 
 AGENT = "lab.analyst"
 
+# The shared per-trial ledger. Defaulting this ON is what makes governance
+# N-aware in production: every trial the analyst settles is appended here, the
+# director ranks against it, and ``lab.governance`` deflates the Deflated-Sharpe
+# hurdle by the real trial count read from it (no more cold-start N=1 placeholder).
+DEFAULT_LEDGER = "research/reports/alpha/ledger.jsonl"
+
 # An executor turns one assignment into a trial result dict. The default is a
 # no-op stub: a real deployment injects a callable that spawns the agent (e.g.
 # codex exec) with the assignment and parses its result.md.
@@ -116,6 +122,24 @@ def _noop_executor(assignment: dict) -> dict:
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _append_ledger(ledger_path: str, row: dict) -> None:
+    """Append one settled-trial row to the shared JSONL ledger.
+
+    The row shape (``hypothesis_id`` + ``verdict`` + ``results``) is exactly what
+    ``lab.director`` reads back for prioritization and what ``lab.governance``
+    dedupes by ``hypothesis_id`` to count distinct trials (the DSR ``N``). Best
+    effort: a ledger write must never crash the research loop.
+    """
+    try:
+        import os
+
+        os.makedirs(os.path.dirname(ledger_path) or ".", exist_ok=True)
+        with open(ledger_path, "a") as fh:
+            fh.write(json.dumps(row, default=str) + "\n")
+    except Exception:  # noqa: BLE001 — telemetry, not the critical path
+        pass
 
 
 def _budget_for(max_ideas: int, budget_aware: bool) -> tuple[int, str]:
@@ -237,6 +261,17 @@ def run_analyst(
             update_kwargs["results"] = results_payload
         H.update(hyp_id, **update_kwargs)
 
+        # Append the settled trial to the shared ledger so the next director
+        # pass ranks against it and governance counts it toward the DSR N.
+        if ledger_path:
+            _append_ledger(ledger_path, {
+                "hypothesis_id": hyp_id,
+                "verdict": verdict,
+                "results": results_payload if results_payload is not None else {},
+                "agent": AGENT,
+                "settled": _now(),
+            })
+
         summary["processed"] += 1
         summary["results"].append(result)
         summary["verdicts"][hyp_id] = verdict
@@ -259,15 +294,27 @@ def main(argv: Optional[list[str]] = None) -> int:
                     help="skip the budget governor (work up to --max-ideas)")
     ap.add_argument("--dry-run", action="store_true",
                     help="use the no-op executor (assignments prepared, not run)")
+    ap.add_argument("--model", default="gpt-5.5", help="agent model for the codex executor")
+    ap.add_argument("--effort", default="high", help="reasoning effort for the codex executor")
+    ap.add_argument("--ledger", default=DEFAULT_LEDGER,
+                    help=f"shared trial ledger (default: {DEFAULT_LEDGER}); '' to disable")
     a = ap.parse_args(argv)
 
-    executor = _noop_executor if a.dry_run else None
+    # Real deployment: spawn a live agent per assignment via the codex executor.
+    # --dry-run keeps the import-safe no-op stub (assignments prepared, not run).
+    if a.dry_run:
+        executor = _noop_executor
+    else:
+        from research.lab.executors import make_codex_executor
+        executor = make_codex_executor(model=a.model, effort=a.effort)
+
     summary = run_analyst(
         a.brief,
         max_ideas=a.max_ideas,
         market=a.market,
         budget_aware=not a.no_budget,
         executor=executor,
+        ledger_path=(a.ledger or None),
     )
     print(json.dumps(summary, indent=2, default=str))
     return 0
