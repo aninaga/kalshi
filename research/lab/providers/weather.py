@@ -315,7 +315,13 @@ class WeatherProvider:
         try:
             with open(path, "rb") as fh:
                 rec = pickle.load(fh)
-            return build_panel(rec)
+            panel = build_panel(rec)
+            if panel is not None:
+                # Custom datasets from fulfilled data requests attach here,
+                # as-of known_from_ts (leakage-safe by construction).
+                from research.lab.providers import feature_store
+                feature_store.join_panel(panel, self.family)
+            return panel
         except Exception:  # noqa: BLE001 — one bad event must not kill a run
             return None
 

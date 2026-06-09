@@ -62,6 +62,39 @@ vertical: bucket book → cumulative boundary ladder with measured two-sided
 spreads) and `providers/_kalshi_fetch.py` (the generic series-agnostic
 Kalshi historical fetcher).
 
+## The data-request loop (analysts summon data agents)
+
+An analyst mid-research who needs a field that does not exist files a
+request instead of fabricating one:
+
+1. **File.** `lab.data_agent.request(DataRequest(market, field_name, spec,
+   rationale))` — or `summon_for_hypothesis(h)` when a hypothesis dies
+   `NEEDS_DATA`. The queue is the append-only JSONL at
+   `data_agent.DEFAULT_PATH`; requests dedupe on `market|field|spec`.
+2. **Dispatch.** Agents never spawn agents. The COORDINATOR (operator chat)
+   watches the queue (a `Monitor` tailing new `"status": "open"` lines) and
+   spawns one **data agent** per request.
+3. **Fulfill.** The data agent either (a) derives the field offline from
+   existing panel series (`data_agent.default_provider` vocabulary), or
+   (b) sources EXTERNAL data and writes it to the durable feature store —
+   `providers/feature_store.write_field(family, field, df, provenance=…)`,
+   schema `(event_id, known_from_ts, value)` — or (c) honestly marks the
+   request `NEEDS_DATA` with the reason. Fabrication is never an option.
+4. **Join.** Family providers call `feature_store.join_panel` in
+   `load_panel`, attaching every stored field **as-of `known_from_ts`** —
+   a future-issued value structurally cannot reach an earlier bar. The
+   point-in-time rule lives in the field's `provenance.json`; `lab.audit`
+   reviews it.
+5. **Resume.** The data agent marks the request `fulfilled` (+ a durable
+   note under `research/lab/runs/data_<field>_<utc>.md`); the coordinator
+   re-opens the blocked hypothesis and respawns the analyst, which now
+   finds the field on every panel.
+
+External-data ground rules: `known_from_ts` must be when the value was
+PUBLISHED (forecast issue time, wire time), never the valid/target time;
+sources and fetch endpoints go in provenance; a field whose publication
+time cannot be established is `NEEDS_DATA`, not guessed.
+
 ## How the operator runs it from chat
 
 1. **Originate.** Spawn an Opus subagent with `scout_prompt.md` + the EDA report;
