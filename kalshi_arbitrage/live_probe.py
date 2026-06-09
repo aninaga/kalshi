@@ -287,7 +287,9 @@ def _kalshi_rules(ticker: str) -> Dict[str, str]:
         if not m:
             return {"rules_primary": "", "rules_secondary": ""}
         _KRULES_CACHE[ticker] = {"rules_primary": m.get("rules_primary") or "",
-                                 "rules_secondary": m.get("rules_secondary") or ""}
+                                 "rules_secondary": m.get("rules_secondary") or "",
+                                 "yes_sub_title": m.get("yes_sub_title") or "",
+                                 "no_sub_title": m.get("no_sub_title") or ""}
     return _KRULES_CACHE[ticker]
 
 
@@ -340,10 +342,70 @@ def match_pairs(pm: List[Dict], ks: List[Dict]) -> List[Dict]:
             if not verdict.passed:
                 continue
             seen.add(key)
+            # pdesc is persisted into the watch-list cache: PM's catalogs shed
+            # near-resolved markets, so the description is unrecoverable later
+            # and reverify_pair needs it to re-run the verifier across restarts.
             pairs.append({"ktk": m.get("ticker"), "kt": title, "pt": p["title"],
-                          "tokens": p["tokens"], "pid": p["id"],
+                          "tokens": p["tokens"], "pid": p["id"], "pdesc": p["desc"],
                           "polarity": verdict.polarity, "uncertain": verdict.uncertain})
     return pairs
+
+
+_PDESC_CACHE: Dict[str, str] = {}
+
+
+def _pm_description(pid: str) -> Optional[str]:
+    """PM market description by condition id via Gamma (which still serves
+    markets the CLOB catalogs have shed). None on fetch failure — NOT cached,
+    so a later refresh can retry."""
+    if pid in _PDESC_CACHE:
+        return _PDESC_CACHE[pid]
+    d = get(f"{GAMMA}/markets?condition_ids={pid}")
+    if not isinstance(d, list) or not d or not isinstance(d[0], dict):
+        return None
+    desc = d[0].get("description") or ""
+    _PDESC_CACHE[pid] = desc
+    return desc
+
+
+def reverify_pair(pair: Dict, verifier=None) -> Optional[Dict]:
+    """Re-run the CURRENT verifier over a cached watch-list pair.
+
+    Cached pairs carry verdict fields (polarity/uncertain) baked at discovery
+    time, so a verifier upgrade (e.g. the resolution-authority gate) never
+    reaches them and a stale "clean" label survives restarts indefinitely —
+    observed live 2026-06-09 when the WHO-pinned pandemic pair stayed clean
+    through a monitor restart because it was retained from cache.
+
+    Rebuilds the verification docs (Kalshi rules re-fetched, cached per
+    ticker; PM description from the pair's stored ``pdesc``, else Gamma) and
+    returns the pair with refreshed verdict fields, ``None`` if it no longer
+    passes the verifier, or the pair UNCHANGED if the docs can't be fetched
+    (fail-open: a transient network blip must not relabel or drop the cache).
+    """
+    pdesc = pair.get("pdesc")
+    if pdesc is None:
+        pdesc = _pm_description(pair.get("pid") or "")
+        if pdesc is None:
+            return pair
+    krules = _kalshi_rules(pair.get("ktk") or "")
+    if not krules.get("rules_primary"):
+        # Every live Kalshi market carries rules_primary; empty means the
+        # fetch failed — fail open rather than judge on missing evidence.
+        return pair
+    kt, pt = pair.get("kt") or "", pair.get("pt") or ""
+    kd = {"id": pair.get("ktk"), "title": kt, "clean_title": clean_title(kt),
+          "raw_data": dict(krules)}
+    pd = {"id": pair.get("pid"), "title": pt, "clean_title": clean_title(pt),
+          "raw_data": {"description": pdesc}}
+    verdict = (verifier or CompositeVerifier()).verify(kd, pd)
+    if not verdict.passed:
+        return None
+    out = dict(pair)
+    out["pdesc"] = pdesc
+    out["polarity"] = verdict.polarity
+    out["uncertain"] = verdict.uncertain
+    return out
 
 
 def to_opportunity(priced: Dict) -> Dict:

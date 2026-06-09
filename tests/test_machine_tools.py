@@ -103,6 +103,7 @@ def test_monitor_watchlist_cache_persists_and_merges(tmp_path, monkeypatch):
             "polarity": "aligned"}
     monkeypatch.setattr(monitor_arb.lp, "price_pair", lambda p, bps: None)
     monkeypatch.setattr(monitor_arb, "_kalshi_alive", lambda p: True)
+    monkeypatch.setattr(monitor_arb, "_reverify", lambda p: p)
     cache = tmp_path / "watch.json"
 
     monkeypatch.setattr(monitor_arb.lp, "discover", lambda: [pair])
@@ -130,6 +131,7 @@ def test_watchlist_cache_respects_allowlist_removal(tmp_path, monkeypatch):
     allow.write_text(json.dumps({"approved": [{"kalshi": "K1", "polymarket": "P1"}]}))
     monkeypatch.setattr(monitor_arb.lp, "discover", lambda: [])  # catalogs forgot both
     monkeypatch.setattr(monitor_arb, "_kalshi_alive", lambda p: True)
+    monkeypatch.setattr(monitor_arb, "_reverify", lambda p: p)
     monkeypatch.setattr(monitor_arb.lp, "price_pair", lambda p, bps: None)
     assert monitor_arb.main(["--interval", "0", "--duration", "0.01",
                              "--allowlist", str(allow),

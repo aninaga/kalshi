@@ -32,24 +32,39 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from kalshi_arbitrage import live_probe as lp
 
 
-def _merge_watchlists(fresh: list, cached: list, is_alive=None) -> list:
+def _merge_watchlists(fresh: list, cached: list, is_alive=None, revalidate=None) -> list:
     """Fresh discovery + previously-known pairs that fell out of the catalogs.
 
     The PM catalog endpoint (/sampling-markets) silently drops near-resolved
     extreme-priced markets — exactly where durable arb lives — so a verified
     pair must stay watched until its market actually dies, not until the
     catalog forgets it. ``is_alive(pair)`` gates retained-only pairs (None =
-    retain unconditionally)."""
+    retain unconditionally). ``revalidate(pair)`` re-runs the CURRENT verifier
+    over retained-only pairs (fresh pairs already carry a current verdict):
+    cached pairs bake their clean/basis-risk labels at discovery time, so
+    without this a verifier upgrade never reaches them and a stale "clean"
+    survives restarts (None = drop the pair; a dict = refreshed labels)."""
     seen = {(p["ktk"], p["pid"]) for p in fresh}
     merged = list(fresh)
     for p in cached:
         key = (p.get("ktk"), p.get("pid"))
         if key in seen:
             continue
-        if is_alive is None or is_alive(p):
-            merged.append(p)
-            seen.add(key)
+        if is_alive is not None and not is_alive(p):
+            continue
+        if revalidate is not None:
+            p = revalidate(p)
+            if p is None:
+                continue
+        merged.append(p)
+        seen.add(key)
     return merged
+
+
+def _reverify(pair: dict):
+    """Refresh a cache-retained pair's verdict under the current verifier
+    (module-level so tests can stub it out)."""
+    return lp.reverify_pair(pair)
 
 
 def _kalshi_alive(pair: dict) -> bool:
@@ -87,7 +102,8 @@ def _load_watchlist(args) -> list:
             # Cache retention must not override the operator: a pair removed
             # from the allowlist is dropped even if its market is still alive.
             cached = [p for p in cached if (p.get("ktk"), p.get("pid")) in approved]
-        merged = _merge_watchlists(pairs, cached, is_alive=_kalshi_alive)
+        merged = _merge_watchlists(pairs, cached, is_alive=_kalshi_alive,
+                                   revalidate=_reverify)
         retained = len(merged) - len(pairs)
         try:
             cache.parent.mkdir(parents=True, exist_ok=True)
