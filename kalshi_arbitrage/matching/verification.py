@@ -227,6 +227,54 @@ def _threshold_comparator(market: Dict) -> Optional[str]:
     return None
 
 
+# Resolution-authority pinning. "The WHO declares a pandemic" and "any disease
+# becomes a pandemic" are DIFFERENT resolution functions: when a named authority
+# defines the term, that authority's judgment (or silence) IS the market. Found
+# live on the pandemic pair (Polymarket pins "official announcements from the
+# World Health Organization"; Kalshi's rules name no source — and the WHO has no
+# formal pandemic-declaration mechanism, so "colloquial pandemic, no WHO
+# declaration" splits the venues). The same pattern underlies the Musk pair's
+# Bloomberg-Billionaires-Index pin. The list is a deliberately short, curated
+# set of *definitional* authorities; generic "official results/announcements"
+# phrasing must NOT trip it (elections/sports pairs stay clean). Acronyms are
+# matched case-sensitively so "Who will win" / "above" prose can't fire them.
+_AUTHORITY_PATTERNS = (
+    ("WHO", re.compile(r"\bworld health organi[sz]ation\b", re.IGNORECASE)),
+    ("WHO", re.compile(r"\bWHO\b")),
+    ("CDC", re.compile(r"\bcenters? for disease control\b", re.IGNORECASE)),
+    ("CDC", re.compile(r"\bCDC\b")),
+    ("BLOOMBERG", re.compile(r"\bbloomberg\b", re.IGNORECASE)),
+    ("FORBES", re.compile(r"\bforbes\b", re.IGNORECASE)),
+    ("BLS", re.compile(r"\bbureau of labor statistics\b", re.IGNORECASE)),
+    ("BLS", re.compile(r"\bBLS\b")),
+    ("NOAA", re.compile(r"\bNOAA\b")),
+    ("NWS", re.compile(r"\bnational weather service\b", re.IGNORECASE)),
+    ("FBI", re.compile(r"\bFBI\b")),
+    ("FED", re.compile(r"\bfederal reserve\b", re.IGNORECASE)),
+    ("IMF", re.compile(r"\bIMF\b")),
+    ("AP", re.compile(r"\bassociated press\b", re.IGNORECASE)),
+    ("UN", re.compile(r"\bunited nations\b", re.IGNORECASE)),
+    ("NASA", re.compile(r"\bNASA\b")),
+    ("USGS", re.compile(r"\bUSGS\b")),
+    ("WORLD_BANK", re.compile(r"\bworld bank\b", re.IGNORECASE)),
+)
+
+
+def _named_authorities(market: Dict) -> tuple:
+    """(frozenset of authority tags named in the rules text, has_rules_text).
+
+    ``has_rules_text`` guards the asymmetry gate: a side with no/trivial rules
+    (e.g. a transient catalog-backfill failure) cannot be said to "omit" an
+    authority — the gate only fires when BOTH sides actually expose rules text.
+    """
+    raw = market.get("raw_data", {}) or {}
+    text = " ".join(
+        str(raw.get(k, "")) for k in ("rules_primary", "rules_secondary", "description")
+    )
+    found = frozenset(tag for tag, rx in _AUTHORITY_PATTERNS if rx.search(text))
+    return found, len(text.strip()) >= 20
+
+
 def _extract_deadline(text: str) -> Optional[int]:
     """Return the governing resolution-deadline as a date ordinal, or None.
 
@@ -990,6 +1038,23 @@ class ResolutionCongruenceVerifier:
             return MatchVerdict(True, UNKNOWN, conf,
                                 base + (f"threshold_comparator_asymmetry_review "
                                         f"k={k_cmp} p={p_cmp}",),
+                                self.name, uncertain=True)
+        # (d) Resolution-authority asymmetry: one venue pins resolution to a
+        # named definitional authority (WHO, Bloomberg, CDC, ...) the other
+        # never mentions — the authority's judgment (or silence) IS that
+        # venue's market, so the pair can split (live pandemic pair: PM
+        # resolves on an official WHO declaration, which the WHO has no formal
+        # mechanism to make; Kalshi resolves on "any disease becomes a
+        # pandemic"). Flag UNCERTAIN, not reject; only fires when BOTH sides
+        # expose rules text, so a transient rules-backfill failure can't
+        # mass-flag the catalog.
+        k_auth, k_has = _named_authorities(kalshi_market)
+        p_auth, p_has = _named_authorities(polymarket_market)
+        if k_has and p_has and (k_auth ^ p_auth):
+            diff = ",".join(sorted(k_auth ^ p_auth))
+            return MatchVerdict(True, UNKNOWN, conf,
+                                base + (f"resolution_authority_asymmetry_review "
+                                        f"one_sided={diff}",),
                                 self.name, uncertain=True)
         return MatchVerdict(True, UNKNOWN, conf, base, self.name)
 

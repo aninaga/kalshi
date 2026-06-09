@@ -177,6 +177,81 @@ def test_no_threshold_language_not_flagged():
     assert verdict.passed and not verdict.uncertain
 
 
+def test_resolution_authority_asymmetry_flags_uncertain():
+    # The live pandemic pair: Polymarket resolves on "official announcements
+    # from the World Health Organization" — and the WHO has no formal pandemic-
+    # declaration mechanism — while Kalshi resolves on "any disease becomes a
+    # pandemic" with no source named. A colloquial pandemic with no WHO
+    # declaration splits the venues; with K-NO + PM-YES legs that's a total
+    # loss wearing an arbitrage costume.
+    v = ResolutionCongruenceVerifier()
+    verdict = v.verify(
+        _mk("Pandemic in 2026?",
+            "If any disease becomes a pandemic in 2026, then the market resolves to Yes."),
+        _mk("New pandemic in 2026?",
+            "This market will resolve to Yes if the World Health Organization (WHO) "
+            "declares any disease a pandemic between January 1, 2026 and December 31, "
+            "2026 11:59 PM ET. The resolution source will be official announcements "
+            "from the World Health Organization."),
+    )
+    assert verdict.passed and verdict.uncertain
+    assert any("resolution_authority_asymmetry" in r for r in verdict.reasons)
+
+
+def test_same_authority_both_sides_not_flagged():
+    # Both venues pin the SAME authority → congruent, stays clean.
+    v = ResolutionCongruenceVerifier()
+    verdict = v.verify(
+        _mk("Pandemic in 2026?",
+            "If the World Health Organization declares a pandemic in 2026, then Yes."),
+        _mk("New pandemic in 2026?",
+            "Resolves Yes if the World Health Organization (WHO) declares any disease "
+            "a pandemic by December 31, 2026 11:59 PM ET."),
+    )
+    assert verdict.passed and not verdict.uncertain
+
+
+def test_generic_official_results_phrasing_not_flagged():
+    # "Official results/announcements" without a curated authority name must NOT
+    # fire — else every election/sports pair lands in review and recall dies.
+    v = ResolutionCongruenceVerifier()
+    verdict = v.verify(
+        _mk("Will Édouard Philippe win the 2027 French presidential election?",
+            "If Édouard Philippe wins the 2027 French presidential election, then Yes."),
+        _mk("Will Édouard Philippe win the 2027 French presidential election?",
+            "Resolves to Yes according to the official results of the 2027 French "
+            "presidential election announced by the government."),
+    )
+    assert verdict.passed and not verdict.uncertain
+
+
+def test_authority_gate_needs_rules_text_on_both_sides():
+    # An empty Kalshi side (e.g. transient rules-backfill failure) cannot be
+    # said to "omit" an authority — must not mass-flag the catalog.
+    v = ResolutionCongruenceVerifier()
+    verdict = v.verify(
+        _mk("New pandemic in 2026?", ""),
+        _mk("New pandemic in 2026?",
+            "Resolves Yes if the World Health Organization declares a pandemic "
+            "by December 31, 2026."),
+    )
+    assert verdict.passed and not verdict.uncertain
+
+
+def test_acronym_authorities_case_sensitive():
+    # Sentence-initial "Who" must not read as the WHO.
+    from kalshi_arbitrage.matching.verification import _named_authorities
+    auth, has = _named_authorities(
+        {"raw_data": {"rules_primary": "Who wins the 2026 election determines "
+                                       "resolution of this market.",
+                      "description": ""}})
+    assert auth == frozenset() and has
+    auth, _ = _named_authorities(
+        {"raw_data": {"rules_primary": "Resolves per WHO announcements.",
+                      "description": ""}})
+    assert auth == frozenset({"WHO"})
+
+
 def test_tolerance_is_configurable():
     strict = ResolutionCongruenceVerifier(tolerance_days=0)
     # 1-day phrasing gap is rejected under zero tolerance...
