@@ -1,0 +1,27 @@
+[Unit]
+Description=Kalshi-Polymarket SHADOW monitor (no capital, no orders)
+Documentation=file:///opt/kalshi/deploy/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=kalshi
+WorkingDirectory=/opt/kalshi
+EnvironmentFile=/opt/kalshi/.env
+ExecStart=/opt/kalshi/deploy/run_shadow.sh
+# Restart on crash, but guard against a tight crash-loop.
+Restart=on-failure
+RestartSec=10
+StartLimitIntervalSec=300
+StartLimitBurst=10
+StandardOutput=journal
+StandardError=journal
+# Hardening — the shadow run only reads public APIs and writes the ledger.
+NoNewPrivileges=true
+ProtectSystem=full
+PrivateTmp=true
+ReadWritePaths=/opt/kalshi/market_data /var/log/kalshi-arb
+
+[Install]
+WantedBy=multi-user.target

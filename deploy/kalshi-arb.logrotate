@@ -1,0 +1,15 @@
+# Rotate the app's file log and the shadow stdout (systemd path).
+# Install:  sudo cp deploy/kalshi-arb.logrotate /etc/logrotate.d/kalshi-arb
+#
+# NOTE: do NOT rotate the ledger JSONL (market_data/shadow/ledger.jsonl) — it is
+# the append-only AUDIT record of captured episodes, not a log. journald already
+# rotates the systemd-captured stdout; this covers any file logs.
+/var/log/kalshi-arb/*.log /opt/kalshi/market_data/*.log {
+    daily
+    rotate 14
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+}
