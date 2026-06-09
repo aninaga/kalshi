@@ -127,6 +127,8 @@ market_data/trials_scratch.db
 /trials.db
 market_data/audit.log
 market_data/budget_ledger.jsonl
+# Live shadow-run artifacts (append-only ledger + monitor log) — runtime data.
+market_data/shadow/
 
 # In-tree venv symlink (per-user; points to ~/code/kvenv)
 research/.venv-research
