@@ -77,7 +77,8 @@ class OrderOutcome:
     fees: float = 0.0                # real fees on the filled portion
     order_id: Optional[str] = None
     client_order_id: Optional[str] = None
-    fill_ids: List[str] = field(default_factory=list)
+    fill_ids: List[str] = field(default_factory=list)    # venue fill ids (Kalshi)
+    trade_ids: List[str] = field(default_factory=list)   # venue trade/tx ids (Polymarket)
     attempts: int = 0
     error: Optional[str] = None
     raw: Optional[Dict] = None

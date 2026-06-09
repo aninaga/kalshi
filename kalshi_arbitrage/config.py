@@ -55,6 +55,14 @@ class Config:
     # Confirmed PnL tracking settings
     CONFIRMED_PNL_REQUIRE_SETTLEMENT = True
     CONFIRMED_PNL_INCLUDE_SIMULATION = False
+    # Whether to mark a fill SETTLED at entry. For a cross-venue complementary
+    # arb the profit is LOCKED at fill but only REALIZED when both markets
+    # resolve (months out) — so a LIVE exchange fill must NOT be counted as
+    # settled-realized at entry. Paper/sim keeps settling at fill (no resolution
+    # to wait for), so existing paper accounting/tests are unchanged. The
+    # reconciler (kalshi-arb reconcile) flips a live receipt to settled once both
+    # venues show resolution.
+    CONFIRMED_PNL_MARK_SETTLED_AT_FILL = False
 
     # Data-quality controls for opportunity estimation
     REQUIRE_REAL_ORDERBOOKS_FOR_ESTIMATED = True

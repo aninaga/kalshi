@@ -128,10 +128,15 @@ class KalshiGateway:
         avg_price = (float(avg_cents) / 100.0) if avg_cents is not None else req.limit_price
         fees = FeeModel.kalshi_taker_fee(avg_price, filled) if filled > 0 else 0.0
         status = STATUS_FILLED if filled >= int(req.size) else (STATUS_PARTIAL if filled > 0 else STATUS_FAILED)
+        # Best-effort venue fill ids if the order response carries them; the
+        # authoritative ids/fees are re-fetched by the reconciler via order_id.
+        fill_ids = [str(f.get("trade_id") or f.get("fill_id"))
+                    for f in (order.get("fills") or []) if isinstance(f, dict)]
         return OrderOutcome(
             venue=KALSHI, status=status, requested_size=req.size,
             filled_size=filled, avg_price=avg_price, fees=fees,
             order_id=order_id, client_order_id=coid, raw=resp,
+            fill_ids=[fid for fid in fill_ids if fid and fid != "None"],
         )
 
     async def cancel(self, order_id: str) -> bool:
@@ -202,10 +207,15 @@ class PolymarketGateway:
 
         fees = await self._fees(req.token_id, avg_price, filled)
         status = STATUS_FILLED if filled >= req.size * 0.999 else (STATUS_PARTIAL if filled > 0 else STATUS_FAILED)
+        # Best-effort on-chain trade/tx ids; the reconciler re-fetches the
+        # authoritative trades (and fees) from the data-api via order_id.
+        tx = (resp.get("transactionsHashes") or resp.get("transactionHashes")
+              or resp.get("tradeIds") or []) if isinstance(resp, dict) else []
+        trade_ids = [str(t) for t in tx if t] if isinstance(tx, list) else []
         return OrderOutcome(
             venue=POLYMARKET, status=status, requested_size=req.size,
             filled_size=filled, avg_price=avg_price, fees=fees,
-            order_id=order_id, client_order_id=coid, raw=resp,
+            order_id=order_id, client_order_id=coid, raw=resp, trade_ids=trade_ids,
         )
 
     @staticmethod

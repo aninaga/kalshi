@@ -385,6 +385,16 @@ class ConfirmedPnLTracker:
             return False
         return True
 
+    def _is_locked_execution(self, execution: ExecutionRecord) -> bool:
+        """Both legs filled/confirmed but the markets haven't resolved yet: the
+        profit is LOCKED IN but not yet settled-realized (live cross-venue arb
+        resolves months out)."""
+        if execution.is_settled() or not execution.has_confirmed_legs():
+            return False
+        if (not self.allow_simulated_confirmed) and execution.has_simulation_source():
+            return False
+        return True
+
     def summarize(self, scan_interval_seconds: float, since_timestamp: Optional[float] = None) -> Dict[str, Any]:
         interval = max(_safe_float(scan_interval_seconds, 1.0), 1.0)
         scans_per_hour = 3600.0 / interval
@@ -407,6 +417,11 @@ class ConfirmedPnLTracker:
         profitable_window_count = sum(1 for execution in settled_window if execution.realized_pnl() > 0.0)
         pending_count = sum(1 for execution in self.executions.values() if not execution.is_settled())
 
+        # Locked-in: confirmed both legs, not yet settled (awaiting resolution).
+        # Profit is locked at fill but only realized when both markets resolve.
+        locked = [e for e in self.executions.values() if self._is_locked_execution(e)]
+        locked_pnl = float(sum(e.realized_pnl() for e in locked))
+
         return {
             "realized_pnl_usd": window_realized,
             "realized_pnl_per_hour_usd": window_realized * scans_per_hour,
@@ -414,6 +429,10 @@ class ConfirmedPnLTracker:
             "realized_pnl_opportunity_count": profitable_window_count,
             "settled_execution_count": len(settled_window),
             "pending_execution_count": pending_count,
+            # Locked-in (confirmed, awaiting resolution) — the honest live story:
+            # "$X locked in across N pairs; $Y settled-realized so far".
+            "locked_in_pnl_usd": locked_pnl,
+            "locked_in_execution_count": len(locked),
             "cumulative_realized_pnl_usd": cumulative_realized,
             "cumulative_settled_execution_count": len(settled_all),
             "counting_simulated_confirmations": bool(self.allow_simulated_confirmed),

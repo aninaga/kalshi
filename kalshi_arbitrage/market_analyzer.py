@@ -1262,7 +1262,13 @@ class MarketAnalyzer:
                 source=simulated_execution.get('confirmation_source', 'simulation'),
                 metadata=metadata,
                 mark_confirmed=True,
-                mark_settled=bool(Config.CONFIRMED_PNL_REQUIRE_SETTLEMENT),
+                # A LIVE exchange fill is confirmed-but-not-settled: profit is
+                # locked at fill, realized only at resolution (months out). The
+                # reconciler settles it later. Paper/sim settle at fill.
+                mark_settled=(
+                    simulated_execution.get('confirmation_source') != 'exchange'
+                    or bool(Config.CONFIRMED_PNL_MARK_SETTLED_AT_FILL)
+                ),
                 timestamp=float(simulated_execution.get('timestamp', time.time())),
             )
         except Exception as e:
@@ -1559,6 +1565,12 @@ class MarketAnalyzer:
                     'skipped_reason': result.skipped_reason,
                     'buy_order_id': result.buy_order_id,
                     'sell_order_id': result.sell_order_id,
+                    # Venue lineage for reconciliation against statements.
+                    'buy_fill_id': result.buy_fill_id,
+                    'sell_fill_id': result.sell_fill_id,
+                    'buy_trade_id': result.buy_trade_id,
+                    'sell_trade_id': result.sell_trade_id,
+                    'settlement_id': result.settlement_id,
                     'confirmation_source': result.confirmation_source,
                     'timestamp': result.timestamp,
                 }

@@ -445,6 +445,13 @@ class ArbitrageExecutor:
             execution_id=exec_id,
             buy_order_id=buy.order_id,
             sell_order_id=sell.order_id,
+            # Venue fill/trade ids (best-effort at order time; the reconciler
+            # overwrites with authoritative ids/fees). Lets the confirmed-PnL
+            # ledger link each leg back to a venue record for reconciliation.
+            buy_fill_id=(getattr(buy, 'fill_ids', None) or [None])[0],
+            sell_fill_id=(getattr(sell, 'fill_ids', None) or [None])[0],
+            buy_trade_id=(getattr(buy, 'trade_ids', None) or [None])[0],
+            sell_trade_id=(getattr(sell, 'trade_ids', None) or [None])[0],
             confirmation_source='exchange' if is_live else 'paper',
         )
 

@@ -68,6 +68,15 @@ class ExecutionCapture:
             "sell_platform": getattr(result, "sell_platform", None),
             "requested_volume": getattr(result, "requested_volume", 0),
             "filled_volume": getattr(result, "filled_volume", 0),
+            # Venue lineage — links each leg to a venue record so a live fill can
+            # be reconciled against statements (populated for live; None for sim).
+            "buy_order_id": getattr(result, "buy_order_id", None),
+            "sell_order_id": getattr(result, "sell_order_id", None),
+            "buy_fill_id": getattr(result, "buy_fill_id", None),
+            "sell_fill_id": getattr(result, "sell_fill_id", None),
+            "buy_trade_id": getattr(result, "buy_trade_id", None),
+            "sell_trade_id": getattr(result, "sell_trade_id", None),
+            "settlement_id": getattr(result, "settlement_id", None),
             # Estimate (pre-trade expectation). expected_net is scaled to the
             # filled size for a fair fill-quality comparison; expected_net_full is
             # the full-depth estimate.

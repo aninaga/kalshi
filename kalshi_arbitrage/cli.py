@@ -174,6 +174,7 @@ def build_parser() -> argparse.ArgumentParser:
     a.set_defaults(func=_cmd_analyze_paper)
 
     sub.add_parser("readiness", help="live-pilot go/no-go checklist", add_help=False)
+    sub.add_parser("reconcile", help="reconcile live fills -> authoritative locked-in/settled P&L", add_help=False)
 
     lv = sub.add_parser("live", help="arm/disarm/status the live-trading lock")
     lv.add_argument("action", choices=["status", "arm", "disarm"], default="status", nargs="?")
@@ -202,6 +203,7 @@ _PASSTHROUGH = {
     "machine": "tools.run_machine",
     "analyze-ledger": "tools.analyze_ledger",
     "readiness": "kalshi_arbitrage.validation.pilot.live_readiness_checklist",
+    "reconcile": "kalshi_arbitrage.reconcile",
 }
 
 
