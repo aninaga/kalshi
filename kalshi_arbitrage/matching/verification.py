@@ -193,6 +193,40 @@ def _has_exclusion_clause(market: Dict) -> bool:
     return len(text) >= 120 and bool(_EXCLUSION_RE.search(text))
 
 
+# Numeric-threshold comparator semantics. "More than $1 trillion" (strict >) and
+# "reaches or exceeds $1 trillion" (inclusive >=) resolve DIFFERENTLY when the
+# measured value lands exactly on the threshold — found live on the
+# Musk-trillionaire pair (Kalshi "more than $1 trillion" vs Polymarket "reaches
+# or exceeds $1 trillion ... as listed on the Bloomberg Billionaires Index").
+# Same subject, same deadline, different resolution FUNCTION at the boundary →
+# basis risk. The inclusive pattern is checked first because inclusive phrasings
+# often embed a strict verb ("reaches or EXCEEDS").
+_INCLUSIVE_CMP_RE = re.compile(
+    r"\b(?:reach(?:es)? or exceed(?:s)?|at least \$?\s*[\d,.]+|"
+    r"[\d,.]+\s*(?:%|percent|trillion|billion|million)?\s+or (?:more|higher|above|greater)|"
+    r"equal(?:s)? to or (?:exceed|more|great|high)|no (?:fewer|less) than)\b",
+    re.IGNORECASE,
+)
+_STRICT_CMP_RE = re.compile(
+    r"\b(?:more than|greater than|above|over|exceed(?:s|ed)?|surpass(?:es|ed)?)\s+"
+    r"\$?\s*[\d,.]*\d",
+    re.IGNORECASE,
+)
+
+
+def _threshold_comparator(market: Dict) -> Optional[str]:
+    """'inclusive' (>=), 'strict' (>), or None if no numeric-threshold language."""
+    raw = market.get("raw_data", {}) or {}
+    text = str(market.get("title") or "") + " " + " ".join(
+        str(raw.get(k, "")) for k in ("rules_primary", "rules_secondary", "description")
+    )
+    if _INCLUSIVE_CMP_RE.search(text):
+        return "inclusive"
+    if _STRICT_CMP_RE.search(text):
+        return "strict"
+    return None
+
+
 def _extract_deadline(text: str) -> Optional[int]:
     """Return the governing resolution-deadline as a date ordinal, or None.
 
@@ -943,6 +977,19 @@ class ResolutionCongruenceVerifier:
         if _has_exclusion_clause(kalshi_market) != _has_exclusion_clause(polymarket_market):
             return MatchVerdict(True, UNKNOWN, conf,
                                 base + ("exclusion_clause_asymmetry_review",),
+                                self.name, uncertain=True)
+        # (c) Threshold-comparator divergence: strict ">" on one venue vs
+        # inclusive ">=" on the other (Musk-trillionaire: "more than $1T" vs
+        # "reaches or exceeds $1T"). Exactly-on-threshold resolves YES on one
+        # venue and NO on the other. Flag UNCERTAIN, not reject (the boundary
+        # case is low- but non-zero-probability, and the asymmetry frequently
+        # accompanies a source-pinning difference too).
+        k_cmp = _threshold_comparator(kalshi_market)
+        p_cmp = _threshold_comparator(polymarket_market)
+        if k_cmp and p_cmp and k_cmp != p_cmp:
+            return MatchVerdict(True, UNKNOWN, conf,
+                                base + (f"threshold_comparator_asymmetry_review "
+                                        f"k={k_cmp} p={p_cmp}",),
                                 self.name, uncertain=True)
         return MatchVerdict(True, UNKNOWN, conf, base, self.name)
 

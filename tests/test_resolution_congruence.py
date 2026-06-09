@@ -134,6 +134,49 @@ def test_symmetric_rules_not_flagged():
     assert verdict.passed and not verdict.uncertain
 
 
+def test_threshold_comparator_asymmetry_flags_uncertain():
+    # The live Musk-trillionaire pair: Kalshi resolves on "MORE THAN $1 trillion"
+    # (strict >), Polymarket on "REACHES OR EXCEEDS $1 trillion" (inclusive >=,
+    # pinned to the Bloomberg Billionaires Index). Exactly $1.000T resolves YES
+    # on PM and NO on Kalshi — same deadline, different resolution function.
+    v = ResolutionCongruenceVerifier()
+    verdict = v.verify(
+        _mk("Will Elon Musk be a trillionaire before 2027?",
+            "If Elon Musk has a net worth more than $1 trillion before Jan 1, 2027, "
+            "then the market resolves to Yes."),
+        _mk("Elon Musk trillionaire before 2027?",
+            "This market will resolve to Yes if Elon Musk's net worth, as listed on "
+            "the Bloomberg Billionaires Index, reaches or exceeds $1 trillion at any "
+            "point by December 31, 2026, 11:59 PM ET."),
+    )
+    assert verdict.passed and verdict.uncertain
+    assert any("threshold_comparator_asymmetry" in r for r in verdict.reasons)
+
+
+def test_matching_comparators_not_flagged():
+    v = ResolutionCongruenceVerifier()
+    # strict/strict
+    verdict = v.verify(
+        _mk("Measles cases above 3000 in 2026?", "more than 3,000 cases by Dec 31, 2026"),
+        _mk("Measles cases above 3000 in 2026?", "exceeds 3,000 cases by December 31, 2026"))
+    assert verdict.passed and not verdict.uncertain
+    # inclusive/inclusive
+    verdict = v.verify(
+        _mk("Measles cases 3000+ in 2026?", "at least 3,000 cases by Dec 31, 2026"),
+        _mk("Measles cases 3000+ in 2026?", "3,000 or more cases by December 31, 2026"))
+    assert verdict.passed and not verdict.uncertain
+
+
+def test_no_threshold_language_not_flagged():
+    # Comparator words without a numeric threshold must not fire (e.g. "above" in
+    # a non-numeric context on one side only).
+    v = ResolutionCongruenceVerifier()
+    verdict = v.verify(
+        _mk("Will X win the 2026 election?", "wins the 2026 election described above"),
+        _mk("Will X win the 2026 election?", "resolves to the winner of the 2026 election"))
+    assert verdict.passed and not verdict.uncertain
+
+
 def test_tolerance_is_configurable():
     strict = ResolutionCongruenceVerifier(tolerance_days=0)
     # 1-day phrasing gap is rejected under zero tolerance...
