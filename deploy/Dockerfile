@@ -5,7 +5,7 @@ FROM python:3.11-slim
 WORKDIR /opt/kalshi
 
 # Install deps first for layer caching. `pip install -e .` installs the
-# `kalshi-arb` console script (py-clob-client + cryptography come from pyproject).
+# `kalshi-arb` console script (py-clob-client-v2 + cryptography come from pyproject).
 COPY pyproject.toml requirements.txt ./
 RUN pip install --no-cache-dir -e . || pip install --no-cache-dir -r requirements.txt
 
