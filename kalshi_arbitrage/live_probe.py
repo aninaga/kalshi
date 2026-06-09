@@ -269,6 +269,28 @@ def fetch_kalshi() -> List[Dict]:
     return out
 
 
+_KRULES_CACHE: Dict[str, Dict[str, str]] = {}
+
+
+def _kalshi_rules(ticker: str) -> Dict[str, str]:
+    """Full resolution rules via the single-market GET.
+
+    The Kalshi LIST/events endpoints ship ``rules_primary=''`` — verifying
+    against catalog rows alone starves every rules-text gate (deadline,
+    exclusion-clause, threshold-comparator) of the Kalshi side, which is how
+    the Musk strict-vs-inclusive asymmetry sailed through as "clean". Cached
+    per ticker (rules are immutable); a failed fetch is NOT cached so a later
+    refresh can retry."""
+    if ticker not in _KRULES_CACHE:
+        d = get(f"{KBASE}/markets/{ticker}")
+        m = (d or {}).get("market") or {}
+        if not m:
+            return {"rules_primary": "", "rules_secondary": ""}
+        _KRULES_CACHE[ticker] = {"rules_primary": m.get("rules_primary") or "",
+                                 "rules_secondary": m.get("rules_secondary") or ""}
+    return _KRULES_CACHE[ticker]
+
+
 def match_pairs(pm: List[Dict], ks: List[Dict]) -> List[Dict]:
     """Verified same-event (Kalshi, PM) pairs via similarity + CompositeVerifier."""
     pmp = []
@@ -309,6 +331,11 @@ def match_pairs(pm: List[Dict], ks: List[Dict]) -> List[Dict]:
                 continue
             pd = {"id": p["id"], "title": p["title"], "clean_title": p["clean"],
                   "close_time": p["close"], "raw_data": {"description": p["desc"]}}
+            # Catalog rows carry rules_primary='' — backfill the real rules
+            # (one cached GET per ticker, only for markets that reach verify)
+            # so the rules-text gates see the actual Kalshi side.
+            if not kd["raw_data"]["rules_primary"]:
+                kd["raw_data"].update(_kalshi_rules(m.get("ticker")))
             verdict = verifier.verify(kd, pd)
             if not verdict.passed:
                 continue

@@ -132,6 +132,56 @@ def test_fetch_polymarket_tops_up_from_gamma(monkeypatch):
     assert ids == ["0xa", "0xmusk"]
 
 
+def test_match_pairs_backfills_kalshi_rules_from_single_market_get(monkeypatch):
+    # The Kalshi LIST/events endpoints ship rules_primary='' — without the
+    # single-market backfill every rules-text gate verifies against an EMPTY
+    # Kalshi side, which is exactly how the live Musk pair (strict 'more than'
+    # vs PM's inclusive 'reaches or exceeds') sailed through as clean.
+    from kalshi_arbitrage import live_probe as lp
+    kalshi_row = {"ticker": "KXMUSKTRILLION-27",
+                  "title": "Will Elon Musk be a trillionaire before 2027?",
+                  "close_time": "2027-01-01T00:00:00Z",
+                  "yes_sub_title": "Before 2027", "no_sub_title": "Before 2027",
+                  "rules_primary": "", "rules_secondary": ""}
+    pm_row = {"condition_id": "0xmusk",
+              "question": "Will Elon Musk be a trillionaire before 2027?",
+              "description": "This market will resolve to Yes if Elon Musk's net "
+                             "worth, as listed on the Bloomberg Billionaires Index, "
+                             "reaches or exceeds $1 trillion at any point by "
+                             "December 31, 2026, 11:59 PM ET.",
+              "end_date_iso": "2026-12-31",
+              "tokens": [{"token_id": "1", "outcome": "Yes"},
+                         {"token_id": "2", "outcome": "No"}]}
+    calls = []
+
+    def fake_get(url, **kw):
+        calls.append(url)
+        assert "markets/KXMUSKTRILLION-27" in url
+        return {"market": {"rules_primary":
+                           "If Elon Musk has a net worth more than $1 trillion "
+                           "before Jan 1, 2027, then the market resolves to Yes.",
+                           "rules_secondary": ""}}
+
+    monkeypatch.setattr(lp, "get", fake_get)
+    lp._KRULES_CACHE.clear()
+    pairs = lp.match_pairs([pm_row], [kalshi_row])
+    assert len(pairs) == 1
+    assert pairs[0]["uncertain"] is True          # comparator gate now SEES the rules
+    assert len(calls) == 1                        # one cached GET per ticker
+
+    # Second sweep in the same process: cache hit, no extra GET.
+    lp.match_pairs([pm_row], [kalshi_row])
+    assert len(calls) == 1
+
+
+def test_kalshi_rules_failed_fetch_not_cached(monkeypatch):
+    from kalshi_arbitrage import live_probe as lp
+    lp._KRULES_CACHE.clear()
+    monkeypatch.setattr(lp, "get", lambda url, **kw: None)
+    assert lp._kalshi_rules("T1") == {"rules_primary": "", "rules_secondary": ""}
+    assert "T1" not in lp._KRULES_CACHE           # transient failure → retry later
+
+
 def test_fetch_polymarket_pages_past_gammas_100_row_cap(monkeypatch):
     # Gamma silently caps limit at 100/page. The sweep must page by the ACTUAL
     # returned length — a deep market (page 2) was missed when the loop assumed
