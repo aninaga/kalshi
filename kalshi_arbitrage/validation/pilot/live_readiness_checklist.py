@@ -26,7 +26,7 @@ from kalshi_arbitrage.execution.kill_switch import KillSwitch
 from kalshi_arbitrage.matching import CompositeVerifier, load_labeled_pairs
 
 from kalshi_arbitrage.validation.matching.gate import MatchingGate
-from kalshi_arbitrage.validation.paper.analyze_paper_run import analyze, load_records
+from kalshi_arbitrage.validation.paper.analyze_paper_run import analyze, filter_records, load_records
 
 
 @dataclass
@@ -68,13 +68,19 @@ def check_matching_gate(labeled_pairs_path: str,
 
 
 def check_paper_run(executions_path: str,
-                    max_drift: Optional[float] = None) -> CheckResult:
+                    max_drift: Optional[float] = None,
+                    source: str = "paper",
+                    since: Optional[float] = None) -> CheckResult:
     max_drift = max_drift if max_drift is not None else Config.PAPER_MAX_EST_VS_REAL_DRIFT_USD
     if not os.path.exists(executions_path):
         return CheckResult("paper_run", False, f"no capture at {executions_path}")
-    report = analyze(load_records(executions_path))
+    # Evaluate only real paper fills (source='paper') — the shared capture file
+    # also holds sample fixtures and historical 'exchange'/'simulation' rows that
+    # would otherwise pollute drift/unwind. Pass --since to scope to one session.
+    report = analyze(filter_records(load_records(executions_path), source=source, since=since))
     if report.filled == 0:
-        return CheckResult("paper_run", False, "no filled paper executions")
+        return CheckResult("paper_run", False,
+                           f"no filled '{source}' executions (run `kalshi-arb monitor --execute`)")
     if report.polarity_errors > 0:
         return CheckResult("paper_run", False,
                            f"{report.polarity_errors} polarity errors (must be 0)")
@@ -111,17 +117,30 @@ def check_kill_switch(kill_switch: Optional[KillSwitch] = None) -> CheckResult:
                        "trip/reset functional" if (tripped and cleared) else "malfunction")
 
 
+def _default_labeled_path() -> str:
+    """The operator's labeled set, else the shipped 691-pair gold corpus."""
+    for p in ("market_data/matching/labeled_pairs.jsonl",
+              os.path.join(os.path.dirname(__file__), "..", "..", "..",
+                           "tests", "data", "matching", "labeled_corpus.jsonl")):
+        if os.path.exists(p):
+            return p
+    return "market_data/matching/labeled_pairs.jsonl"
+
+
 def check_live_readiness(
-    labeled_pairs_path: str = "market_data/matching/labeled_pairs.jsonl",
+    labeled_pairs_path: Optional[str] = None,
     executions_path: str = "market_data/executions/executions.jsonl",
     allowlist_path: Optional[str] = None,
+    paper_source: str = "paper",
+    paper_since: Optional[float] = None,
     checks: Optional[List[Callable[[], CheckResult]]] = None,
 ) -> ReadinessReport:
+    labeled_pairs_path = labeled_pairs_path or _default_labeled_path()
     report = ReadinessReport()
     if checks is None:
         checks = [
             lambda: check_matching_gate(labeled_pairs_path),
-            lambda: check_paper_run(executions_path),
+            lambda: check_paper_run(executions_path, source=paper_source, since=paper_since),
             lambda: check_allowlist(allowlist_path),
             lambda: check_kill_switch(),
         ]
@@ -131,8 +150,19 @@ def check_live_readiness(
     return report
 
 
-def main(argv=None) -> int:  # pragma: no cover
-    report = check_live_readiness()
+def main(argv=None) -> int:
+    import argparse
+    ap = argparse.ArgumentParser(prog="readiness")
+    ap.add_argument("--labeled", default=None, help="labeled set (default: shipped gold corpus)")
+    ap.add_argument("--executions", default="market_data/executions/executions.jsonl")
+    ap.add_argument("--allowlist", default=None)
+    ap.add_argument("--source", default="paper", help="paper-fill source to evaluate")
+    ap.add_argument("--since", type=float, default=None,
+                    help="scope paper_run to fills with ts >= this epoch (one session)")
+    args = ap.parse_args(argv)
+    report = check_live_readiness(
+        labeled_pairs_path=args.labeled, executions_path=args.executions,
+        allowlist_path=args.allowlist, paper_source=args.source, paper_since=args.since)
     print(report.summary())
     return 0 if report.passed else 1
 
