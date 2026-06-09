@@ -462,7 +462,11 @@ def refetch_candles(cities: list, sleep_s: float = 0.15, log=print) -> dict:
         # Re-derive each market's open/close window from the live event metadata
         # (same source the original build used); fall back to the candle span if
         # metadata is unavailable.
-        meta = {m.get("ticker"): m for m in (K.event_markets(tick) or [])}
+        try:
+            meta = {m.get("ticker"): m for m in (K.event_markets(tick) or [])}
+        except Exception as ex:  # noqa: BLE001 — transient; fall back to candle-span windows
+            log(f"[{cities}] WARN event_markets failed {tick}: {ex}")
+            meta = {}
         new_markets = []
         any_candles = False
         for m in rec.get("markets", []):
