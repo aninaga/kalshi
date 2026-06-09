@@ -413,6 +413,102 @@ def build_cache(cities: list, max_events: int = 250, sleep_s: float = 0.15,
     return counts
 
 
+def refetch_candles(cities: list, sleep_s: float = 0.15, log=print) -> dict:
+    """Refetch candles for ALREADY-CACHED events, IN PLACE, with the new OHLC keys.
+
+    Re-runs ``_kalshi_fetch.fetch_candles`` for every cached event of the given
+    cities and rewrites its pkl with the SAME record shape — the only change is
+    that each candle dict now carries the added ``price_*``/``volume``/quote-range
+    keys alongside the unchanged ``ts/yes_bid/yes_ask/mid/last``. Other record
+    fields (event_ticker, series, city, date, per-market ticker/floor/cap/result/
+    sub) are preserved verbatim from the existing pkl, so nothing the WeatherProvider
+    reads to build panels changes numerically.
+
+    Writes are ATOMIC (tmp file in the same dir + ``os.replace``) so a sibling
+    lane reading these pkls concurrently never sees a torn file. Idempotent /
+    resumable: an event whose refetch returns no usable candles is left untouched
+    (the existing pkl with old keys still works for panel building) and counted
+    under ``empty``.
+    """
+    from research.lab.providers import _kalshi_fetch as K
+
+    counts = {"events": 0, "empty": 0, "missing": 0}
+    series_set = {CITY_SERIES[c] for c in cities}
+    cached = sorted(fn[:-4] for fn in os.listdir(CACHE_DIR)
+                    if fn.endswith(".pkl")) if CACHE_DIR.is_dir() else []
+    for tick in cached:
+        city = _city_of(tick)
+        if city is None or CITY_SERIES.get(city) not in series_set:
+            continue
+        out = CACHE_DIR / f"{tick}.pkl"
+        try:
+            with open(out, "rb") as fh:
+                rec = pickle.load(fh)
+        except Exception:  # noqa: BLE001
+            counts["missing"] += 1
+            continue
+        # Resumable: skip events already carrying the new OHLC keys.
+        already = False
+        for m in rec.get("markets", []):
+            cs = m.get("candles") or []
+            if cs and "price_low" in cs[0]:
+                already = True
+            break
+        if already:
+            counts.setdefault("already", 0)
+            counts["already"] += 1
+            continue
+        series = rec.get("series") or CITY_SERIES[city]
+        # Re-derive each market's open/close window from the live event metadata
+        # (same source the original build used); fall back to the candle span if
+        # metadata is unavailable.
+        meta = {m.get("ticker"): m for m in (K.event_markets(tick) or [])}
+        new_markets = []
+        any_candles = False
+        for m in rec.get("markets", []):
+            mt = m.get("ticker")
+            md = meta.get(mt, {})
+            lo = _iso_ts(md.get("open_time"))
+            hi = _iso_ts(md.get("close_time") or md.get("expiration_time"))
+            if lo is None or hi is None:
+                # fall back to the existing candle ts span
+                old = m.get("candles") or []
+                ts = [c.get("ts") for c in old if c.get("ts") is not None]
+                if ts:
+                    lo, hi = int(min(ts)), int(max(ts)) + 60
+            candles = []
+            if mt is not None and lo is not None and hi is not None:
+                try:
+                    candles = K.fetch_candles(series, mt, lo, hi)
+                except Exception as ex:  # noqa: BLE001 — a transient/dead market
+                    log(f"[{cities}] WARN fetch failed {mt}: {ex}")
+                    candles = []
+                time.sleep(sleep_s)
+            if not candles:
+                # keep the existing candles so the pkl never regresses
+                candles = m.get("candles") or []
+            else:
+                any_candles = True
+            nm = dict(m)
+            nm["candles"] = candles
+            new_markets.append(nm)
+        new_rec = dict(rec)
+        new_rec["markets"] = new_markets
+        if not any_candles:
+            counts["empty"] += 1
+            # still rewrite if every market fell back? No — nothing new; skip write.
+            continue
+        tmp = out.with_suffix(".pkl.tmp")
+        with open(tmp, "wb") as fh:
+            pickle.dump(new_rec, fh)
+        os.replace(tmp, out)
+        counts["events"] += 1
+        if counts["events"] % 20 == 0:
+            log(f"[{cities}] refetched {counts}")
+    log(f"[{cities}] done: {counts}")
+    return counts
+
+
 def make_splits(train_frac: float = 0.70, val_frac: float = 0.15,
                 force: bool = False) -> dict:
     """Chronological train/val/test split over the cached events, locked.
@@ -452,6 +548,10 @@ def make_splits(train_frac: float = 0.70, val_frac: float = 0.15,
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--build", action="store_true", help="fetch the event cache")
+    ap.add_argument("--refetch", action="store_true",
+                    help="refetch candles for cached events IN PLACE (adds OHLC keys)")
+    ap.add_argument("--sleep-s", type=float, default=0.15,
+                    help="per-call throttle seconds (refetch/build)")
     ap.add_argument("--cities", default="NYC,CHI,MIA,AUS,DEN")
     ap.add_argument("--max-events", type=int, default=250,
                     help="newest settled events per city")
@@ -463,10 +563,17 @@ def main(argv=None) -> int:
         unknown = [c for c in cities if c not in CITY_SERIES]
         if unknown:
             raise SystemExit(f"unknown cities {unknown}; known: {sorted(CITY_SERIES)}")
-        print(json.dumps(build_cache(cities, max_events=a.max_events), indent=2))
+        print(json.dumps(build_cache(cities, max_events=a.max_events,
+                                     sleep_s=a.sleep_s), indent=2))
+    if a.refetch:
+        cities = [c.strip().upper() for c in a.cities.split(",") if c.strip()]
+        unknown = [c for c in cities if c not in CITY_SERIES]
+        if unknown:
+            raise SystemExit(f"unknown cities {unknown}; known: {sorted(CITY_SERIES)}")
+        print(json.dumps(refetch_candles(cities, sleep_s=a.sleep_s), indent=2))
     if a.make_splits:
         print(json.dumps(make_splits(), indent=2))
-    if not (a.build or a.make_splits):
+    if not (a.build or a.refetch or a.make_splits):
         prov = WeatherProvider()
         print(json.dumps({"family": prov.family, "markets": list(prov.markets),
                           "cached_events": prov.available(TEMP)}, indent=2))
