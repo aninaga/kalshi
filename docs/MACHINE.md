@@ -1,8 +1,50 @@
 # Running the cross-venue arbitrage machine
 
-This is the operator runbook. The machine finds genuine, risk-free, fee-clearing
-Kalshi↔Polymarket arbitrage, holds the basis-risk lookalikes for review, and can
-paper-trade (then live-trade) the survivors under existing safety gates.
+> ## ⚠️ CRITICAL — read before risking any capital (mid-2026, web-verified)
+>
+> An adversarial multi-source review surfaced three issues that override the
+> profitability story. None are code bugs; all are real-world constraints.
+>
+> **1. Legality / geo-access (can invalidate the whole premise for a US person).**
+> The deep-liquidity *global* Polymarket book this bot trades (`clob.polymarket.com`,
+> self-custodied USDC on Polygon) **remains geoblocked to US persons.** Reaching it
+> via VPN/non-US wallet violates Polymarket's ToS and risks **frozen funds and
+> enforcement action** (a US soldier was DOJ-charged after exactly this access
+> pattern). Since ~Dec 2025 there IS a legal US path — **Polymarket US / QCX LLC**,
+> a CFTC-regulated DCM — but it is a *separate, walled* product (USD via FCMs, full
+> KYC, no self-custodied wallet) whose contracts/liquidity do **not** mirror the
+> global book. **A single US-resident identity cannot legitimately run both legs**
+> (Kalshi US-KYC on one side + the liquid *global* Polymarket on the other). Confirm
+> your own legal standing before funding anything.
+>
+> **2. Basis risk is the binding constraint, not a footnote.** Kalshi (centralized,
+> CFTC source-agency rules) and Polymarket (UMA token-vote oracle) **demonstrably
+> resolve the same event differently** — e.g. the Feb-2026 Super Bowl halftime
+> market settled YES on Polymarket ($1) but ~$0.26 on Kalshi; the Zelensky-suit and
+> Ukraine-minerals markets saw multi-day UMA disputes/manipulation; **1,150+
+> disputed Polymarket markets in 2026 alone.** This divergence is *worst* in the
+> long-dated, subjective markets the bot favors (arrests, "Musk trillionaire",
+> elections). A "<$1 → $1" pair across two differently-governed oracles is really a
+> **bet that they agree** — and they regularly don't. Treat the `uncertain`
+> (held-for-review) flag as a hard gate, and confirm BOTH venues' resolution rules
+> match word-for-word before allowlisting anything.
+>
+> **3. Capital lockup crushes the return.** Profit on a months-out market is locked
+> from entry to resolution. A "2% guaranteed" edge held ~4–7 months is only
+> **~3.5–6% annualized** before fees — and one divergent resolution (issue 2) can
+> turn the whole position negative. The honest expected value, after basis risk and
+> lockup, is far thinner than the gross capturable, and can be negative.
+>
+> **Bottom line:** the *code* is sound and the gross capturable is real, but the
+> *strategy* is gated by legality (issue 1) and dominated by basis risk (issue 2).
+> The shadow run measures gross capturable at real depth; it does NOT price in
+> resolution divergence or your legal access. Do not treat its numbers as net,
+> risk-free, or realizable until issues 1–2 are resolved for your situation.
+
+This is the operator runbook. The machine finds genuine, fee-clearing
+Kalshi↔Polymarket arbitrage candidates, holds the basis-risk lookalikes for
+review, and can paper-trade (then live-trade) the survivors under existing safety
+gates — subject to the critical caveats above.
 
 **Honest expectation first.** Real cross-venue arb on identical contracts is
 small, illiquid, capital-locked, and latency-insensitive. The realistic envelope
