@@ -11,6 +11,17 @@ propose; that judgement is yours, grounded in the EDA.
 - Read the EDA: calibration bias by price bucket, the anchoring-gap distribution,
   quote staleness, ladder shape, sample sizes. Ask: *where is this book deviating
   from a fair/efficient price, and why might that deviation PERSIST?*
+- **Mine the widened lenses, don't just read the headline.** The EDA's
+  `derived_lenses` rank operator-composition features (ratios / deltas / rolling /
+  interactions / z-scores over the existing fields) by how strongly they predict
+  the calibration RESIDUAL — i.e. structure the price is NOT already pricing. The
+  strongest lens is often NOT calibration or anchoring (e.g. a within-game
+  z-score, an interaction, a recent-delta). Build hypotheses around these
+  non-obvious lenses. Likewise `regimes` shows unsupervised in-game states with
+  per-regime `mean_residual`: a mechanism that only holds in one regime ("when
+  the game is in state R the line is mis-marked") is a valid, distinct hypothesis.
+- Deliberately propose at least one hypothesis grounded in a NON-headline lens or
+  a specific regime — not just the most obvious calibration/anchoring read.
 - A hypothesis is only worth proposing if it has (a) a **mechanism** — a reason
   the mispricing exists and survives (behavioral anchoring, slow re-marking, thin
   tail liquidity, structural clock effects…), and (b) a **live-tradeable signal**
