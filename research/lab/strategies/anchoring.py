@@ -96,15 +96,19 @@ def _anchoring_gap_numpy(panel: Panel) -> np.ndarray:
     """Inline gap: pace projection of the relevant accumulator minus the line.
 
     Totals project final points from ``panel.total``; spreads project final
-    signed home margin from ``panel.margin``. Projection = level * 2880 /
-    elapsed (NBA regulation seconds), guarded for the early-game divide.
+    signed home margin from ``panel.margin``. Projection = level * duration /
+    elapsed (``panel.duration_sec``; NBA regulation 2880s for legacy panels),
+    guarded for the early-game divide. Untimed events have no pace: all-NaN.
     """
     elapsed = np.asarray(panel.elapsed_sec, dtype=float)
     mid = np.asarray(panel.mid, dtype=float)
+    dur = getattr(panel, "duration_sec", 2880.0)
+    if dur is None:
+        return np.full(len(elapsed), np.nan)
     accum = panel.total if panel.market == TOTAL else panel.margin
     accum = np.asarray(accum, dtype=float)
     with np.errstate(divide="ignore", invalid="ignore"):
-        proj = np.where(elapsed > 120.0, accum * 2880.0 / elapsed, np.nan)
+        proj = np.where(elapsed > 120.0, accum * float(dur) / elapsed, np.nan)
     return proj - mid
 
 

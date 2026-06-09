@@ -141,6 +141,7 @@ market_data/orchestrator_state*.json
 # Large run outputs (24h simulations, study sweeps, US account exports)
 market_data/run_24h_*/
 market_data/nba_studies/
+market_data/weather/_cache/
 market_data/sim_24h_*.json
 market_data/backtest_results.json
 market_data/pnl_analysis.json

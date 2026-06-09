@@ -18,7 +18,8 @@ import numpy as np
 
 from research.lab.types import Panel
 
-# Regulation game length in seconds; pace projection scales the live level to it.
+# Fallback event duration in seconds (NBA regulation) for panels that predate
+# ``Panel.duration_sec``; pace projection scales the live level to it.
 _GAME_SEC = 2880.0
 # Below this much elapsed time a pace projection is too noisy to trust (matches
 # the ``e > 120`` guard in the source alpha scripts): emit NaN instead.
@@ -26,17 +27,28 @@ _MIN_ELAPSED_SEC = 120.0
 _EPS = 1e-9
 
 
-def pace_projection(panel: Panel) -> np.ndarray:
-    """Pace-projected final total: ``total * 2880 / elapsed`` (TOTAL market).
+def _duration_sec(panel) -> float | None:
+    """The panel's event duration; ``None`` = untimed (pace does not apply)."""
+    return getattr(panel, "duration_sec", _GAME_SEC)
 
-    The live scoring rate extrapolated to a full regulation game. Bars with
+
+def pace_projection(panel: Panel) -> np.ndarray:
+    """Pace-projected final level: ``total * duration / elapsed``.
+
+    The live accumulation rate extrapolated to the event's full duration
+    (``panel.duration_sec``; NBA regulation 2880s for legacy panels). Bars with
     elapsed time at or below :data:`_MIN_ELAPSED_SEC` are NaN (projection is too
     noisy that early), mirroring the ``e > 120`` guard in the source scripts.
+    UNTIMED events (``duration_sec is None``) have no pace: all-NaN, so
+    pace-conditioned strategies never fire on them.
     """
     elapsed = np.asarray(panel.elapsed_sec, dtype=float)
     total = np.asarray(panel.total, dtype=float)
+    dur = _duration_sec(panel)
+    if dur is None:
+        return np.full(len(elapsed), np.nan)
     with np.errstate(divide="ignore", invalid="ignore"):
-        proj = total * _GAME_SEC / elapsed
+        proj = total * float(dur) / elapsed
     return np.where(elapsed > _MIN_ELAPSED_SEC, proj, np.nan)
 
 

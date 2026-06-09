@@ -39,11 +39,14 @@ def _market_gap(panel) -> np.ndarray | None:
     if panel.market == TOTAL:
         return np.asarray(signals.anchoring_gap(panel), float)
     if panel.market == SPREAD:
+        dur = getattr(panel, "duration_sec", 2880.0)
+        if dur is None:  # untimed event class: no pace, no anchoring gap
+            return None
         e = np.asarray(panel.elapsed_sec, float)
         mid = np.asarray(panel.mid, float)
         margin = np.asarray(panel.margin, float)
         with np.errstate(divide="ignore", invalid="ignore"):
-            proj = np.where(e > 120.0, margin * 2880.0 / e, np.nan)
+            proj = np.where(e > 120.0, margin * float(dur) / e, np.nan)
         return proj - mid
     return None  # WINNER: no anchoring gap
 
@@ -80,9 +83,8 @@ def _derived_features(panel) -> dict:
             out[i] = np.nanstd(a[lo:i + 1])
         return out
 
-    return {
+    feats_out = {
         "abs_margin": np.abs(margin),
-        "time_remaining": np.maximum(2880.0 - e, 0.0),
         "margin_per_min": margin / mins,
         "total_per_min": total / mins,
         "mid_zscore": _zscore_in_game(mid),
@@ -91,9 +93,15 @@ def _derived_features(panel) -> dict:
         "margin_delta3": _delta(margin, 3),
         "mid_roll_std5": _roll_std(mid, 5),
         "lead_change_rate": lead / mins,
-        "margin_x_timeleft": margin * np.maximum(2880.0 - e, 0.0) / 2880.0,
         "absmargin_x_mid": np.abs(margin) * mid,
     }
+    # Clock-based lenses only exist for TIMED event classes.
+    dur = getattr(panel, "duration_sec", 2880.0)
+    if dur is not None:
+        dur = float(dur)
+        feats_out["time_remaining"] = np.maximum(dur - e, 0.0)
+        feats_out["margin_x_timeleft"] = margin * np.maximum(dur - e, 0.0) / dur
+    return feats_out
 
 
 def _residual_label(panel) -> np.ndarray | None:

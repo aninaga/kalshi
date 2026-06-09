@@ -119,6 +119,21 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _family_of(market) -> Optional[str]:
+    """Best-effort event-class family for ``market`` via the provider registry.
+
+    ``None`` when unresolvable — governance then counts the row toward every
+    family (conservative). Never raises: telemetry, not the critical path.
+    """
+    if not isinstance(market, str) or not market:
+        return None
+    try:
+        from research.lab import providers
+        return providers.family_of(market)
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def _append_ledger(ledger_path: str, row: dict) -> None:
     """Append one settled-trial row to the shared JSONL ledger.
 
@@ -158,6 +173,7 @@ def run_analyst(
     executor: Optional[Executor] = None,
     path: Optional[str] = None,
     ledger_path: Optional[str] = None,
+    family: Optional[str] = None,
 ) -> dict:
     """Run one pass of the autonomous analyst harness.
 
@@ -176,6 +192,10 @@ def run_analyst(
         executor: callable(assignment_dict) -> result_dict. Defaults to a no-op
             (the real, model-specific executor is injected; see OPERATING_MODEL.md).
         path: optional registry path override (forwarded to ``lab.hypothesis``).
+        family: event-class family stamped on every ledger row (the per-family
+            DSR partition key). When ``None``, derived per-hypothesis from its
+            market via the provider registry (best effort; legacy rows without
+            a family count toward every family's hurdle — never weaker).
 
     Returns a summary dict::
 
@@ -259,12 +279,17 @@ def run_analyst(
         # Append the settled trial to the shared ledger so the next director
         # pass ranks against it and governance counts it toward the DSR N.
         if ledger_path:
+            hyp_market = getattr(ref, "market", None)
             _append_ledger(ledger_path, {
                 "hypothesis_id": hyp_id,
                 "verdict": verdict,
                 "results": results_payload if results_payload is not None else {},
                 "agent": AGENT,
                 "settled": _now(),
+                # Per-family DSR partition key (+ the market it was derived
+                # from, so governance can re-derive on legacy/foreign rows).
+                "family": family if family is not None else _family_of(hyp_market),
+                "market": hyp_market,
             })
 
         summary["processed"] += 1
@@ -287,6 +312,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument("--market", default=None, help="restrict to one market (winner/total/spread)")
     ap.add_argument("--ledger", default=DEFAULT_LEDGER,
                     help=f"shared trial ledger (default: {DEFAULT_LEDGER}); '' to disable")
+    ap.add_argument("--family", default=None,
+                    help="event-class family stamped on ledger rows (default: "
+                         "derived from each hypothesis's market)")
     a = ap.parse_args(argv)
 
     # The CLI runs with the model-agnostic no-op executor: it PREPARES and prints
@@ -299,6 +327,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         market=a.market,
         executor=_noop_executor,
         ledger_path=(a.ledger or None),
+        family=a.family,
     )
     print(json.dumps(summary, indent=2, default=str))
     return 0

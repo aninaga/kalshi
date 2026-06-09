@@ -54,6 +54,11 @@ class Panel:
     final_total: Optional[float] = None
     final_margin: Optional[float] = None
     split: str = "unknown"           # "train" | "val" | "test" | "unknown"
+    # Trading-relevant event duration in seconds. Defaults to NBA regulation
+    # (2880s) so legacy panels keep their numerics; providers for other event
+    # classes set their own. ``None`` means UNTIMED (no in-event clock — e.g. a
+    # CPI print): pace-style signals emit NaN and never fire.
+    duration_sec: Optional[float] = 2880.0
 
     @property
     def n(self) -> int:

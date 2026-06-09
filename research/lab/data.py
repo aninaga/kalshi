@@ -259,14 +259,15 @@ def _spread_ladder(odds_long: pd.DataFrame, home_tri: str, away_tri: str, index)
 
 
 # --------------------------------------------------------------------------- #
-# per-game Panel construction
+# per-game Panel construction (the NBA family's builder)
 # --------------------------------------------------------------------------- #
-def load_panel(game: dict, market: str) -> Panel | None:
-    """Build one :class:`Panel` for ``game`` and ``market`` from cache.
+def _nba_load_panel(game: dict, market: str) -> Panel | None:
+    """Build one :class:`Panel` for ``game`` and ``market`` from the NBA cache.
 
     ``game`` is ``{date, away, home[, espn_id]}``. Returns ``None`` if the cache
     is absent or the game lacks usable odds for this market. Cache-only: never
-    triggers a live build.
+    triggers a live build. Reached via ``providers.nba.NBAProvider`` behind the
+    public ``load_panel`` façade.
     """
     if market not in _MARKET_KINDS:
         raise ValueError(f"unknown market {market!r}; expected one of {sorted(_MARKET_KINDS)}")
@@ -348,33 +349,63 @@ def load_panel(game: dict, market: str) -> Panel | None:
 
 
 # --------------------------------------------------------------------------- #
-# bulk loader
+# public API — NBA fast-path + provider-seam delegation
 # --------------------------------------------------------------------------- #
+# The market string resolves which event-class family serves it. The NBA
+# markets are served MODULE-LOCALLY (no bounce through providers.nba): the
+# test suite purges research.lab.* between tests while test modules retain
+# their original module objects, so a cross-module hop would resolve a FRESH
+# data module and silently bypass monkeypatches on the held one. Keeping the
+# NBA path inside this module's globals preserves the historical patching
+# contract exactly. Non-NBA markets delegate to their registered provider.
+def _provider(market: str):
+    from research.lab import providers
+    return providers.for_market(market)
+
+
+def load_panel(game, market: str) -> Panel | None:
+    """Build one :class:`Panel` for one event of ``market``'s family.
+
+    NBA markets build module-locally (``_nba_load_panel``); other markets
+    delegate to the owning provider. Cache-only — never triggers a live
+    build. Raises ``ValueError`` for an unknown market.
+    """
+    if market in _MARKET_KINDS:
+        return _nba_load_panel(game, market)
+    return _provider(market).load_panel(game, market)
+
+
 def load_panels(market: str, split: str | None = None, *,
-                start: str = _DEFAULT_START, end: str = _DEFAULT_END,
+                start: str | None = None, end: str | None = None,
                 limit: int | None = None) -> list[Panel]:
     """Load every cached :class:`Panel` for ``market`` in the ``split`` filter.
 
-    Cache-only and split-safe: enumerates games from the on-disk cache, applies
-    the date window ``[start, end]`` and the ``split`` predicate (TEST excluded
-    unless ``split == "test"``), then builds one Panel per game (skipping any the
-    cache or odds can't support). ``limit`` caps the number of games considered
-    *after* filtering, before loading.
+    Cache-only and split-safe: enumerates the owning family's cache, applies
+    the date window ``[start, end]`` (family defaults when ``None``) and the
+    ``split`` predicate (TEST excluded unless ``split == "test"``), then builds
+    one Panel per event (skipping any the cache or odds can't support).
+    ``limit`` caps the number of events considered *after* filtering.
     """
-    predicate, _ = _split_filter(split)
-    games = _cached_games(market)
-    games = [g for g in games
-             if start <= g["date"] <= end and predicate(_gid_of(g))]
-    if limit is not None:
-        games = games[:limit]
-    panels: list[Panel] = []
-    for g in games:
-        p = load_panel(g, market)
-        if p is not None:
-            panels.append(p)
-    return panels
+    if market in _MARKET_KINDS:
+        predicate, _ = _split_filter(split)
+        lo = start if start is not None else _DEFAULT_START
+        hi = end if end is not None else _DEFAULT_END
+        games = [g for g in _cached_games(market)
+                 if lo <= g["date"] <= hi and predicate(_gid_of(g))]
+        if limit is not None:
+            games = games[:limit]
+        panels: list[Panel] = []
+        for g in games:
+            p = load_panel(g, market)
+            if p is not None:
+                panels.append(p)
+        return panels
+    return _provider(market).load_panels(market, split, start=start, end=end,
+                                         limit=limit)
 
 
 def available(market: str) -> int:
-    """Count cached games for ``market`` (by pkl presence; no build, no network)."""
-    return len(_cached_games(market))
+    """Count cached events for ``market`` (by cache presence; no build, no network)."""
+    if market in _MARKET_KINDS:
+        return len(_cached_games(market))
+    return _provider(market).available(market)

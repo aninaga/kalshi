@@ -64,6 +64,7 @@ def evaluate(
     walkforward: bool = True,
     adversarial: bool = True,
     ledger_path: Optional[str] = None,
+    family: Optional[str] = None,
 ) -> GateResult:
     """Evaluate ``trades`` through the promotion gate plus the lab's extra views.
 
@@ -93,6 +94,11 @@ def evaluate(
         behavior is byte-identical to the historical default. DSR is informational
         in the gate, so this only tightens the *reported* hurdle — it never changes
         or weakens any decisive (block-bootstrap / cluster-knockout) gate.
+    family : str | None
+        Optional event-class family (e.g. ``"nba"``, ``"weather"``) partitioning
+        the DSR multiple-testing count: only this family's trials (plus
+        family-undeterminable legacy rows, conservatively) feed N and V[SR].
+        ``None`` keeps the historical global count.
 
     Returns
     -------
@@ -124,7 +130,7 @@ def evaluate(
     # ledger is supplied; otherwise fall back to the cold-start placeholders.
     if ledger_path:
         from research.lab import governance
-        gov = governance.governance_params(ledger_path)
+        gov = governance.governance_params(ledger_path, family=family)
     else:
         gov = {"n_trials": 1, "sharpe_variance": 1.0,
                "n_trials_source": "cold-start placeholder (no ledger_path)",

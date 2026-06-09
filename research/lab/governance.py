@@ -96,6 +96,53 @@ def _is_finite_number(x) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Event-class family partition
+# ---------------------------------------------------------------------------
+# The DSR hurdle is partitioned by event-class FAMILY (nba, weather, ...):
+# independent searches in independent event classes are separate meta-
+# experiments, so a dart thrown at NBA does not raise the bar for a CPI trial.
+# CONSERVATIVE rule: a record whose family cannot be determined (legacy ledger
+# rows predating the "family" key, unresolvable markets) counts toward EVERY
+# requested family — partitioning may only ever LOWER a hurdle by excluding
+# rows that provably belong to a different family; ambiguity never lowers it.
+
+
+def _row_family(row: dict):
+    """The ledger row's family, or ``None`` when undeterminable (legacy)."""
+    fam = row.get("family")
+    if isinstance(fam, str) and fam:
+        return fam
+    market = row.get("market")
+    if isinstance(market, str) and market:
+        return _family_of_market(market)
+    return None
+
+
+def _family_of_market(market: str):
+    """Resolve a market string to its owning family via the provider registry.
+
+    ``None`` when unresolvable (unknown market, providers unavailable) — the
+    caller then treats the record as belonging to every family (conservative).
+    """
+    try:
+        from research.lab import providers
+        return providers.family_of(market)
+    except Exception:  # noqa: BLE001 — governance must never crash on lookup
+        return None
+
+
+def _family_match(record_family, family) -> bool:
+    """Does a record with ``record_family`` count toward ``family``?
+
+    ``family is None`` (global view) matches everything; ``record_family is
+    None`` (undeterminable) matches every requested family (conservative).
+    """
+    if family is None or record_family is None:
+        return True
+    return record_family == family
+
+
+# ---------------------------------------------------------------------------
 # Per-trial Sharpe extraction
 # ---------------------------------------------------------------------------
 
@@ -173,6 +220,8 @@ def _row_sharpe(results: dict) -> float | None:
 def trial_count(
     ledger_path: str,
     registry_path: str = hypothesis.DEFAULT_PATH,
+    *,
+    family: str | None = None,
 ) -> int:
     """Number of DISTINCT trials the org has ever EVALUATED — the DSR's ``N``.
 
@@ -194,6 +243,11 @@ def trial_count(
     thrown), and a registry hypothesis already represented by a ledger row of
     the same id is not double-counted.
 
+    Partitioning: with ``family`` set, only trials belonging to that event-class
+    family count — except records whose family is UNDETERMINABLE (legacy rows
+    without a ``family`` key and an unresolvable market), which conservatively
+    count toward every family. ``family=None`` is the historical global count.
+
     Returns at least ``1`` (the candidate being judged is itself a trial; with
     no history the multiple-testing correction is meaningless and DSR collapses
     to a plain PSR vs zero — see ``research.scorer.dsr.expected_max_sharpe``).
@@ -202,6 +256,8 @@ def trial_count(
     anon_rows = 0  # ledger rows with no usable id still count as trials.
 
     for row in _read_jsonl(ledger_path):
+        if not _family_match(_row_family(row), family):
+            continue
         hid = row.get("hypothesis_id") or row.get("id")
         if isinstance(hid, str) and hid:
             ids.add(hid)
@@ -209,6 +265,8 @@ def trial_count(
             anon_rows += 1
 
     # Registry hypotheses that reached a verdict (deduped against ledger ids).
+    # A hypothesis's family is recovered from its market string (the registry
+    # schema is unchanged); unresolvable markets count toward every family.
     try:
         hyps = hypothesis.query(path=registry_path)
     except Exception:
@@ -216,14 +274,22 @@ def trial_count(
     for h in hyps:
         verdict = getattr(h, "verdict", None)
         hid = getattr(h, "id", None)
-        if verdict and isinstance(hid, str) and hid:
-            ids.add(hid)
+        if not (verdict and isinstance(hid, str) and hid):
+            continue
+        if family is not None:
+            market = getattr(h, "market", None)
+            h_fam = _family_of_market(market) if isinstance(market, str) else None
+            if not _family_match(h_fam, family):
+                continue
+        ids.add(hid)
 
     return max(1, len(ids) + anon_rows)
 
 
 def _sharpe_variance_estimate(
     ledger_path: str,
+    *,
+    family: str | None = None,
 ) -> tuple[float, bool]:
     """Core V[SR] computation. Returns ``(variance, is_real_estimate)``.
 
@@ -237,6 +303,8 @@ def _sharpe_variance_estimate(
     anon_values: list[float] = []
 
     for row in _read_jsonl(ledger_path):
+        if not _family_match(_row_family(row), family):
+            continue
         s = _row_sharpe(row.get("results", {}))
         if s is None or not math.isfinite(s):
             continue
@@ -262,6 +330,8 @@ def _sharpe_variance_estimate(
 def sharpe_variance(
     ledger_path: str,
     registry_path: str = hypothesis.DEFAULT_PATH,
+    *,
+    family: str | None = None,
 ) -> float:
     """Cross-trial variance of per-trial Sharpe across the ledger — DSR's V[SR].
 
@@ -279,15 +349,18 @@ def sharpe_variance(
     Note: only the ledger is mined for Sharpe values — the registry is used by
     :func:`trial_count` for ``N`` but does not carry comparable per-trial PnL,
     so it does not contribute to V[SR]. (``registry_path`` is accepted for
-    signature symmetry and future use.)
+    signature symmetry and future use.) ``family`` partitions by event class
+    exactly as in :func:`trial_count`.
     """
-    var, _is_real = _sharpe_variance_estimate(ledger_path)
+    var, _is_real = _sharpe_variance_estimate(ledger_path, family=family)
     return var
 
 
 def governance_params(
     ledger_path: str,
     registry_path: str = hypothesis.DEFAULT_PATH,
+    *,
+    family: str | None = None,
 ) -> dict:
     """Compute ``(N, V[SR])`` AND report where each number came from.
 
@@ -314,16 +387,23 @@ def governance_params(
 
     Pure / side-effect free / no network. Safe on missing or empty paths
     (degrades to ``N=1``, ``V[SR]=1.0``, both sources "cold-start placeholder").
+    ``family`` partitions both numbers by event class (see :func:`trial_count`);
+    ``family=None`` reproduces the historical global behavior — and the
+    historical return shape — exactly. When a partition IS requested it is
+    echoed back under a fifth key ``"family"`` for auditability.
     """
-    n = trial_count(ledger_path, registry_path=registry_path)
-    v, v_is_real = _sharpe_variance_estimate(ledger_path)
+    n = trial_count(ledger_path, registry_path=registry_path, family=family)
+    v, v_is_real = _sharpe_variance_estimate(ledger_path, family=family)
 
     n_source = "real-ledger" if n > _PLACEHOLDER_N_TRIALS else "cold-start placeholder"
     v_source = "real-ledger" if v_is_real else "cold-start placeholder"
 
-    return {
+    out = {
         "n_trials": int(n),
         "sharpe_variance": float(v),
         "n_trials_source": n_source,
         "sharpe_variance_source": v_source,
     }
+    if family is not None:
+        out["family"] = family
+    return out
