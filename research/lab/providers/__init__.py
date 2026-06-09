@@ -28,6 +28,7 @@ from typing import Optional
 _BUILTINS: dict = {
     "nba": ("research.lab.providers.nba", "NBAProvider"),
     "weather": ("research.lab.providers.weather", "WeatherProvider"),
+    "crypto": ("research.lab.providers.crypto", "CryptoProvider"),
 }
 
 # family -> provider instance (explicit registrations + materialized builtins)
