@@ -60,19 +60,45 @@ def main(argv=None) -> int:
         print(f"No ledger at {args.path} (run `kalshi-arb monitor --ledger {args.path}`).",
               file=sys.stderr)
         return 1
-    rows = load(args.path)
-    if not rows:
+    all_rows = load(args.path)
+    if not all_rows:
         print("Ledger is empty.", file=sys.stderr)
         return 0
-    s = summarize(rows)
+    snaps = [r for r in all_rows if r.get("kind") == "snapshot"]
+    rows = [r for r in all_rows if r.get("kind") != "snapshot"]
 
-    print(f"=== paper-capture ledger: {args.path} ===")
-    print(f"episodes={s['episodes']}  capturable net=${s['total_net']:.2f}  "
-          f"(sum of best-entry-per-episode, fee-aware)")
-    print("episode duration:", "  ".join(f"{k}={v}" for k, v in sorted(s["buckets"].items())))
-    print("\ntop markets by captured net:")
-    for mkt, agg in sorted(s["by_market"].items(), key=lambda kv: -kv[1]["net"])[:15]:
-        print(f"  ${agg['net']:7.2f}  ({agg['n']:2d} episodes)  {mkt[:50]}")
+    print(f"=== capture ledger: {args.path} ===")
+
+    # Time-series snapshots: capturable $ at real depth, sampled over time.
+    if snaps:
+        import statistics
+        nets = [float(r.get("open_net") or 0) for r in snaps]
+        counts = [int(r.get("open_count") or 0) for r in snaps]
+        span_h = (snaps[-1].get("epoch", 0) - snaps[0].get("epoch", 0)) / 3600.0
+        print(f"snapshots={len(snaps)} over {span_h:.1f}h | capturable net/snapshot: "
+              f"mean=${statistics.mean(nets):.2f} median=${statistics.median(nets):.2f} "
+              f"max=${max(nets):.2f} | open arbs: mean={statistics.mean(counts):.1f}")
+        # Which markets show up most across snapshots (persistent capturable edge).
+        from collections import Counter
+        seen = Counter()
+        for r in snaps:
+            for k in (r.get("by_market") or {}):
+                seen[k] += 1
+        if seen:
+            print("  most-persistent capturable markets (snapshot hit count):")
+            for k, n in seen.most_common(10):
+                print(f"    {n:4d}/{len(snaps)}  {k}")
+
+    if rows:
+        s = summarize(rows)
+        print(f"\nepisodes={s['episodes']}  capturable net=${s['total_net']:.2f}  "
+              f"(sum of best-entry-per-episode, fee-aware)")
+        print("episode duration:", "  ".join(f"{k}={v}" for k, v in sorted(s["buckets"].items())))
+        print("top markets by captured net:")
+        for mkt, agg in sorted(s["by_market"].items(), key=lambda kv: -kv[1]["net"])[:15]:
+            print(f"  ${agg['net']:7.2f}  ({agg['n']:2d} episodes)  {mkt[:50]}")
+    else:
+        s = {"total_net": 0.0}
 
     if args.session_hours > 0:
         per_day = s["total_net"] / args.session_hours * 24

@@ -65,6 +65,10 @@ def main(argv=None) -> int:
     ap.add_argument("--allowlist", type=str, default=None)
     ap.add_argument("--ledger", type=str, default=None,
                     help="Append each captured episode (paper fill) as JSONL to this path.")
+    ap.add_argument("--snapshot-every", type=float, default=0,
+                    help="Also append a time-series SNAPSHOT row (aggregate capturable "
+                         "net + per-market) every N seconds — builds a continuous dataset "
+                         "even for standing arbs that never close (0 = off).")
     ap.add_argument("--execute", action="store_true",
                     help="Route each newly-opened gap through the ArbitrageExecutor "
                          "(paper unless EXECUTION_MODE=live AND allowlisted AND armed).")
@@ -99,6 +103,7 @@ def main(argv=None) -> int:
     captured_total = 0.0
     t_start = time.time()
     last_refresh = t_start
+    last_snapshot = t_start
     print(f"{'time':<9} {'event':<6} {'net$':>7} {'edge':>6} {'size':>7}  market", flush=True)
 
     while True:
@@ -141,6 +146,17 @@ def main(argv=None) -> int:
                                   "peak_net": round(ep["peak_net"], 4),
                                   "peak_edge": round(ep["peak_edge"], 5),
                                   "open_minutes": round(dur / 60, 2), "ticks": ep["ticks"]})
+
+        # Periodic time-series snapshot of the CURRENT capturable state — records
+        # standing arbs (which never "close") so the dataset accrues continuously.
+        if args.snapshot_every and now - last_snapshot >= args.snapshot_every:
+            last_snapshot = now
+            _record(args.ledger, {
+                "ts": ts, "kind": "snapshot", "epoch": round(now, 1),
+                "open_count": len(live),
+                "open_net": round(sum(r["net"] for r in live.values()), 4),
+                "by_market": {k: round(r["net"], 2) for k, r in live.items()},
+            })
 
         if args.duration and now - t_start >= args.duration:
             break
