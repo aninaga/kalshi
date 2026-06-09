@@ -44,8 +44,10 @@ from research.lab.types import FillResult, Panel, WINNER
 PM_FLAT_TAKER_RATE = 0.02
 PM_CURVE_FEE_RATE_BPS = 1000
 
-# Sides that bet the COMPLEMENT of the ladder's quoted P(over/cover).
-_SHORT_SIDES = frozenset({"under", "short", "short_home", "short_away", "no", "sell"})
+# Sides that bet the COMPLEMENT of the ladder's quoted P(over/cover) — i.e. the
+# line is too HIGH (final outcome < strike). Must stay in sync with
+# strategy._OVER_SIDES (its complement): cover_away bets below, cover_home above.
+_SHORT_SIDES = frozenset({"under", "short", "short_home", "short_away", "no", "sell", "cover_away"})
 
 
 def _interp_at(ts: float, xp: np.ndarray, fp: np.ndarray) -> float:

@@ -219,3 +219,32 @@ def test_smoke_returns_trades_of_expected_length():
     df = trades.df()
     assert len(df) == 12
     assert set(["game_id", "entry_ts", "exit_ts", "entry_price", "payoff"]).issubset(df.columns)
+
+
+def test_side_taxonomy_consistent_with_execution():
+    """fill (execution._SHORT_SIDES) and settlement (strategy._OVER_SIDES) must
+    agree on every side's direction — a mismatch silently inverts spread P&L
+    (regression: cover_home/cover_away were in neither set; found by the agent test)."""
+    from research.lab import execution, strategy
+    over, short = strategy._OVER_SIDES, execution._SHORT_SIDES
+    assert over.isdisjoint(short)                      # no side both above and below
+    assert "cover_home" in over and "cover_home" not in short   # long/above
+    assert "cover_away" in short and "cover_away" not in over    # short/below
+
+
+def test_spread_cover_home_fill_and_settlement_align():
+    """cover_home = bet final home margin > strike: fill is long (p_over), and a
+    game that finishes above the strike must settle as a WIN."""
+    from research.lab import execution
+    from research.lab.types import SPREAD, synthetic_panel
+    p = synthetic_panel(market=SPREAD, n=48, seed=3)
+    p.final_margin = max(p.ladder) + 50.0              # finishes above EVERY listed strike
+    s = Strategy(name="t", entry=lambda pan: pan.elapsed_sec >= 0,
+                 side=lambda pan, i: "cover_home", min_elapsed=0, max_elapsed=3000,
+                 max_stale_min=10_000)
+    trades = s.run([p], fill_model=execution.FillModel(half_spread=0.0))
+    assert len(trades) == 1
+    t = trades.rows[0]
+    # cover_home bets "final home margin > filled strike": fill long, settle above.
+    assert t.payoff == float(p.final_margin > t.entry_strike) == 1.0
+    assert 0.0 < t.entry_price < 1.0                   # filled long at the real mid, not 0.50

@@ -43,7 +43,11 @@ from research.lab.types import (
 
 # Side labels that mean "bet the outcome ends ABOVE the strike / home wins".
 # Everything else is treated as the opposite ("below" / away).
-_OVER_SIDES = frozenset({"over", "long_home", "home", "long", "buy", "yes"})
+# Sides that bet the line is too LOW (final outcome > strike): over / long-home /
+# cover-home. Their complement (under / short / cover-away) bets below. These must
+# stay in sync with execution._SHORT_SIDES so fill and settlement agree on the
+# direction (a mismatch silently inverts spread P&L — found by the live agent test).
+_OVER_SIDES = frozenset({"over", "long_home", "home", "long", "buy", "yes", "cover_home"})
 
 
 def staleness_min(panel: Panel) -> np.ndarray:
