@@ -1,11 +1,9 @@
 """research.lab.hypothesis — the dynamic hypothesis registry.
 
-An append-only JSONL store of :class:`research.lab.types.Hypothesis` rows. This
-is the runtime replacement for the hard-coded direction menus
-(``agents/usage/edge_hunt_loop.py::DIRECTIONS`` /
-``agents/orchestrator/run.py::DIRECTION_ROTATION``): an analyst-agent ORIGINATES
-ideas at runtime by ``register``-ing them, ``claim``-s an open one to work on it,
-and ``update``-s its verdict/results when done.
+An append-only JSONL store of :class:`research.lab.types.Hypothesis` rows. There
+are no hard-coded direction menus: an analyst-agent ORIGINATES ideas at runtime
+by ``register``-ing them, ``claim``-s an open one to work on it, and
+``update``-s its verdict/results when done.
 
 Design notes
 ------------

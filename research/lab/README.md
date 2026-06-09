@@ -174,7 +174,11 @@ list, no `DIRECTIONS`/`DIRECTION_ROTATION` menu, no `seed_defaults` (all removed
    families, deepening PROMISING leads). `incorporate_results()` folds recorded
    verdicts back into the registry so the pool evolves. No round-robin.
 
-Drivers (`agents/usage/edge_hunt_loop.py`, `lab/analyst.py`,
-`agents/orchestrator/run.py`) all route through scout → director → feedback.
-Cold start = scout (agent), selection = director (agent), learning = feedback
-(results). The strategies are the agent's; the layer is ours.
+Each of these is a **model-agnostic seam**: the default `proposer`/`ranker` bake
+in no model (scout originates nothing; director falls back to a stable novelty
+order), and the intelligence is INJECTED — a Claude Opus agent the operator
+spawns from chat. The harness is `lab/analyst.py` (one pass) with an optional
+cadence in `lab/heartbeat.py`; both take an injected `executor`. See
+[`OPERATING_MODEL.md`](OPERATING_MODEL.md) for how the operator drives the stack
+from chat (Agent + Monitor). Cold start = scout, selection = director, learning =
+feedback. The strategies are the agent's; the layer is ours.

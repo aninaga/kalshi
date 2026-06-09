@@ -2,62 +2,40 @@
 
 The scout is machinery; the IDEAS come from the agent. It scans a market with
 ``lab.eda`` (idea-agnostic diagnostics), hands those findings + the existing
-research record to a ``proposer`` (an LLM/codex call by default), and registers
-whatever distinct, mechanism-grounded hypotheses the agent originates. There is
-no hand-written strategy list anywhere in this path — if no agent is available
-and the registry is empty, the pool stays empty (and the loop says so) rather
-than falling back to canned ideas.
+research record to a ``proposer``, and registers whatever distinct,
+mechanism-grounded hypotheses the agent originates. There is no hand-written
+strategy list anywhere in this path, and — by design — no built-in model: the
+default ``proposer`` is a model-agnostic no-op that originates nothing. The
+intelligence is INJECTED at the ``proposer`` seam.
+
+In this codebase the injected proposer is a Claude Opus agent spawned from the
+operator chat (see ``OPERATING_MODEL.md``): the operator hands the agent
+``agents/workers/scout_prompt.md`` plus the EDA report below, and the agent
+returns ``{market, mechanism, signal_desc, direction}`` dicts. With no proposer
+injected the registry simply stays empty rather than falling back to canned
+ideas.
 """
 from __future__ import annotations
 
-import json
-import re
 from pathlib import Path
 
 from research.lab.types import MARKETS, Hypothesis
 
 _ROOT = Path(__file__).resolve().parents[2]
+# The prompt handed to an injected origination agent (e.g. a spawned Opus agent).
 SCOUT_PROMPT = _ROOT / "research/agents/workers/scout_prompt.md"
 
 
-def default_proposer(eda_report: dict, existing: list, brief: str | None,
-                     *, model: str = "gpt-5.5", effort: str = "high") -> list[dict]:
-    """Ask the live agent (codex) to originate hypotheses from the EDA.
+def default_proposer(eda_report: dict, existing: list, brief: str | None) -> list[dict]:
+    """Model-agnostic default: originate nothing.
 
-    Returns a list of ``{market, mechanism, signal_desc, direction}`` dicts.
-    Degrades to ``[]`` when codex is unavailable — it NEVER substitutes canned
-    ideas. The actual creativity is the model's, grounded in ``eda_report``.
+    The scout NEVER invents ideas itself and bakes in no model. Origination is
+    the job of an INJECTED proposer — a callable
+    ``(eda_report, existing, brief) -> [{market, mechanism, signal_desc,
+    direction}, ...]`` — which in practice is a Claude Opus agent the operator
+    spawns from chat with ``SCOUT_PROMPT`` and ``eda_report``. With no proposer
+    injected the open pool stays empty (and the loop says so).
     """
-    import tempfile
-
-    from research.agents.usage.probe_gpt55 import run_codex_exec  # lazy
-
-    prompt = SCOUT_PROMPT.read_text() if SCOUT_PROMPT.exists() else _FALLBACK_SCOUT_PROMPT
-    existing_brief = [
-        {"market": h.market, "mechanism": h.mechanism, "status": h.status,
-         "verdict": h.verdict} for h in existing]
-    payload = (
-        f"{prompt}\n\n---\n\n## EDA findings (idea-agnostic diagnostics)\n"
-        f"```json\n{json.dumps(eda_report, indent=2)}\n```\n\n"
-        f"## Existing research record (do NOT duplicate these)\n"
-        f"```json\n{json.dumps(existing_brief, indent=2)}\n```\n\n"
-        f"## Coordinator brief\n{brief or '(none)'}\n\n"
-        "Output ONLY a fenced ```json block: a list of "
-        '{"market","mechanism","signal_desc","direction"} objects.')
-    with tempfile.TemporaryDirectory(prefix="scout_") as d:
-        res = run_codex_exec(payload, Path(d), model=model, effort=effort)
-    return _parse_proposals(res.stdout)
-
-
-def _parse_proposals(text: str) -> list[dict]:
-    blocks = re.findall(r"```json\s*(\[.*?\])\s*```", text or "", re.DOTALL)
-    for b in reversed(blocks):
-        try:
-            data = json.loads(b)
-            if isinstance(data, list):
-                return [d for d in data if isinstance(d, dict)]
-        except Exception:  # noqa: BLE001
-            continue
     return []
 
 
@@ -97,12 +75,3 @@ def propose(market: str | None = None, *, proposer=default_proposer,
             new_rows.append(registered)
             existing.append(registered)
     return new_rows
-
-
-_FALLBACK_SCOUT_PROMPT = (
-    "You are a quant research SCOUT for NBA prediction markets. From the EDA "
-    "diagnostics below, ORIGINATE new, distinct, mechanism-grounded mispricing "
-    "hypotheses the data actually suggests. Do not propose timing/momentum "
-    "(honest one-bar entry latency kills it). Ground every hypothesis in a "
-    "specific EDA observation. Do not duplicate the existing research record."
-)

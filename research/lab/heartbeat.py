@@ -2,24 +2,24 @@
 
 The substrate can originate, prioritize, test, and judge ideas (scout ->
 director -> analyst -> gate), and ``research.lab.analyst.run_analyst`` closes one
-pass end to end. What was missing was the *clock*: something that fires passes on
-a schedule, budget-aware, persisting state, and stops cleanly when there is
-nothing left to do or the API windows are tapped. That is this module.
+pass end to end. This module is the optional *clock*: it fires passes on a
+cadence, persists state, and stops cleanly when the open pool is exhausted. It is
+model-agnostic — the live agent is INJECTED at the ``executor`` seam (a Claude
+Opus agent the operator spawns from chat; see ``OPERATING_MODEL.md``).
 
 Two modes, one engine:
 
   * ``--once``  — run exactly ONE analyst pass and exit. Idempotent and
-    state-persisted, so an external scheduler (cron, a GitHub Actions
-    ``schedule:`` trigger) provides the cadence. This is the default in CI.
+    state-persisted, so an external scheduler (cron, or the operator firing it
+    from chat) provides the cadence.
   * ``--interval N`` — stay resident and fire a pass every ``N`` seconds until
     ``--max-passes`` or a stop condition. For an always-on research box.
 
 Stop conditions (so a resident loop never spins for free):
   * ``--max-passes`` reached, OR
-  * the budget governor has returned 0 workable ideas for ``--stop-after-idle``
-    consecutive passes (the gpt-5.5 windows are tapped, or the open pool is
-    exhausted and origination is finding nothing) — we stand down rather than
-    burn ticks.
+  * ``--stop-after-idle`` consecutive idle (0-processed) passes — the open pool
+    is exhausted, or no executor is injected — so we stand down rather than burn
+    ticks.
 
 The executor (the live agent) and the ``sleep`` primitive are INJECTABLE so the
 whole loop is deterministically testable without spawning anything or waiting.
@@ -76,23 +76,22 @@ def run_pass(
     brief: Optional[str] = None,
     max_ideas: int = 3,
     market: Optional[str] = None,
-    budget_aware: bool = True,
     executor: Optional[Callable[[dict], dict]] = None,
     ledger_path: Optional[str] = DEFAULT_LEDGER,
 ) -> dict:
-    """Fire ONE analyst pass with the real codex executor by default.
+    """Fire ONE analyst pass.
 
-    ``executor=None`` resolves to the live ``codex_executor`` (a per-assignment
-    ``codex exec`` spawn). Inject a callable to override (tests pass a fake).
+    Model-agnostic: ``executor=None`` resolves to the no-op stub (assignments
+    prepared, not run). The real executor is INJECTED — a Claude Opus agent the
+    operator spawns from chat (see ``OPERATING_MODEL.md``). Tests pass a fake.
     """
     if executor is None:
-        from research.lab.executors import codex_executor
-        executor = codex_executor
+        from research.lab.analyst import _noop_executor
+        executor = _noop_executor
     return run_analyst(
         brief,
         max_ideas=max_ideas,
         market=market,
-        budget_aware=budget_aware,
         executor=executor,
         ledger_path=ledger_path,
     )
@@ -107,7 +106,6 @@ def run_heartbeat(
     brief: Optional[str] = None,
     max_ideas: int = 3,
     market: Optional[str] = None,
-    budget_aware: bool = True,
     executor: Optional[Callable[[dict], dict]] = None,
     ledger_path: Optional[str] = DEFAULT_LEDGER,
     state_path: str = DEFAULT_STATE,
@@ -119,8 +117,8 @@ def run_heartbeat(
     ``--once`` (``once=True``) fires a single pass and returns — the external
     scheduler owns the clock. Otherwise loop every ``interval_sec`` until
     ``max_passes`` (0 = unbounded) or ``stop_after_idle`` consecutive idle passes
-    (budget tapped / pool exhausted). ``sleep`` and ``executor`` are injectable
-    so this is fully testable without waiting or spawning.
+    (pool exhausted / no executor injected). ``sleep`` and ``executor`` are
+    injectable so this is fully testable without waiting or spawning.
     """
     state = HeartbeatState.load(state_path)
 
@@ -128,7 +126,7 @@ def run_heartbeat(
         state.last_started = _now()
         summary = run_pass(
             brief=brief, max_ideas=max_ideas, market=market,
-            budget_aware=budget_aware, executor=executor, ledger_path=ledger_path,
+            executor=executor, ledger_path=ledger_path,
         )
         processed = int(summary.get("processed", 0))
         state.passes_done += 1
@@ -174,18 +172,13 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument("--brief", default=None, help="analyst brief threaded into assignments")
     ap.add_argument("--max-ideas", type=int, default=3, help="max ideas worked per pass")
     ap.add_argument("--market", default=None, help="restrict to one market")
-    ap.add_argument("--no-budget", action="store_true", help="skip the budget governor")
     ap.add_argument("--ledger", default=DEFAULT_LEDGER, help="shared trial ledger ('' to disable)")
     ap.add_argument("--state", default=DEFAULT_STATE, help="heartbeat state file")
-    ap.add_argument("--dry-run", action="store_true",
-                    help="use the no-op analyst executor (no agent spawn)")
     a = ap.parse_args(argv)
 
-    executor = None
-    if a.dry_run:
-        from research.lab.analyst import _noop_executor
-        executor = _noop_executor
-
+    # The CLI runs with the model-agnostic no-op executor (assignments prepared,
+    # not run). The real executor is INJECTED via run_heartbeat(executor=...) —
+    # a Claude Opus agent the operator spawns from chat (see OPERATING_MODEL.md).
     state = run_heartbeat(
         once=a.once,
         interval_sec=a.interval,
@@ -194,8 +187,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         brief=a.brief,
         max_ideas=a.max_ideas,
         market=a.market,
-        budget_aware=not a.no_budget,
-        executor=executor,
+        executor=None,
         ledger_path=(a.ledger or None),
         state_path=a.state,
     )

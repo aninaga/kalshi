@@ -1,30 +1,26 @@
 """research.lab.analyst — the autonomous analyst runner (the harness, not the brain).
 
-This replaces ``agents/usage/edge_hunt_loop.py``'s hard-coded ``DIRECTIONS``
-menu with a registry-driven loop. Where the old loop enumerated a fixed
-markets x mechanisms matrix, this one PULLS OPEN hypotheses from the dynamic
-registry (``lab.hypothesis``) and hands each one to a deployed agent as a
-self-contained "assignment" (toolkit handle + the open hypothesis + the brief).
+A registry-driven loop: it PULLS OPEN hypotheses from the dynamic registry
+(``lab.hypothesis``) and hands each one to an ``executor`` as a self-contained
+"assignment" (toolkit handle + the open hypothesis + the brief).
 
-``run_analyst`` is deliberately the *harness*: it prepares assignments, claims
-the hypothesis, dispatches the actual idea-generation/backtesting to an injected
-``executor`` (a real deployment wires in a codex-exec / agent spawn here), and
-records the trial result back to the registry via ``lab.hypothesis.update``. The
-analytical work itself is the agent's job; this module is the deterministic,
-testable loop around it.
+``run_analyst`` is deliberately the *harness*, and it is model-agnostic: it
+prepares assignments, claims the hypothesis, dispatches the actual
+idea-generation/backtesting to an INJECTED ``executor``, and records the trial
+result back to the registry via ``lab.hypothesis.update``. The analytical work
+itself is the agent's job; this module is the deterministic, testable loop
+around it. No model is baked in — the default ``executor`` is a no-op stub that
+merely prepares the assignment. In this codebase the real executor is a Claude
+Opus agent the operator spawns from chat (see ``OPERATING_MODEL.md``); inject it
+as ``executor=...``.
 
-It is budget-aware: when ``budget_aware`` it polls ``agents.usage.limits`` and
-lets the governor decide how many ideas it is safe to work this run (0 => the
-gpt-5.5 windows are tapped, so we stop early rather than spawn).
-
-Sibling lab modules (``lab.hypothesis``) are imported LAZILY inside functions so
-this module imports cleanly in an isolated worktree where they have not merged
-yet; tests monkeypatch them.
+Sibling lab modules (``lab.hypothesis``, ``lab.scout``, ``lab.director``) are
+imported LAZILY inside functions so this module imports cleanly in an isolated
+worktree; tests monkeypatch them.
 
 CLI::
 
-    python -m research.lab.analyst --max-ideas 3 --market total
-    python -m research.lab.analyst --dry-run        # plan only; executor is a no-op
+    python -m research.lab.analyst --max-ideas 3 --market total   # prepares assignments
 """
 from __future__ import annotations
 
@@ -34,9 +30,6 @@ import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Callable, Optional
-
-# agents.usage.limits IS present on the base branch — import it directly.
-from research.agents.usage import limits as L
 
 AGENT = "lab.analyst"
 
@@ -108,8 +101,10 @@ _VERDICTS = ("PROMOTE", "PROMISING", "NEEDS_DATA", "DEAD")
 def _noop_executor(assignment: dict) -> dict:
     """Default executor: records that the assignment was prepared but not run.
 
-    A real deployment replaces this with an agent/codex-exec dispatcher. Keeping
-    a no-op default makes ``run_analyst`` import-safe and deterministic.
+    Model-agnostic by design — it bakes in no agent. The real executor is
+    INJECTED (a Claude Opus agent the operator spawns from chat; see
+    ``OPERATING_MODEL.md``). Keeping a no-op default makes ``run_analyst``
+    import-safe and deterministic.
     """
     return {
         "hypothesis_id": assignment.get("hypothesis_id"),
@@ -143,16 +138,15 @@ def _append_ledger(ledger_path: str, row: dict) -> None:
 
 
 def _budget_for(max_ideas: int, budget_aware: bool) -> tuple[int, str]:
-    """How many ideas may we work this run? Returns (n, reason).
+    """How many ideas to work this run? Returns (n, reason).
 
-    UNKNOWN/unavailable usage => optimistic (work up to ``max_ideas``, matching
-    the governor's philosophy). KNOWN-and-tapped (workers==0) => 0.
+    Model-agnostic: the cap is simply ``max_ideas``. The old GPT-5.5
+    window governor was removed along with the codex spawn infra — spawn
+    budgeting now lives with the operator who spins up the agents (and their
+    own model's rate limits), not with a Python poller. ``budget_aware`` is
+    accepted for backward compatibility and no longer changes behavior.
     """
-    if not budget_aware:
-        return max_ideas, "budget_aware=False -> run up to max_ideas"
-    snap = L.poll()
-    decision = L.decide_workers(snap, max_ideas)
-    return decision.gpt55_workers, decision.reason
+    return max_ideas, "cap = max_ideas (no external budget governor)"
 
 
 def run_analyst(
@@ -176,10 +170,11 @@ def run_analyst(
 
     Args:
         brief: optional analyst brief threaded into every assignment.
-        max_ideas: max OPEN hypotheses to work this run (budget may lower it).
+        max_ideas: max OPEN hypotheses to work this run.
         market: if set, only work hypotheses for this market.
-        budget_aware: poll ``agents.usage.limits`` and let the governor cap work.
-        executor: callable(assignment_dict) -> result_dict. Defaults to a no-op.
+        budget_aware: accepted for backward compat; no longer changes behavior.
+        executor: callable(assignment_dict) -> result_dict. Defaults to a no-op
+            (the real, model-specific executor is injected; see OPERATING_MODEL.md).
         path: optional registry path override (forwarded to ``lab.hypothesis``).
 
     Returns a summary dict::
@@ -290,30 +285,19 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument("--brief", default=None, help="analyst brief threaded into assignments")
     ap.add_argument("--max-ideas", type=int, default=3, help="max OPEN hypotheses to work")
     ap.add_argument("--market", default=None, help="restrict to one market (winner/total/spread)")
-    ap.add_argument("--no-budget", action="store_true",
-                    help="skip the budget governor (work up to --max-ideas)")
-    ap.add_argument("--dry-run", action="store_true",
-                    help="use the no-op executor (assignments prepared, not run)")
-    ap.add_argument("--model", default="gpt-5.5", help="agent model for the codex executor")
-    ap.add_argument("--effort", default="high", help="reasoning effort for the codex executor")
     ap.add_argument("--ledger", default=DEFAULT_LEDGER,
                     help=f"shared trial ledger (default: {DEFAULT_LEDGER}); '' to disable")
     a = ap.parse_args(argv)
 
-    # Real deployment: spawn a live agent per assignment via the codex executor.
-    # --dry-run keeps the import-safe no-op stub (assignments prepared, not run).
-    if a.dry_run:
-        executor = _noop_executor
-    else:
-        from research.lab.executors import make_codex_executor
-        executor = make_codex_executor(model=a.model, effort=a.effort)
-
+    # The CLI runs with the model-agnostic no-op executor: it PREPARES and prints
+    # assignments. The analytical work is done by an injected executor — a Claude
+    # Opus agent the operator spawns from chat (see OPERATING_MODEL.md) — or by
+    # calling run_analyst(..., executor=...) programmatically.
     summary = run_analyst(
         a.brief,
         max_ideas=a.max_ideas,
         market=a.market,
-        budget_aware=not a.no_budget,
-        executor=executor,
+        executor=_noop_executor,
         ledger_path=(a.ledger or None),
     )
     print(json.dumps(summary, indent=2, default=str))

@@ -59,7 +59,6 @@ def test_propose_empty_when_agent_returns_nothing():
     assert new == []   # no agent ideas -> nothing canned is substituted
 
 
-def test_parse_proposals_extracts_json_block():
-    text = 'blah\n```json\n[{"market":"total","mechanism":"m"}]\n```\n'
-    out = scout._parse_proposals(text)
-    assert out == [{"market": "total", "mechanism": "m"}]
+def test_default_proposer_is_model_agnostic_noop():
+    # bakes in no model: originates nothing unless a proposer is injected
+    assert scout.default_proposer({}, [], None) == []

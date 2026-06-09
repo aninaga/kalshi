@@ -73,5 +73,11 @@ def test_incorporate_results_ignores_unknown_ids():
     assert out["applied"] == 0
 
 
-def test_parse_order_extracts_ids():
-    assert director._parse_order('x\n```json\n["a","b","c"]\n```') == ["a", "b", "c"]
+def test_default_ranker_is_novelty_order():
+    # model-agnostic default: stable novelty order (most-recent first), no model
+    from research.lab.types import Hypothesis
+    a = Hypothesis(market="total", mechanism="a", signal_desc="", direction="over",
+                   id="a", created="2025-01-01")
+    b = Hypothesis(market="total", mechanism="b", signal_desc="", direction="over",
+                   id="b", created="2025-02-01")
+    assert director.default_ranker([a, b], [], None) == ["b", "a"]

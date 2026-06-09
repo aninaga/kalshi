@@ -1,10 +1,10 @@
 """Tests for the autonomous analyst harness (agent-driven selection layer).
 
 Standalone: stubs the sibling ``lab.hypothesis`` registry, the ``lab.director``
-(prioritizer) and ``lab.scout`` (originator), and ``agents.usage.limits``; injects
-a fake executor — no real agent spawn, no real limits binary, no real data. The
-harness must: ORIGINATE via the scout when the registry is empty, PRIORITIZE via
-the director (never FIFO/hardcoded), then claim/execute/update each chosen idea.
+(prioritizer) and ``lab.scout`` (originator), and injects a fake executor — no
+real agent spawn, no real data. The harness must: ORIGINATE via the scout when
+the registry is empty, PRIORITIZE via the director (never FIFO/hardcoded), then
+claim/execute/update each chosen idea.
 """
 from __future__ import annotations
 
@@ -63,12 +63,22 @@ def patch_layer(monkeypatch):
     """Install fake hypothesis registry + director (rank=identity over open,
     market-filtered, k-capped) + scout (registers one originated idea)."""
 
+    # Import the package so the fakes can be bound as ATTRIBUTES on it, not just
+    # in sys.modules. ``run_analyst`` does ``from research.lab import director``,
+    # which resolves the package attribute first — if an earlier test bound the
+    # REAL submodule there, a sys.modules-only override is silently bypassed (the
+    # real scout/director then run on real data). Patching both wins deterministically.
+    import importlib
+
+    _lab_pkg = importlib.import_module("research.lab")
+
     def _install(hyps):
         reg = FakeRegistry(hyps)
         hmod = _pytypes.ModuleType("research.lab.hypothesis")
         for name in ("DEFAULT_PATH", "open_hypotheses", "query", "register", "claim", "update"):
             setattr(hmod, name, getattr(reg, name))
         monkeypatch.setitem(sys.modules, "research.lab.hypothesis", hmod)
+        monkeypatch.setattr(_lab_pkg, "hypothesis", hmod, raising=False)
 
         # director.select: agent stand-in — returns open hyps (market-filtered), capped at k.
         dmod = _pytypes.ModuleType("research.lab.director")
@@ -82,6 +92,7 @@ def patch_layer(monkeypatch):
         dmod.select = _select
         dmod.incorporate_results = lambda *a, **k: {"applied": 0}
         monkeypatch.setitem(sys.modules, "research.lab.director", dmod)
+        monkeypatch.setattr(_lab_pkg, "director", dmod, raising=False)
 
         # scout.propose: agent stand-in — originates one idea into the empty store.
         smod = _pytypes.ModuleType("research.lab.scout")
@@ -93,20 +104,10 @@ def patch_layer(monkeypatch):
 
         smod.propose = _propose
         monkeypatch.setitem(sys.modules, "research.lab.scout", smod)
+        monkeypatch.setattr(_lab_pkg, "scout", smod, raising=False)
         return reg
 
     return _install
-
-
-@pytest.fixture(autouse=True)
-def patch_limits(monkeypatch):
-    monkeypatch.setattr(analyst.L, "poll", lambda *a, **k: object())
-
-    def _decide(snap, base, *a, **k):
-        return _pytypes.SimpleNamespace(gpt55_workers=base, reason=f"fake-ample base={base}",
-                                        sleep_until_epoch=None)
-
-    monkeypatch.setattr(analyst.L, "decide_workers", _decide)
 
 
 def _verdict_executor(verdict="PROMOTE"):
@@ -150,14 +151,6 @@ def test_market_filter(patch_layer):
                                   executor=_verdict_executor())
     assert summary["processed"] == 1
     assert reg.claims and reg.hyps[reg.claims[0][0]].market == SPREAD
-
-
-def test_budget_tapped_stops_early(patch_layer, monkeypatch):
-    reg = patch_layer([_hyp("m1"), _hyp("m2")])
-    monkeypatch.setattr(analyst.L, "decide_workers", lambda *a, **k: _pytypes.SimpleNamespace(
-        gpt55_workers=0, reason="tapped", sleep_until_epoch=123.0))
-    summary = analyst.run_analyst(max_ideas=2, budget_aware=True, executor=_verdict_executor())
-    assert summary["processed"] == 0 and reg.claims == []
 
 
 def test_no_verdict_leaves_running(patch_layer):
