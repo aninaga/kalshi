@@ -120,13 +120,23 @@ class FillModel:
             return _pm_taker_fee(price, size)
         raise ValueError(f"Unknown venue: {self.venue!r} (kalshi|polymarket)")
 
-    def fill(self, panel: Panel, ts: float, side: str) -> FillResult:
+    def fill(self, panel: Panel, ts: float, side: str, *,
+             strike: float | None = None) -> FillResult:
         """Realistic fill for taking ``side`` on ``panel`` at entry time ``ts``.
 
         Snaps to the nearest LISTED strike on ``panel.ladder`` (nearest to the
         implied level ``panel.mid`` interpolated at ``ts``), reads that strike's
         REAL quoted probability interpolated at ``ts`` (never 0.50), crosses the
         half-spread, and bills the taker fee.
+
+        ``strike`` PINS the fill to that exact listed strike instead of
+        re-snapping at fill time. The re-snap is correct for ATM strategies but
+        hazardous for band/strike-conditioned ones: between the signal bar and
+        the i+1 fill the mid can cross a bucket midpoint, flipping the snap and
+        silently executing the OPPOSITE exposure (found by the fable analyst
+        lane, 2026-06-09: 22.6% of unguarded extreme-band fills inverted).
+        A pinned strike must already be listed on the ladder — pinning to an
+        unlisted strike raises rather than fabricating a quote.
 
         The winner market has no strike ladder; there the "strike" is the 0.5
         crossing and ``fill_mid`` is the interpolated win-prob (or its complement
@@ -149,22 +159,29 @@ class FillModel:
             return FillResult(strike=0.5, fill_mid=fill_mid,
                               half_spread=self.half_spread, fee=self.fee(all_in))
 
-        # --- Ladder markets (total / spread): snap to the listed strike. ---
+        # --- Ladder markets: pinned strike, or snap to the listed strike. ---
         strikes = np.array(sorted(panel.ladder.keys()), dtype=float)
-        implied = _interp_at(ts, xp, panel.mid)
-        if not np.isfinite(implied):
-            raise ValueError("panel has no finite mid to snap a strike to")
-        si = int(np.argmin(np.abs(strikes - implied)))
-        strike = float(strikes[si])
+        if strike is not None:
+            si = int(np.argmin(np.abs(strikes - float(strike))))
+            if abs(float(strikes[si]) - float(strike)) > 1e-9:
+                raise ValueError(
+                    f"pinned strike {strike} is not listed on the ladder "
+                    f"(listed: {strikes.tolist()})")
+        else:
+            implied = _interp_at(ts, xp, panel.mid)
+            if not np.isfinite(implied):
+                raise ValueError("panel has no finite mid to snap a strike to")
+            si = int(np.argmin(np.abs(strikes - implied)))
+        strike_used = float(strikes[si])
 
-        p_over = _interp_at(ts, xp, panel.ladder[strike])
+        p_over = _interp_at(ts, xp, panel.ladder[strike_used])
         if not np.isfinite(p_over):
-            raise ValueError(f"strike {strike} has no finite quote to fill against")
+            raise ValueError(f"strike {strike_used} has no finite quote to fill against")
         p_over = min(max(p_over, 0.01), 0.99)
 
         fill_mid = (1.0 - p_over) if short else p_over
         all_in = min(fill_mid + self.half_spread, 0.999)
-        return FillResult(strike=strike, fill_mid=fill_mid,
+        return FillResult(strike=strike_used, fill_mid=fill_mid,
                           half_spread=self.half_spread, fee=self.fee(all_in))
 
 

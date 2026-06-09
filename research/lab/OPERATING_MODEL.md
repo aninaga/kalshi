@@ -95,6 +95,31 @@ PUBLISHED (forecast issue time, wire time), never the valid/target time;
 sources and fetch endpoints go in provenance; a field whose publication
 time cannot be established is `NEEDS_DATA`, not guessed.
 
+## Forward paper trading (the bridge to live)
+
+`research/lab/paper.py` runs FROZEN, pre-registered strategies against live
+Kalshi quotes and records the fills they would have taken (real bid/ask,
+venue fees, one contract each) into an append-only, git-tracked book at
+`market_data/paper/<book>.jsonl`. It places NO orders. Honesty rules:
+
+* **Current-signal gate** — a position opens only if the entry fired within
+  the trailing `recent_min` minutes (no "entering" on an hours-old signal at
+  today's price — forward look-ahead's twin).
+* **Frozen tenants** — strategies enroll in `paper.STRATEGIES` with their
+  registered parameters; the harness never tunes. The standing first tenant
+  is a CONTROL (`drift_fade_control`, backtest-DEAD, expectation ≈ −0.3c/
+  trade): its forward record validates the cost model itself; material
+  divergence means the spread/fee assumptions are wrong, and every backtest
+  verdict inherits the correction.
+* Promotion path: gate-PROMISING+ candidates enroll as tenants and must
+  EARN promotion forward; the paper book is the evidence the human reviews
+  before any capital decision. Capital remains human-gated; the lab and the
+  paper harness never place orders.
+
+Operator cadence (cron-able): `python -m research.lab.paper --open --settle
+--status --book weather_v1` once or twice daily (weather settles daily, so
+forward n accrues fast).
+
 ## How the operator runs it from chat
 
 1. **Originate.** Spawn an Opus subagent with `scout_prompt.md` + the EDA report;

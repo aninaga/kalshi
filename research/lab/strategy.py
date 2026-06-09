@@ -86,6 +86,14 @@ class Strategy:
     max_stale_min: float = 2.0
     min_elapsed: float = 600.0
     max_elapsed: float = 2520.0
+    # Optional strike pinning: ``pick_strike(panel, signal_bar) -> float|None``
+    # locks the fill to the strike the SIGNAL evaluated instead of letting the
+    # fill model re-snap at i+1 — between signal and fill the mid can cross a
+    # bucket midpoint, flip the snap, and execute the OPPOSITE exposure (the
+    # snap-flip hazard; see runs/model_bakeoff_20260609.md). ``None`` return
+    # falls back to the fill model's snap. Requires a fill model whose ``fill``
+    # accepts a ``strike`` kwarg (``lab.execution.FillModel`` does).
+    pick_strike: Optional[Callable[[Panel, int], Optional[float]]] = None
     meta: dict = field(default_factory=dict)
 
     def run(self, panels: list[Panel], fill_model=None) -> Trades:
@@ -126,7 +134,13 @@ class Strategy:
         side = self.side(panel, bar)
         # Honest i+1 latency: lock the fill one latency-step after the signal.
         entry_ts = float(ts[bar] + self.entry_latency_min * 60.0)
-        fill = fill_model.fill(panel, entry_ts, side)
+        if self.pick_strike is not None:
+            # Pass the kwarg only when pinning is requested so duck-typed fill
+            # models without ``strike`` support keep working unchanged.
+            fill = fill_model.fill(panel, entry_ts, side,
+                                   strike=self.pick_strike(panel, bar))
+        else:
+            fill = fill_model.fill(panel, entry_ts, side)
         if fill is None or not np.isfinite(fill.fill_mid):
             return None
 
