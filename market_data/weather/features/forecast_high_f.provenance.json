@@ -1,0 +1,108 @@
+{
+  "source": "Open-Meteo Previous Runs API (free, no-auth; archives past model runs)",
+  "endpoint": "https://previous-runs-api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&hourly=temperature_2m_previous_day1,temperature_2m_previous_day2&temperature_unit=fahrenheit&timezone={tz}&start_date={lo}&end_date={hi}",
+  "field_meaning": "daily MAX of hourly temperature_2m_previous_dayN over the local calendar day = the daily-high FORECAST at lead N days (previous_day1 ~24h-ahead, previous_day2 ~48h-ahead); multiple rows per event (one per lead), as-of join handles the revision toward shorter lead naturally",
+  "leads_days": [
+    1,
+    2
+  ],
+  "units": "degrees Fahrenheit",
+  "point_in_time_rule": "known_from_ts = epoch( (local target-day 23:00) - 24*lead hours ). Open-Meteo docs: temperature_2m_previous_dayN is 'the value predicted 24*N hours before valid time'. The day-D max can fall on any hour up to 23:00 local, whose forecast was issued ~24*N h earlier; anchoring at the LAST hour guarantees no contributing hour was issued after known_from_ts (leakage-safe maximum issue time). Verified empirically that this lands inside the Kalshi quote window for lead1 (~13h after open) and before the open for lead2.",
+  "stations": {
+    "NYC": {
+      "requested_coord": [
+        40.779,
+        -73.9693
+      ],
+      "returned_grid_coord": [
+        40.78858,
+        -73.9661
+      ],
+      "elevation_m": 44.0,
+      "timezone": "America/New_York",
+      "station": "Central Park (KNYC)",
+      "events": 250,
+      "rows": 500
+    },
+    "CHI": {
+      "requested_coord": [
+        41.786,
+        -87.7524
+      ],
+      "returned_grid_coord": [
+        41.77811,
+        -87.737
+      ],
+      "elevation_m": 184.0,
+      "timezone": "America/Chicago",
+      "station": "Chicago Midway (KMDW)",
+      "events": 250,
+      "rows": 500
+    },
+    "MIA": {
+      "requested_coord": [
+        25.7959,
+        -80.287
+      ],
+      "returned_grid_coord": [
+        25.787653,
+        -80.28457
+      ],
+      "elevation_m": 2.0,
+      "timezone": "America/New_York",
+      "station": "Miami Intl (KMIA)",
+      "events": 250,
+      "rows": 500
+    },
+    "AUS": {
+      "requested_coord": [
+        30.1944,
+        -97.6699
+      ],
+      "returned_grid_coord": [
+        30.189205,
+        -97.66044
+      ],
+      "elevation_m": 151.0,
+      "timezone": "America/Chicago",
+      "station": "Austin-Bergstrom (KAUS)",
+      "events": 250,
+      "rows": 500
+    },
+    "DEN": {
+      "requested_coord": [
+        39.8466,
+        -104.6562
+      ],
+      "returned_grid_coord": [
+        39.84898,
+        -104.645485
+      ],
+      "elevation_m": 1645.0,
+      "timezone": "America/Denver",
+      "station": "Denver Intl (KDEN)",
+      "events": 250,
+      "rows": 500
+    }
+  },
+  "station_note": "Kalshi settles each city on a specific NWS station; coords chosen to match it and VALIDATED against realized settlement buckets (near-analysis daily-max MAE per city: NYC 1.06, CHI 1.08, MIA 1.41, AUS 1.59, DEN 1.94 F, small cold bias). AUSTIN uses Austin-BERGSTROM (KAUS), NOT Camp Mabry as the request note stated: Bergstrom MAE 1.41 vs Camp Mabry 2.05 F against realized buckets.",
+  "fetched_at": "2026-06-09T21:45:39+00:00",
+  "request_id": "7e0d214cbea6162f",
+  "limitations": [
+    "known_from_ts is the conservative LATEST issue time for the daily max; the actual afternoon-max forecast was knowable somewhat earlier, so the as-of join is pessimistic (never optimistic) about when the signal arrives.",
+    "Open-Meteo grid-snaps to a ~2km cell near each station (returned coords in provenance), not the exact instrument; residual station mismatch ~<=2 F.",
+    "Lead is in 24h steps relative to valid time, an approximation of true model init cadence (00/06/12/18 UTC runs); the 24h-step anchor stays conservative.",
+    "best_match model selection per Open-Meteo (model can change across the archive); the field is a model forecast, not a single fixed model.",
+    "Daily max is computed from hourly temperature_2m, which can differ slightly from the official NWS daily-high instrument (sub-hourly peaks) \u2014 hence the ~1 F validation residual."
+  ],
+  "diagnostics": {
+    "rows_per_lead": {
+      "1": 1250,
+      "2": 1250
+    },
+    "events_with_rows": 1250,
+    "total_cached_events": 1250
+  },
+  "written_at": "2026-06-09T21:45:39+00:00",
+  "rows": 2500
+}
