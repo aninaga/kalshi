@@ -310,3 +310,81 @@ def _mean_cents(trades: Trades) -> float:
     if trades.empty:
         return float("nan")
     return float(np.mean([t.pnl for t in trades.rows]) * 100.0)
+
+
+# ---------------------------------------------------------------------------
+# CLI: head-to-head gate (taker vs maker) on the SAME population.
+# ---------------------------------------------------------------------------
+def _gate(trades, ledger_path=LEDGER):
+    from research.lab.evaluate import evaluate
+    return evaluate(trades, ledger_path=ledger_path)
+
+
+def _fmt_gate(label, gr):
+    cs = gr.cost_sweep or {}
+    sweep = "  ".join(f"{c}c:{v['cents']:+.2f}({'P' if v['gate'] else 'F'})"
+                      for c, v in sorted(cs.items()))
+    print(f"  [{label}] n={gr.n} games={gr.n_games} net={gr.cents_per_contract:+.2f}c "
+          f"CI[{gr.ci_lo:+.2f},{gr.ci_hi:+.2f}] gate={'PASS' if gr.passed else 'FAIL'}")
+    print(f"        cost-sweep: {sweep}")
+    adv = gr.adversarial or {}
+    for name, d in adv.items():
+        print(f"        adv/{name}: {'ok' if d['passed'] else 'X'} {d['detail']}")
+    if gr.reasons:
+        print(f"        reasons: {'; '.join(gr.reasons[:4])}")
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--limit", type=int, default=None)
+    ap.add_argument("--thresh", type=float, default=6.0)
+    ap.add_argument("--half-spread", type=float, default=1.5, help="TAKER half-spread, cents")
+    ap.add_argument("--edge-c", type=float, default=1.5, help="maker limit improvement, cents")
+    ap.add_argument("--wait-min", type=float, default=10.0)
+    ap.add_argument("--venue", default="polymarket")
+    ap.add_argument("--ledger", default=LEDGER)
+    ap.add_argument("--sweep", action="store_true", help="sweep maker edge/wait")
+    ap.add_argument("--gate", action="store_true", help="full head-to-head gate")
+    a = ap.parse_args()
+
+    panels = data.load_panels(SPREAD, split="nontest", limit=a.limit)
+    print(f"loaded {len(panels)} nontest spread panels\n", flush=True)
+
+    if a.sweep:
+        print("=== MAKER FILL/WIN/ADVERSE-SELECTION SWEEP (vs taker baseline) ===")
+        tk0 = None
+        for edge_c in (0.5, 1.0, 1.5, 2.0, 3.0):
+            for wait in (5.0, 10.0, 20.0):
+                tk, mk, diag = build_arms(
+                    panels, thresh=a.thresh, taker_half_spread=a.half_spread,
+                    taker_venue=a.venue,
+                    maker=MakerConfig(edge_c=edge_c, wait_min=wait, venue=a.venue))
+                if tk0 is None:
+                    tk0 = (_win_rate(tk), _mean_cents(tk), len(tk))
+                print(f"  edge={edge_c:.1f}c wait={wait:>4.0f}m | "
+                      f"fill_rate={diag['maker_fill_rate']:.3f} "
+                      f"maker_win={_win_rate(mk):.3f} maker_net={_mean_cents(mk):+.2f}c "
+                      f"(n={len(mk)}) | taker_win={tk0[0]:.3f} taker_net={tk0[1]:+.2f}c",
+                      flush=True)
+        return
+
+    if a.gate:
+        tk, mk, diag = build_arms(
+            panels, thresh=a.thresh, taker_half_spread=a.half_spread, taker_venue=a.venue,
+            maker=MakerConfig(edge_c=a.edge_c, wait_min=a.wait_min, venue=a.venue))
+        print("=== POPULATION / FILL DIAGNOSTICS ===")
+        for k, v in diag.items():
+            print(f"  {k}: {v}")
+        print(f"  taker win={_win_rate(tk):.3f}  maker win={_win_rate(mk):.3f}  "
+              f"(ADVERSE SELECTION gap = {_win_rate(tk)-_win_rate(mk):+.3f})")
+        print(f"\n=== HEAD-TO-HEAD GATE (ledger={a.ledger}) ===")
+        _fmt_gate("TAKER realistic", _gate(tk, a.ledger))
+        print()
+        _fmt_gate(f"MAKER edge={a.edge_c}c wait={a.wait_min}m {a.venue}", _gate(mk, a.ledger))
+        return
+
+    print("pass --sweep or --gate")
+
+
+if __name__ == "__main__":
+    main()
