@@ -77,6 +77,12 @@ class ExecutionCapture:
             "buy_trade_id": getattr(result, "buy_trade_id", None),
             "sell_trade_id": getattr(result, "sell_trade_id", None),
             "settlement_id": getattr(result, "settlement_id", None),
+            # Per-VENUE resolution ids (Kalshi ticker, Polymarket token) — needed
+            # so the reconciler can check EACH venue's settlement separately. The
+            # tracker's single market_id/token_id can't carry both legs' ids.
+            "kalshi_ticker": (match.get("kalshi_market", {}) or {}).get("id"),
+            "polymarket_token": opportunity.get("polymarket_token")
+            or (match.get("polymarket_market", {}) or {}).get("id"),
             # Estimate (pre-trade expectation). expected_net is scaled to the
             # filled size for a fair fill-quality comparison; expected_net_full is
             # the full-depth estimate.

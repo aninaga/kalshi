@@ -67,6 +67,11 @@ def tracker_from_capture(path: str, allow_simulated: bool = False) -> ConfirmedP
             buy_trade_id=r.get("buy_trade_id"), sell_trade_id=r.get("sell_trade_id"),
             settlement_id=r.get("settlement_id"),
             source="exchange",
+            # Stash per-venue resolution ids so reconcile_settlement can check
+            # each venue separately (the tracker's single market_id/token_id
+            # can't carry both the Kalshi ticker and the Polymarket token).
+            metadata={"kalshi_ticker": r.get("kalshi_ticker"),
+                      "polymarket_token": r.get("polymarket_token")},
             mark_confirmed=True,
             mark_settled=False,          # awaiting resolution; reconcile settles
             timestamp=float(r.get("ts") or time.time()),
@@ -128,8 +133,14 @@ class Reconciler:
         checker = getattr(client, "is_resolved", None)
         if client is None or checker is None:
             return False
-        fills = execution.buy_fills + execution.sell_fills
-        mkt = next((f.market_id or f.token_id for f in fills if f.platform == platform), None)
+        # Per-venue id: Kalshi ticker vs Polymarket token. Prefer the metadata
+        # ids (populated from the capture row); fall back to the fill's own
+        # market_id/token_id for in-memory receipts.
+        meta = getattr(execution, "metadata", {}) or {}
+        mkt = meta.get("kalshi_ticker") if platform == "kalshi" else meta.get("polymarket_token")
+        if not mkt:
+            fills = execution.buy_fills + execution.sell_fills
+            mkt = next((f.market_id or f.token_id for f in fills if f.platform == platform), None)
         return bool(await self._safe(checker(mkt))) if mkt else False
 
     async def reconcile_all(self, mode: str = "all") -> Dict[str, Any]:
@@ -154,10 +165,13 @@ def _apply_kalshi_fill(fill_record, venue_fills: Optional[List[Dict]]) -> bool:
     if tid:
         fill_record.trade_id = str(tid)
         fill_record.fill_id = fill_record.fill_id or str(tid)
-    # Kalshi fees are in cents on the fill if present.
-    fee = f.get("fee") or f.get("fee_cents")
-    if fee is not None:
-        fill_record.fee = float(fee) / 100.0 if f.get("fee_cents") is not None else float(fee)
+    # Kalshi /portfolio/fills denominates the fee in CENTS under "fee" (it does
+    # NOT send a "fee_cents" key on the live path). Always convert cents->dollars;
+    # the prior code passed the live "fee" through un-divided -> 100x overstatement.
+    if "fee_cents" in f and f["fee_cents"] is not None:
+        fill_record.fee = float(f["fee_cents"]) / 100.0
+    elif f.get("fee") is not None:
+        fill_record.fee = float(f["fee"]) / 100.0
     fill_record.source = "exchange"
     return True
 

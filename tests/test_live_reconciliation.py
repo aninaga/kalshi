@@ -145,3 +145,32 @@ def test_tracker_from_capture_loads_only_exchange_fills(tmp_path):
     assert len(t.executions) == 1   # only the live exchange fill
     s = t.summarize(scan_interval_seconds=30)
     assert s["locked_in_execution_count"] == 1  # loaded confirmed-but-not-settled
+
+
+def test_kalshi_fee_live_key_is_cents():
+    # The LIVE Kalshi /portfolio/fills returns fee in CENTS under "fee" (no
+    # "fee_cents" key). Must convert -> dollars; the old code booked it 100x.
+    from kalshi_arbitrage.reconcile import _apply_kalshi_fill
+    fr = type("FR", (), {"trade_id": None, "fill_id": None, "fee": 9.9, "source": None})()
+    assert _apply_kalshi_fill(fr, [{"trade_id": "t", "fee": 7}])
+    assert abs(fr.fee - 0.07) < 1e-9   # 7 cents -> $0.07, not $7
+
+
+def test_capture_to_settlement_roundtrip(tmp_path):
+    # Write a live row -> rebuild via tracker_from_capture -> reconcile_settlement
+    # must SETTLE using the per-venue ids carried in metadata. This is the path
+    # that was silently dead (ids dropped on load, both legs shared one id).
+    ledger = tmp_path / "ex.jsonl"
+    ledger.write_text(json.dumps({
+        "opportunity_id": "o", "confirmation_source": "exchange", "skipped_reason": None,
+        "filled_volume": 100, "buy_platform": "kalshi", "sell_platform": "polymarket",
+        "avg_buy_price": 0.11, "avg_sell_price": 0.835, "buy_fees": 0.1, "sell_fees": 0.0,
+        "execution_id": "e1", "kalshi_ticker": "KXM-27", "polymarket_token": "0xtok", "ts": 1000}))
+    t = tracker_from_capture(str(ledger))
+    execution = list(t.executions.values())[0]
+    assert t.summarize(30)["cumulative_settled_execution_count"] == 0  # locked-in, not settled
+    rec = Reconciler(t, kalshi=_FakeKalshi(), poly=_FakePoly())   # both is_resolved -> True
+    loop = asyncio.new_event_loop()
+    assert loop.run_until_complete(rec.reconcile_settlement(execution))
+    assert t.summarize(30)["cumulative_settled_execution_count"] == 1
+    loop.close()
