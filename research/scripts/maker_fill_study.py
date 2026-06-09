@@ -178,6 +178,10 @@ class MakerConfig:
     edge_c: float = 1.0        # cents better than current quote we post our limit
     wait_min: float = 10.0     # minutes we leave the resting limit before cancel
     venue: str = "polymarket"  # maker fee schedule
+    queue_c: float = 0.0       # PESSIMISTIC: require price to trade queue_c cents
+                               # THROUGH the limit before we fill (models being
+                               # behind other resting orders / no guaranteed fill
+                               # on a mere touch). 0 = optimistic touch-fills.
 
 
 def _maker_fee(venue, price):
@@ -257,12 +261,13 @@ def build_arms(panels, *, thresh=6.0, min_elapsed=600.0, max_elapsed=2520.0,
         # price for our side <= limit (the market traded through our resting bid).
         e = np.asarray(panel.elapsed_sec, float)
         t_end = entry_ts + maker.wait_min * 60.0
+        fill_thresh = limit - maker.queue_c / 100.0   # pessimistic: must trade THROUGH
         filled_bar = None
         for t in range(j, panel.n):
             if xp[t] > t_end:
                 break
             pr = side_price[t]
-            if np.isfinite(pr) and pr <= limit + 1e-9:
+            if np.isfinite(pr) and pr <= fill_thresh + 1e-9:
                 filled_bar = t
                 break
         if filled_bar is None:
