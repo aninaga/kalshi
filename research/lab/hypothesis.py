@@ -26,7 +26,6 @@ Public API (see ``research/lab/CONTRACT.md`` §lab/hypothesis.py)::
     update(hyp_id, *, verdict=None, results=None, status=None, path=...) -> Hypothesis
     query(status=None, market=None, path=...) -> list[Hypothesis]
     open_hypotheses(path=...) -> list[Hypothesis]
-    seed_defaults(path=...) -> None
 """
 from __future__ import annotations
 
@@ -35,7 +34,7 @@ import json
 import os
 from datetime import datetime, timezone
 
-from research.lab.types import SPREAD, TOTAL, WINNER, Hypothesis
+from research.lab.types import Hypothesis
 
 DEFAULT_PATH = "research/reports/alpha/hypotheses.jsonl"
 
@@ -198,91 +197,10 @@ def open_hypotheses(path: str = DEFAULT_PATH) -> list[Hypothesis]:
     return query(status="open", path=path)
 
 
-# --- starter ideas (drawn from research/ALPHA_FINDINGS.md) ------------------
-
-def _default_hypotheses() -> list[Hypothesis]:
-    """Starter NBA ideas seeded only into an empty store.
-
-    Pre-registered directions are 1-bit and mechanism-driven; verdicts here are
-    intentionally NOT pre-filled even where ALPHA_FINDINGS has a prior read, so a
-    fresh agent re-derives the call under realistic execution + the gate.
-    """
-    return [
-        # --- anchoring family ---
-        Hypothesis(
-            market=TOTAL,
-            mechanism=(
-                "Live totals lines anchor to a naive pace projection (current "
-                "total scaled to a full game) and are slow to mean-revert toward "
-                "the season-typical pace, so early-game pace shocks over/under-price "
-                "the final total."
-            ),
-            signal_desc="pace_projection(panel) - implied total level (anchoring_gap)",
-            direction="bet toward the season-mean pace when the projection diverges",
-        ),
-        Hypothesis(
-            market=SPREAD,
-            mechanism=(
-                "Live spread lines anchor to the current margin and underweight "
-                "expected reversion of an early lead, leaving a residual mispricing "
-                "on the trailing side that survives realistic fills (real fill mid "
-                "~0.5187, not 0.50)."
-            ),
-            signal_desc="current margin vs. reversion-adjusted expected final margin",
-            direction="bet the trailing side when the implied margin over-extrapolates the lead",
-        ),
-        # --- calibration family ---
-        Hypothesis(
-            market=WINNER,
-            mechanism=(
-                "In-game win-probability quotes are mis-calibrated at the extremes "
-                "(favorite-longshot bias): heavy favorites are systematically "
-                "over-priced and longshots under-priced relative to realized "
-                "outcomes."
-            ),
-            signal_desc="calibration_gap(panel, realized) at extreme implied win-prob",
-            direction="fade extreme favorites / back extreme longshots",
-        ),
-        Hypothesis(
-            market=TOTAL,
-            mechanism=(
-                "At extreme totals strikes (deep over/under tails) the listed "
-                "ladder is mis-calibrated because tail liquidity is thin and slow "
-                "to update on realized pace."
-            ),
-            signal_desc="calibration_gap on deep-tail strikes of the totals ladder",
-            direction="bet toward realized pace on mis-calibrated tail strikes",
-        ),
-        # --- reactions family ---
-        Hypothesis(
-            market=WINNER,
-            mechanism=(
-                "After a discrete game event (star substitution / timeout), the "
-                "market re-rates slowly beyond the raw scoreboard move, so the "
-                "win-prob lags fair value for a few minutes (sub-latency)."
-            ),
-            signal_desc="staleness_min(panel) elevated immediately after an event",
-            direction="trade toward the post-event fair value while the quote is stale",
-        ),
-        Hypothesis(
-            market=SPREAD,
-            mechanism=(
-                "A fair-value gap opens when the quoted level drifts away from a "
-                "freshly-updated model fair value (e.g. after a scoring run) and "
-                "the gap closes over the next minutes (mean-reversion of the gap)."
-            ),
-            signal_desc="zscore of (implied level - rolling fair value)",
-            direction="fade the gap: bet toward fair value when the z-score is extreme",
-        ),
-    ]
-
-
-def seed_defaults(path: str = DEFAULT_PATH) -> None:
-    """Seed a few starter NBA ideas — ONLY if the store is currently empty.
-
-    Idempotent: a second call is a no-op once anything has been registered.
-    """
-    if _load_state(path):
-        return
-    for h in _default_hypotheses():
-        register(h, path=path)
+# --- NO hardcoded ideas live here, by design -------------------------------
+# Hypotheses are ORIGINATED at runtime by an agent via ``research.lab.scout``
+# (which reasons over ``research.lab.eda`` diagnostics) and PRIORITIZED by
+# ``research.lab.director``. There is deliberately no hand-written starter list
+# or ``seed_defaults`` — the only thing the codebase hardcodes about which
+# strategies to pursue is that decision *machinery*, never the strategies. A
+# cold (empty) registry is populated by ``scout.propose(...)``, not by canned ideas.

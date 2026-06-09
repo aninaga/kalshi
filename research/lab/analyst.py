@@ -139,10 +139,12 @@ def run_analyst(
     budget_aware: bool = True,
     executor: Optional[Executor] = None,
     path: Optional[str] = None,
+    ledger_path: Optional[str] = None,
 ) -> dict:
     """Run one pass of the autonomous analyst harness.
 
-    Pulls OPEN hypotheses from the registry (seeding defaults if it is empty),
+    Originates ideas via the scout when the registry is empty, then lets the
+    director (an agent) PRIORITIZE which open hypotheses to pursue,
     and for each idea up to the budget-allowed cap: claims it, builds an
     assignment, dispatches it to ``executor``, and records the trial result back
     via ``lab.hypothesis.update``. The actual idea-generation/backtesting is the
@@ -165,6 +167,7 @@ def run_analyst(
     # Lazy import: sibling module may be absent/unmerged in an isolated worktree.
     from research.lab import hypothesis as H
 
+    path = path or getattr(H, "DEFAULT_PATH", None)
     started = _now()
     executor = executor or _noop_executor
 
@@ -187,16 +190,18 @@ def run_analyst(
         summary["finished"] = _now()
         return summary
 
-    # Pull OPEN hypotheses; seed starter ideas if the registry is empty.
-    open_hyps = H.open_hypotheses(path=path)
-    if not open_hyps and hasattr(H, "seed_defaults"):
-        H.seed_defaults(path=path)
-        open_hyps = H.open_hypotheses(path=path)
+    # Cold start: ORIGINATE ideas via the scout (an agent reasoning over EDA),
+    # never canned defaults. Then PRIORITIZE via the director (an agent ranking
+    # open ideas + the research ledger) — not FIFO. The only hardcoded thing
+    # about which strategies get pursued is this scout->director machinery.
+    if not H.open_hypotheses(path=path):
+        from research.lab import scout
+        scout.propose(market=market, brief=brief, registry_path=path)
+    from research.lab import director
+    chosen = director.select(k=allowed, market=market, registry_path=path,
+                             ledger_path=ledger_path, brief=brief)
 
-    if market is not None:
-        open_hyps = [h for h in open_hyps if getattr(h, "market", None) == market]
-
-    for hyp in open_hyps[:allowed]:
+    for hyp in chosen:
         hyp_id = getattr(hyp, "id", "") or hyp.hash()
         # Claim it (status -> running) so parallel analysts don't double-work it.
         claimed = H.claim(hyp_id, AGENT, path=path)

@@ -81,150 +81,12 @@ RATE_LIMIT_PAUSE_SEC = 600  # 10 minutes per plan v2 §codex_dispatcher
 # markdown blurbs; the actual codex worker prompt is generic and reads the
 # direction text from ``direction.md`` in its scratch dir.
 #
-# This is now the LEGACY hard-coded rotation: it is a FALLBACK. The loop prefers
-# OPEN hypotheses from the dynamic registry (``research.lab.hypothesis``) and
-# only drops back to this list when the registry is empty or absent. See
-# :func:`_select_directions`.
-DIRECTION_ROTATION: list[dict[str, str]] = [
-    {
-        "name": "calibration_gaps",
-        "blurb": (
-            "Hunt for **price calibration gaps**: situations where the "
-            "implied win-probability from Polymarket or Kalshi quotes "
-            "systematically lags the true outcome distribution (e.g. early "
-            "deficits at small magnitude, end-of-3Q closeouts). Propose a "
-            "spec that fires on a mispriced state and exits at "
-            "natural-resolution or a tight time-stop."
-        ),
-    },
-    {
-        "name": "halftime_quarter_reactions",
-        "blurb": (
-            "Hunt for **half-time / quarter-break reactions**: the orderbook "
-            "is known to be thin or stale right after a clock-stop boundary, "
-            "and a directional move in score can over- or under-shoot. "
-            "Propose a spec keyed off clock-boundary windows."
-        ),
-    },
-    {
-        "name": "news_substitution",
-        "blurb": (
-            "Hunt for **news / substitution reactions**: a star checks in/out "
-            "or a foul-trouble situation flips, and the market is slow to "
-            "reprice. Use ``home_stars_on`` / ``away_stars_on`` as the "
-            "primary signal."
-        ),
-    },
-    {
-        "name": "cross_market",
-        "blurb": (
-            "Hunt for **cross-market dispersion**: Polymarket and Kalshi "
-            "disagree on the same NBA game. Propose a spec that fires on "
-            "wide ``pm_implied_wp`` vs ``kalshi_implied_wp`` spread and "
-            "trades the cheaper side. (Note: kalshi_implied_wp has 0 rows "
-            "in the current cache — this direction is exploratory.)"
-        ),
-    },
-    {
-        "name": "tail_recovery",
-        "blurb": (
-            "Hunt for **tail-recovery situations**: large deficits late, "
-            "where the implied probability of the trailing side may be too "
-            "low. Be cautious: high concentration risk, small ``n_trades``. "
-            "Propose tight entry filters and a clear exit rule."
-        ),
-    },
-    {
-        "name": "halftime_continuation_variants",
-        "blurb": (
-            "**Promotion candidate already exists in this theme** — "
-            "`halftime_v2_window_wide` (window [1320, 1740], |run|>=6, "
-            "long_hot, TP +2c / SL -3c, 10-min time-stop) passes the full "
-            "scorer gate under live_pm: n_trades=400, block_bootstrap "
-            "CI=[+3.9%, +8.3%], season + parity stable. Hunt for VARIANTS "
-            "in the same theme that improve on it. Suggestions: try "
-            "different lookback windows (recent_run_signed magnitude over "
-            "the last 2-6 game-minutes), different TP/SL ratios, narrower "
-            "or wider time windows, pair with `pm_implied_wp` filters "
-            "(e.g. only fire when implied prob of the hot side is below "
-            "0.55 — there's room for the market to reprice). The mechanism "
-            "is post-halftime momentum continuation; don't propose fade "
-            "variants in this direction (those are confirmed losers — "
-            "see registry rejection record)."
-        ),
-    },
-    {
-        "name": "deep_underdog_value",
-        "blurb": (
-            "Hunt for **deep-underdog mispricing**: when ``pm_implied_wp`` "
-            "is in the long tail (e.g. < 0.10 for home or > 0.90 implying "
-            "< 0.10 for away) but `margin` plus `time_remaining` suggest a "
-            "non-trivial comeback probability. Markets often round these to "
-            "zero. High variance but potentially high edge — propose tight "
-            "filters and short holds so cost doesn't dominate."
-        ),
-    },
-    {
-        "name": "endgame_microstructure",
-        "blurb": (
-            "Hunt for **clock-boundary microstructure**: final 3-4 minutes "
-            "of regulation when `time_remaining <= 240` and orderbook is "
-            "thin. Either fade overreactions on a single possession or "
-            "exploit late-stage calibration drift. Short holds; mind the "
-            "fee asymmetry."
-        ),
-    },
-    {
-        "name": "pace_regime",
-        "blurb": (
-            "Hunt for **pace-regime effects**: high-pace games (``pace_ppm`` "
-            "above ~2.5) have noisier in-game probabilities; low-pace games "
-            "(``pace_ppm`` below ~2.0) calcify earlier. Propose a spec keyed "
-            "off `pace_ppm` thresholds combined with a margin / WP signal. "
-            "Justify the regime split in `writeup.md`."
-        ),
-    },
-    {
-        "name": "price_lag_after_score",
-        "blurb": (
-            "Hunt for **price-lag-after-score**: the market should reprice "
-            "promptly when margin changes, but the cache has 5s+ ESPN PBP "
-            "latency vs faster PM ticks (or vice versa). When `margin` and "
-            "`pm_implied_wp` disagree in direction, propose a spec that "
-            "fires on the disagreement and exits on convergence."
-        ),
-    },
-    {
-        "name": "lineup_change_microedge",
-        "blurb": (
-            "Hunt for **lineup-change reactions**: substitutions that change "
-            "`home_stars_on` or `away_stars_on` can be slow-priced. Propose "
-            "an entry that fires shortly after a star check-in or check-out "
-            "and exits within 1-3 game-minutes. Mention the failure mode "
-            "where star quality is not differentiated."
-        ),
-    },
-    {
-        "name": "close_game_clutch",
-        "blurb": (
-            "Hunt for **late close-game edges**: Q4 (`elapsed_game_sec >= "
-            "2160`) with `abs(margin) <= 3`. Win probability is most "
-            "sensitive to information here; if the market lags by even one "
-            "possession, the edge is biggest. Be specific about what "
-            "in-game state predicts the next swing."
-        ),
-    },
-    {
-        "name": "early_overreaction_fade",
-        "blurb": (
-            "Hunt for **Q1 overreaction**: large margin movements in the "
-            "first ~12 minutes (`elapsed_game_sec <= 720`) often don't "
-            "predict the rest of the game. Try fading a large `margin` or "
-            "`recent_run_signed` early. Hold longer (settle-style with "
-            "`time_stop_sec=7200`) so cost is amortised."
-        ),
-    },
-]
+# NO hardcoded rotation, by design. Which strategies get pursued is decided at
+# runtime by the agent layer: research.lab.scout ORIGINATES hypotheses from
+# research.lab.eda diagnostics and research.lab.director PRIORITIZES the open
+# pool against the research ledger. This orchestrator only carries that
+# machinery — never a menu of strategies. (Kept empty intentionally.)
+DIRECTION_ROTATION: list[dict[str, str]] = []
 
 
 # --------------------------------------------------------------------------- #
@@ -307,37 +169,45 @@ def _hypothesis_to_direction(h) -> dict[str, str]:
     }
 
 
-def _select_directions() -> list[dict[str, str]]:
-    """Rotation to draw directions from, preferring the dynamic registry.
+def _select_directions(originate: bool = True) -> list[dict[str, str]]:
+    """Directions to pursue — AGENT-DECIDED, never hardcoded.
 
-    Pulls OPEN hypotheses from ``research.lab.hypothesis`` (the runtime
-    replacement for the hard-coded menu). Degrades gracefully to the legacy
-    ``DIRECTION_ROTATION`` list when the registry module is absent (not yet
-    merged in this worktree) or returns no open hypotheses.
+    ``research.lab.scout`` ORIGINATES hypotheses from data (when the open pool is
+    empty) and ``research.lab.director`` PRIORITIZES them. Returns ``[]`` when
+    there is genuinely nothing open — there is no canned rotation to fall back to
+    (that is the point). The caller must run the scout (with a live agent) to
+    populate the pool.
     """
     try:
-        from research.lab import hypothesis as _hyp  # lazy: may not be merged
+        from research.lab import director, hypothesis as _hyp  # lazy
     except ImportError:
-        return list(DIRECTION_ROTATION)
+        return []
     try:
-        open_hyps = _hyp.open_hypotheses()
-    except Exception:  # noqa: BLE001 — never let registry I/O break the loop
-        return list(DIRECTION_ROTATION)
-    directions = [_hypothesis_to_direction(h) for h in open_hyps]
-    return directions or list(DIRECTION_ROTATION)
+        if originate and not _hyp.open_hypotheses():
+            from research.lab import scout
+            scout.propose()  # agent origination from EDA diagnostics
+        chosen = director.select(k=8)
+    except Exception:  # noqa: BLE001 — never let the layer crash the loop
+        return []
+    return [_hypothesis_to_direction(h) for h in chosen]
 
 
 def _pick_direction(
     state: dict[str, Any],
     rotation: list[dict[str, str]] | None = None,
 ) -> dict[str, str]:
-    """Return the next direction in the rotation and advance state.
+    """Return the next director-ranked direction and advance state.
 
-    ``rotation`` defaults to :func:`_select_directions` (registry-backed with a
-    legacy fallback). Mutates ``state`` in-place (caller persists).
+    ``rotation`` defaults to :func:`_select_directions` (agent-decided). Raises
+    if the pool is empty — there is no hardcoded menu to fall back to; originate
+    ideas via the scout first. Mutates ``state`` in-place (caller persists).
     """
     if rotation is None:
         rotation = _select_directions()
+    if not rotation:
+        raise RuntimeError(
+            "no open hypotheses to pursue — run research.lab.scout with a live "
+            "agent to originate ideas; nothing hardcoded to fall back to.")
     idx = int(state.get("direction_rotation_index", 0)) % len(rotation)
     direction = rotation[idx]
     state["direction_rotation_index"] = (idx + 1) % len(rotation)

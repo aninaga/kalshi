@@ -152,3 +152,29 @@ These are not style preferences; each is a scar from a real failure.
   cost sweep and the OOS / season-half check. The totals 0.50-fill artifact is
   the canonical cautionary tale — ~5.55¢ of a "+8¢ edge" was nothing but the gap
   between a fabricated 0.50 and the price you would actually pay.
+
+## The decision layer — what gets pursued (and why nothing is hardcoded)
+
+The substrate above is the *bench*. What an analyst-agent actually *pursues* is
+decided at runtime by a three-part layer — and that machinery is the **only**
+thing the codebase hardcodes about strategy selection. There is no seeded idea
+list, no `DIRECTIONS`/`DIRECTION_ROTATION` menu, no `seed_defaults` (all removed).
+
+1. **`lab.eda`** — idea-agnostic data scanners. Surface *where* a market deviates
+   from calibration/efficiency (calibration bias by price bucket, anchoring-gap
+   distribution, staleness). Raw material, never a recommendation.
+2. **`lab.scout`** — ORIGINATION. Hands the EDA + the research record to an agent
+   (`scout_prompt.md`) that *invents* new, distinct, mechanism-grounded
+   hypotheses and registers them. Ideas come from the model, not a hand list. If
+   no agent is available and the registry is empty, the pool stays empty (the
+   loop says so) — nothing canned is substituted.
+3. **`lab.director`** — PRIORITIZATION + FEEDBACK. `select()` hands the open pool
+   + the verdict ledger to an agent (`director_prompt.md`) that *ranks* what to
+   pursue next by expected value × novelty × evidence (down-ranking DEAD
+   families, deepening PROMISING leads). `incorporate_results()` folds recorded
+   verdicts back into the registry so the pool evolves. No round-robin.
+
+Drivers (`agents/usage/edge_hunt_loop.py`, `lab/analyst.py`,
+`agents/orchestrator/run.py`) all route through scout → director → feedback.
+Cold start = scout (agent), selection = director (agent), learning = feedback
+(results). The strategies are the agent's; the layer is ours.

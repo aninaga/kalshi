@@ -50,31 +50,12 @@ class Direction:
     hypothesis: str
 
 
-# Markets × mechanisms. Ordered by my prior of where edge survives: less-watched
-# books first, level/anchoring mechanisms over timing (honest i+1 kills timing).
-#
-# These are the LEGACY hard-coded directions. They are now a FALLBACK: the loop
-# prefers OPEN hypotheses from the dynamic registry (`research.lab.hypothesis`)
-# and only drops back to this list when the registry is empty or absent. See
-# `_select_directions`.
-DIRECTIONS = [
-    Direction("totals_extend", "totals",
-              "Extend the certified pace-anchoring totals edge: quarter-conditioned "
-              "entries, team-specific pace priors, or a spreads-implied total cross-check. "
-              "Confirm it survives the freshness guard and the gate at 2c."),
-    Direction("spread_anchor", "spread",
-              "Spread/handicap line anchors on the pregame number and under-reacts to the "
-              "live margin trajectory — mirror totals_alpha for the spread book."),
-    Direction("altline_drift", "alt_total",
-              "Alternate total lines (over X+k) drift stale relative to the main line they "
-              "should track; fade the cross-line inconsistency, hold to settlement."),
-    Direction("props_thin", "player_prop",
-              "Player-prop books are thin and slow to mark foul trouble / blowout benching; "
-              "look for a level mispricing, NOT a timing play. Verify liquidity first."),
-    Direction("totals_endgame", "totals",
-              "Late-game totals: fouling/clock effects make the final-minutes total "
-              "predictable vs a line that stops updating; honest i+1, hold to settlement."),
-]
+# NO hardcoded directions, by design. Which strategies get pursued is decided at
+# runtime by the agent layer: `research.lab.scout` ORIGINATES hypotheses from
+# `research.lab.eda` diagnostics, and `research.lab.director` PRIORITIZES the
+# open pool against the research ledger. This loop only carries that machinery —
+# never a menu of strategies. (Kept empty intentionally; do not re-add a list.)
+DIRECTIONS: list[Direction] = []
 
 
 def _hypothesis_to_direction(h) -> Direction:
@@ -97,24 +78,28 @@ def _hypothesis_to_direction(h) -> Direction:
     )
 
 
-def _select_directions() -> list[Direction]:
-    """Directions to rotate through, preferring the dynamic registry.
+def _next_directions(k: int, *, ledger_path: str | None = None,
+                     originate: bool = True) -> list[Direction]:
+    """The next ``k`` directions to pursue — agent-decided, never hardcoded.
 
-    Pulls OPEN hypotheses from ``research.lab.hypothesis`` (the runtime
-    replacement for the hard-coded menu). Degrades gracefully to the legacy
-    ``DIRECTIONS`` list when the registry module is absent (not yet merged in
-    this worktree) or returns no open hypotheses.
+    ``research.lab.scout`` ORIGINATES hypotheses from data (only when the open
+    pool is empty AND ``originate`` is set, since it needs a live agent), and
+    ``research.lab.director`` PRIORITIZES the open pool against the research
+    ledger. Returns ``[]`` when there is genuinely nothing to pursue — there is
+    no canned menu to fall back to (that is the point).
     """
     try:
-        from research.lab import hypothesis as _hyp  # lazy: may not be merged
+        from research.lab import director, hypothesis as _hyp  # lazy
     except ImportError:
-        return list(DIRECTIONS)
+        return []
     try:
-        open_hyps = _hyp.open_hypotheses()
-    except Exception:  # noqa: BLE001 — never let registry I/O break the loop
-        return list(DIRECTIONS)
-    directions = [_hypothesis_to_direction(h) for h in open_hyps]
-    return directions or list(DIRECTIONS)
+        if originate and not _hyp.open_hypotheses():
+            from research.lab import scout
+            scout.propose()  # agent origination from EDA diagnostics
+        chosen = director.select(k=k, ledger_path=ledger_path)
+    except Exception:  # noqa: BLE001 — never let the layer crash the loop
+        return []
+    return [_hypothesis_to_direction(h) for h in chosen]
 
 
 def _load_state() -> dict:
@@ -189,10 +174,16 @@ def main(argv=None) -> int:
     state = _load_state()
     LEDGER.parent.mkdir(parents=True, exist_ok=True)
 
-    directions = _select_directions()
-
     for w in range(a.waves):
-        direction = directions[state["dir_idx"] % len(directions)]
+        # The agent layer decides what to pursue this wave (scout originates if
+        # the pool is empty; director ranks). No hardcoded menu, no round-robin.
+        dirs = _next_directions(1, ledger_path=str(LEDGER), originate=not a.dry_run)
+        if not dirs:
+            print("no open hypotheses to pursue — originate ideas by running the "
+                  "scout with a live agent (codex); nothing hardcoded to fall back "
+                  "to. stopping.", flush=True)
+            break
+        direction = dirs[0]
         if a.dry_run:
             n = a.workers
             plan_reason = "dry-run (limits not polled)"
@@ -217,6 +208,7 @@ def main(argv=None) -> int:
         for r in results:
             r["wave"] = w + 1
             r["direction"] = direction.key
+            r["hypothesis_id"] = direction.key   # registry id, for the feedback step
             if not a.dry_run:
                 with LEDGER.open("a") as fh:
                     fh.write(json.dumps(r) + "\n")
@@ -229,7 +221,15 @@ def main(argv=None) -> int:
             print(f"  ** {len(promote)} PROMOTE candidate(s) — human review + optional test-set "
                   f"unlock required (workers never touch test) **", flush=True)
 
-        state["dir_idx"] += 1
+        # Feedback: fold this wave's verdicts back into the registry so the
+        # director's next pick reflects what just happened (DEAD ideas leave the
+        # open pool; PROMISING leads stay). Pure results-driven, not hardcoded.
+        if not a.dry_run:
+            try:
+                from research.lab import director
+                director.incorporate_results(str(LEDGER))
+            except Exception:  # noqa: BLE001
+                pass
         state["waves_done"] += 1
         _save_state(state)
 

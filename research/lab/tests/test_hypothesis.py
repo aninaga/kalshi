@@ -149,33 +149,16 @@ def test_query_empty_store(tmp_path):
     assert H.open_hypotheses(path=path) == []
 
 
-# --- seed_defaults ----------------------------------------------------------
-
-def test_seed_defaults_populates_empty_store(tmp_path):
-    path = _store(tmp_path)
-    H.seed_defaults(path=path)
-    seeded = H.query(path=path)
-    assert len(seeded) >= 3
-    # spans multiple families/markets and starts all open.
-    assert {h.market for h in seeded} >= {TOTAL, SPREAD, WINNER}
-    assert all(h.status == "open" for h in seeded)
-    assert all(h.id for h in seeded)
+# NOTE: there is intentionally NO seed_defaults / hand-written starter list.
+# Hypotheses are originated at runtime by research.lab.scout (an agent reasoning
+# over EDA); an empty registry stays empty until the scout runs — nothing canned
+# to seed. The origination + ranking layer is covered by test_scout / test_director.
 
 
-def test_seed_defaults_idempotent(tmp_path):
-    path = _store(tmp_path)
-    H.seed_defaults(path=path)
-    n1 = len(H.query(path=path))
-    H.seed_defaults(path=path)
-    H.seed_defaults(path=path)
-    assert len(H.query(path=path)) == n1
-
-
-def test_seed_defaults_noop_when_nonempty(tmp_path):
-    path = _store(tmp_path)
-    H.register(_hyp(mechanism="custom"), path=path)
-    H.seed_defaults(path=path)
-    assert len(H.query(path=path)) == 1
+def test_no_hardcoded_seed_api(tmp_path):
+    # The registry must not ship any canned-idea entry point.
+    assert not hasattr(H, "seed_defaults")
+    assert not hasattr(H, "_default_hypotheses")
 
 
 # --- E2E smoke (synthetic) --------------------------------------------------
