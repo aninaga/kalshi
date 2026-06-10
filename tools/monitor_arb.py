@@ -145,7 +145,9 @@ def _load_screens(args) -> list:
         return []
     hot = []
     try:
-        hot.extend(lp.kalshi_event_screens(lp.fetch_kalshi_events()))
+        evs = lp.fetch_kalshi_events()
+        hot.extend(lp.kalshi_event_screens(evs))
+        hot.extend(lp.kalshi_ladder_screens(evs))
     except Exception as exc:    # screen failure must never kill the monitor
         print(f"kalshi event screen failed: {exc}", file=sys.stderr)
     try:
@@ -244,6 +246,8 @@ def main(argv=None) -> int:
 
     def _price_candidate(c):
         try:
+            if c.get("kind") == "ladder":
+                return lp.price_kalshi_ladder(c, pairs_by_ktk, args.pm_fee_bps)
             if str(c.get("ev", "")).startswith("pm:"):
                 return lp.price_pm_dutch(c, args.pm_fee_bps)
             return lp.price_kalshi_dutch(c, pairs_by_ktk, args.pm_fee_bps)

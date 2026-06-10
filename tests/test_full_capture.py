@@ -274,3 +274,69 @@ def test_monitor_records_dutch_episode_with_strategy(tmp_path, monkeypatch):
     assert len(eps) == 1
     assert eps[0]["strategy"] == "dutch_no" and eps[0]["key"] == "dutch_no:EV1"
     assert eps[0]["peak_net"] == 7.0
+
+
+# --- implication arbs: cumulative-ladder monotonicity ------------------------ #
+
+def test_ladder_screen_flags_monotonicity_violation_non_mx_only():
+    ev = {"event_ticker": "EVL", "mutually_exclusive": False, "title": "Goals",
+          "markets": [
+              {"ticker": "EVL-2", "status": "active", "yes_sub_title": "2+",
+               "yes_ask_dollars": 0.50, "yes_bid_dollars": 0.45, "title": ""},
+              {"ticker": "EVL-5", "status": "active", "yes_sub_title": "5+",
+               "yes_ask_dollars": 0.60, "yes_bid_dollars": 0.56, "title": ""},
+          ]}
+    out = lp.kalshi_ladder_screens([ev])
+    # bid(5+)=0.56 > ask(2+)=0.50: YES(5+) implies YES(2+) -> violation 0.06.
+    assert len(out) == 1 and out[0]["kind"] == "ladder"
+    assert out[0]["buy_yes"] == "EVL-2" and out[0]["buy_no"] == "EVL-5"
+    assert out[0]["gross"] == pytest.approx(0.06)
+    # The SAME shape on an MX event (exclusive range buckets) must not fire.
+    assert lp.kalshi_ladder_screens([{**ev, "mutually_exclusive": True}]) == []
+
+
+def test_ladder_screen_quiet_when_monotone():
+    ev = {"event_ticker": "EVL", "mutually_exclusive": False, "title": "Goals",
+          "markets": [
+              {"ticker": "EVL-2", "status": "active", "yes_sub_title": "2+",
+               "yes_ask_dollars": 0.50, "yes_bid_dollars": 0.45, "title": ""},
+              {"ticker": "EVL-5", "status": "active", "yes_sub_title": "5+",
+               "yes_ask_dollars": 0.30, "yes_bid_dollars": 0.25, "title": ""},
+          ]}
+    assert lp.kalshi_ladder_screens([ev]) == []
+
+
+def test_ladder_priced_as_clean_guaranteed_basket(monkeypatch):
+    cand = {"ev": "EVL", "kind": "ladder", "gross": 0.06, "n": 2,
+            "buy_yes": "EVL-2", "buy_no": "EVL-5", "title": "Goals"}
+    books = {"EVL-2": ([(0.50, 40)], [(0.55, 40)]),     # buy YES at 0.50
+             "EVL-5": ([(0.60, 40)], [(0.44, 40)])}     # buy NO at 0.44
+    monkeypatch.setattr(lp, "kalshi_book", lambda tk: books[tk])
+    res = lp.price_kalshi_ladder(cand)
+    assert res is not None
+    assert res["strategy"] == "ladder" and res["uncertain"] is False
+    assert res["key"] == "ladder:EVL-2|EVL-5"
+    fees = (FeeModel.kalshi_taker_fee(0.50, 40) + FeeModel.kalshi_taker_fee(0.44, 40))
+    assert res["net"] == pytest.approx(40 - (0.50 + 0.44) * 40 - fees)
+
+
+def test_ladder_rungs_grouped_by_subject_not_event():
+    # Caught live pre-deploy: a player-props event mixes many players' ladders;
+    # YES(Brunson 11+) implies nothing about Alvarado. Cross-subject "rungs"
+    # must never pair; same-subject rungs still do.
+    ev = {"event_ticker": "PTS", "mutually_exclusive": False, "title": "Points",
+          "markets": [
+              {"ticker": "PTS-ALV-5", "status": "active",
+               "yes_sub_title": "Jose Alvarado 5+", "title": "",
+               "yes_ask_dollars": 0.20, "yes_bid_dollars": 0.15},
+              {"ticker": "PTS-BRU-11", "status": "active",
+               "yes_sub_title": "Jalen Brunson 11+", "title": "",
+               "yes_ask_dollars": 0.95, "yes_bid_dollars": 0.90},
+          ]}
+    assert lp.kalshi_ladder_screens([ev]) == []   # bid .90 > ask .20, but wrong subject
+    ev["markets"].append({"ticker": "PTS-BRU-20", "status": "active",
+                          "yes_sub_title": "Jalen Brunson 20+", "title": "",
+                          "yes_ask_dollars": 0.99, "yes_bid_dollars": 0.97})
+    out = lp.kalshi_ladder_screens([ev])          # Brunson 20+ bid .97 > 11+ ask .95
+    assert len(out) == 1
+    assert out[0]["buy_yes"] == "PTS-BRU-11" and out[0]["buy_no"] == "PTS-BRU-20"

@@ -728,6 +728,101 @@ def price_kalshi_dutch(cand: Dict, pairs_by_ktk: Optional[Dict] = None,
     return res
 
 
+_AT_LEAST_RX = re.compile(r"(\d[\d,]*)\s*\+")
+
+
+def kalshi_ladder_screens(events: List[Dict], min_gross: float = 0.01) -> List[Dict]:
+    """Threshold-monotonicity screen over CUMULATIVE ladders (implication arb).
+
+    Within one event, "N+" outcomes are cumulative: YES(higher N) logically
+    implies YES(lower N), so bid(higher) can never validly exceed ask(lower).
+    When it does, buying YES(lower) + NO(higher) costs < $1 and pays >= $1 in
+    every world — same guarantee class as a NO-dutch, and CLEAN because both
+    markets share one event's resolution rules.
+
+    Only NON-mutually-exclusive events qualify: MX range buckets ("3000-4000",
+    "5000+") are exclusive, where the implication does not hold.
+    """
+    out = []
+    for e in events:
+        if e.get("mutually_exclusive"):
+            continue
+        # Group rungs by SUBJECT: a player-props event contains many players'
+        # ladders, and YES(Brunson 11+) implies nothing about Alvarado. The
+        # subject is the outcome text with the threshold removed (fallback:
+        # ticker minus its trailing threshold suffix).
+        by_subject: Dict[str, list] = {}
+        for m in (e.get("markets") or []):
+            if str(m.get("status", "active")).lower() not in ("", "active", "open", "initialized"):
+                continue
+            text = f"{m.get('yes_sub_title','')} {m.get('title','')}"
+            mt = _AT_LEAST_RX.search(text)
+            if not mt:
+                continue
+            try:
+                thr = float(mt.group(1).replace(",", ""))
+                ask = float(m.get("yes_ask_dollars") or 0)
+                bid = float(m.get("yes_bid_dollars") or 0)
+            except (TypeError, ValueError):
+                continue
+            subject = re.sub(r"\s+", " ", text.replace(mt.group(0), " ")).strip().lower()
+            if not subject:
+                subject = re.sub(r"-?\d+$", "", str(m.get("ticker") or ""))
+            by_subject.setdefault(subject, []).append((thr, ask, bid, m.get("ticker")))
+        best = None
+        for rungs in by_subject.values():
+            if len(rungs) < 2:
+                continue
+            rungs.sort()
+            for i in range(len(rungs)):
+                for j in range(i + 1, len(rungs)):
+                    t_lo, ask_lo, _, tk_lo = rungs[i]
+                    t_hi, _, bid_hi, tk_hi = rungs[j]
+                    if t_hi <= t_lo or ask_lo <= 0 or bid_hi <= 0:
+                        continue
+                    viol = bid_hi - ask_lo
+                    if viol > min_gross and (best is None or viol > best["gross"]):
+                        best = {"ev": e.get("event_ticker") or tk_lo, "kind": "ladder",
+                                "gross": viol, "n": 2, "buy_yes": tk_lo, "buy_no": tk_hi,
+                                "exhaustive": True, "title": e.get("title", "")}
+        if best:
+            out.append(best)
+    return out
+
+
+def price_kalshi_ladder(cand: Dict, pairs_by_ktk: Optional[Dict] = None,
+                        pm_fee_bps: int = 500) -> Optional[Dict]:
+    """Precise pricing of a ladder candidate: buy YES(lower rung) + NO(higher
+    rung); payout >= $1 in every world. PM ladders merge in when either rung
+    has a verified pair (cheapest venue per level)."""
+    pairs_by_ktk = pairs_by_ktk or {}
+
+    def _leg(ticker, want_yes):
+        kyes, kno = kalshi_book(ticker)
+        lad = _tag(kyes if want_yes else kno, True)
+        pair = pairs_by_ktk.get(ticker)
+        if pair and not pair.get("uncertain"):
+            toks = {str(t.get("outcome", "")).lower(): t["token_id"]
+                    for t in pair.get("tokens") or []}
+            inv = pair.get("polarity") == INVERTED
+            side = ("no" if inv else "yes") if want_yes else ("yes" if inv else "no")
+            tok = toks.get(side)
+            if tok:
+                lad = _merge_ladders(lad, _tag(pm_asks(tok), False))
+        return lad
+
+    yes_leg = _leg(cand["buy_yes"], True)
+    no_leg = _leg(cand["buy_no"], False)
+    res = walk_basket([yes_leg, no_leg], pm_fee_bps, payout=1.0)
+    if not res:
+        return None
+    res.update({"strategy": "ladder", "key": f"ladder:{cand['buy_yes']}|{cand['buy_no']}",
+                "kt": cand.get("title") or cand["ev"], "n_legs": 2,
+                "ktk": cand["buy_yes"], "uncertain": False})
+    res["implausible"] = res["net_edge"] > getattr(Config, "MAX_PLAUSIBLE_PROFIT_MARGIN", 0.15)
+    return res
+
+
 def fetch_kalshi_events() -> List[Dict]:
     """Open Kalshi events with nested markets (the dutch screen's input)."""
     evs, cur, pages = [], "", 0
