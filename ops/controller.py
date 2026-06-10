@@ -46,6 +46,14 @@ MAX_CONCURRENT_LANES = 2
 TOPUP_HOUR_LOCAL = 3          # nightly data top-up at 03:00
 PYTHON = sys.executable
 
+# Recurring paper-trading cadence (only while RUNNING; all passes idempotent).
+PAPER_JOBS = [
+    (3600, "paper_vintages", f"{PYTHON} -m research.scripts.update_forecast_vintages"),
+    (900, "paper_open", f"{PYTHON} -m research.lab.paper --open --book weather_maker_v1 --strategy forecast_gap_maker"),
+    (900, "paper_mark", f"{PYTHON} -m research.lab.paper --mark --book weather_maker_v1"),
+    (3600, "paper_settle", f"{PYTHON} -m research.lab.paper --settle --book weather_maker_v1"),
+]
+
 TOPUP_CMDS = [
     f"{PYTHON} -m research.lab.providers.weather --build --cities NYC,CHI,MIA,AUS,DEN --max-events 250",
     f"{PYTHON} -m research.lab.providers.crypto --build --assets BTC --max-events 800 --stride 2 --shard 0 --nshards 1",
@@ -223,6 +231,7 @@ def scheduler() -> None:
             if running_mode:
                 _maybe_launch_lanes()
                 _maybe_topup()
+                _maybe_paper()
         except Exception as exc:  # noqa: BLE001
             log(f"scheduler error: {exc!r}")
         time.sleep(10)
@@ -242,6 +251,21 @@ def _maybe_launch_lanes() -> None:
                 save_queue(q)
                 spawn(item["id"], item["cmd"], cwd=item.get("cwd"), kind="lane")
                 return
+
+
+def _maybe_paper() -> None:
+    now = time.time()
+    with _lock:
+        rec = STATE.setdefault("recurring", {})
+        for interval, jid, cmd in PAPER_JOBS:
+            if now - rec.get(jid, 0) < interval:
+                continue
+            if any(k == jid and _alive(c["pid"])
+                   for k, c in STATE["children"].items()):
+                continue
+            rec[jid] = now
+            save_state(STATE)
+            spawn(jid, cmd, kind="paper")
 
 
 def _maybe_topup() -> None:
