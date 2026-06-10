@@ -61,7 +61,7 @@ def test_pair_structures_routes_us_pairs_and_skips_intra(monkeypatch):
         calls["n"] += 1
         assert slug == "slug-a"
         return [(0.45, 100)], [(0.55, 100)]
-    monkeypatch.setattr("kalshi_arbitrage.pmus.pmus_book", fake_us_book)
+    monkeypatch.setattr(pmus, "pmus_book", fake_us_book)
     out = lp.pair_structures(pair)
     # comp found: K-yes 0.40 + US-no 0.55 < $1; NO pm_intra for a unified book.
     assert [r["strategy"] for r in out] == ["comp"]
