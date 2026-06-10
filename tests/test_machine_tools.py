@@ -43,9 +43,10 @@ def test_monitor_ledger_records_episode(tmp_path, monkeypatch):
     pair = {"ktk": "K1", "pid": "P1", "kt": "Test market", "pt": "Test", "tokens": [], "polarity": "aligned"}
     monkeypatch.setattr(monitor_arb.lp, "discover", lambda: [pair])
     monkeypatch.setattr(monitor_arb, "_load_screens", lambda a: [])
+    monkeypatch.setattr(monitor_arb, "_start_ws_feed", lambda a, w: None)
     state = {"n": 0}
 
-    def fake_structures(p, bps):
+    def fake_structures(p, bps, **kw):
         state["n"] += 1
         if state["n"] == 1:  # gap open on first poll, closed thereafter
             return [{**pair, "net": 5.0, "net_edge": 0.03, "size": 100, "cost": 95,
@@ -103,8 +104,9 @@ def test_monitor_watchlist_cache_persists_and_merges(tmp_path, monkeypatch):
     from tools import monitor_arb
     pair = {"ktk": "K1", "pid": "P1", "kt": "T", "pt": "T", "tokens": [],
             "polarity": "aligned"}
-    monkeypatch.setattr(monitor_arb.lp, "pair_structures", lambda p, bps: [])
+    monkeypatch.setattr(monitor_arb.lp, "pair_structures", lambda p, bps, **kw: [])
     monkeypatch.setattr(monitor_arb, "_load_screens", lambda a: [])
+    monkeypatch.setattr(monitor_arb, "_start_ws_feed", lambda a, w: None)
     monkeypatch.setattr(monitor_arb, "_kalshi_alive", lambda p: True)
     monkeypatch.setattr(monitor_arb, "_reverify", lambda p: p)
     cache = tmp_path / "watch.json"
@@ -135,8 +137,9 @@ def test_watchlist_cache_respects_allowlist_removal(tmp_path, monkeypatch):
     monkeypatch.setattr(monitor_arb.lp, "discover", lambda: [])  # catalogs forgot both
     monkeypatch.setattr(monitor_arb, "_kalshi_alive", lambda p: True)
     monkeypatch.setattr(monitor_arb, "_reverify", lambda p: p)
-    monkeypatch.setattr(monitor_arb.lp, "pair_structures", lambda p, bps: [])
+    monkeypatch.setattr(monitor_arb.lp, "pair_structures", lambda p, bps, **kw: [])
     monkeypatch.setattr(monitor_arb, "_load_screens", lambda a: [])
+    monkeypatch.setattr(monitor_arb, "_start_ws_feed", lambda a, w: None)
     assert monitor_arb.main(["--interval", "0", "--duration", "0.01",
                              "--allowlist", str(allow),
                              "--watchlist-cache", str(cache)]) == 0

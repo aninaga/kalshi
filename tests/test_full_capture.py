@@ -249,10 +249,11 @@ def test_monitor_records_dutch_episode_with_strategy(tmp_path, monkeypatch):
     from tools import monitor_arb
     pair = dict(PAIR)
     monkeypatch.setattr(monitor_arb.lp, "discover", lambda: [pair])
-    monkeypatch.setattr(monitor_arb.lp, "pair_structures", lambda p, bps: [])
+    monkeypatch.setattr(monitor_arb.lp, "pair_structures", lambda p, bps, **kw: [])
     cand = {"ev": "EV1", "kind": "dutch_no", "gross": 0.2, "n": 3,
             "tickers": ["a", "b", "c"], "exhaustive": False, "title": "Event"}
     monkeypatch.setattr(monitor_arb, "_load_screens", lambda a: [cand])
+    monkeypatch.setattr(monitor_arb, "_start_ws_feed", lambda a, w: None)
     state = {"n": 0}
 
     def fake_dutch(c, pairs_by_ktk=None, pm_fee_bps=500):

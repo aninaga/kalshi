@@ -137,7 +137,8 @@ def pm_asks(token: str) -> list:
     return sorted((float(a["price"]), float(a["size"])) for a in (b or {}).get("asks", []))
 
 
-def pair_structures(pair: Dict, pm_fee_bps: int = 500) -> List[Dict]:
+def pair_structures(pair: Dict, pm_fee_bps: int = 500,
+                    pm_book_fn=None) -> List[Dict]:
     """Fetch synchronized books for a verified pair ONCE and price every arb
     structure the pair supports:
 
@@ -152,7 +153,10 @@ def pair_structures(pair: Dict, pm_fee_bps: int = 500) -> List[Dict]:
     toks = {str(t.get("outcome", "")).lower(): t["token_id"] for t in pair["tokens"]}
     yes_t = toks.get("yes") or pair["tokens"][0]["token_id"]
     no_t = toks.get("no") or pair["tokens"][1]["token_id"]
-    pyes, pno = pm_asks(yes_t), pm_asks(no_t)
+    # pm_book_fn lets the monitor serve books from the live WS mirror
+    # (REST only on mirror miss/staleness).
+    fetch_pm = pm_book_fn or pm_asks
+    pyes, pno = fetch_pm(yes_t), fetch_pm(no_t)
 
     # -- cross-venue complementary ------------------------------------------ #
     inv = pair["polarity"] == INVERTED

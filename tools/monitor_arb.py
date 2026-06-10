@@ -118,6 +118,24 @@ def _load_watchlist(args) -> list:
     return pairs
 
 
+def _start_ws_feed(args, watch):
+    """Start the WS book feed (PM public channel; Kalshi when creds exist).
+    Failure is non-fatal: the REST sweep covers everything without it."""
+    if getattr(args, "no_ws", False) or not watch:
+        return None
+    try:
+        from kalshi_arbitrage import ws_books
+        feed = ws_books.WsBookFeed(watch)
+        feed.start()
+        print(f"WS feed started: {len(feed.token_to_pair)} PM tokens"
+              f"{' + kalshi' if feed.kalshi.creds_present() else ' (kalshi dormant: no creds)'}",
+              file=sys.stderr)
+        return feed
+    except Exception as exc:
+        print(f"ws feed unavailable: {exc}", file=sys.stderr)
+        return None
+
+
 def _load_screens(args) -> list:
     """Full-venue event-dutch screen: top-of-book over BOTH venues' catalog
     feeds (Kalshi open events + PM neg-risk events), refreshed with the
@@ -171,6 +189,8 @@ def main(argv=None) -> int:
                          "(paper unless EXECUTION_MODE=live AND allowlisted AND armed).")
     ap.add_argument("--refresh-watchlist", type=float, default=1800,
                     help="Re-discover the watch-list every N seconds (markets open/close).")
+    ap.add_argument("--no-ws", action="store_true",
+                    help="Disable the WebSocket book feed (REST sweep only).")
     ap.add_argument("--no-event-screens", action="store_true",
                     help="Disable the full-venue event-dutch screens (pair "
                          "structures only).")
@@ -211,7 +231,16 @@ def main(argv=None) -> int:
     last_snapshot = t_start
     pairs_by_ktk = {p.get("ktk"): p for p in watch}
     hot = _load_screens(args)   # event-dutch candidates, refreshed with the watch-list
+    feed = _start_ws_feed(args, watch)
     print(f"{'time':<9} {'event':<6} {'net$':>7} {'edge':>6} {'size':>7}  market", flush=True)
+
+    def _pm_books(token):
+        """WS-mirror-first PM book fetch (REST on miss/staleness)."""
+        if feed is not None:
+            m = feed.mirror.get_asks(str(token))
+            if m is not None:
+                return m
+        return lp.pm_asks(token)
 
     def _price_candidate(c):
         try:
@@ -227,11 +256,16 @@ def main(argv=None) -> int:
             watch = _load_watchlist(args)
             pairs_by_ktk = {p.get("ktk"): p for p in watch}
             hot = _load_screens(args)
+            if feed is not None:           # token set changed: rebuild the feed
+                feed.stop()
+                feed = _start_ws_feed(args, watch)
             last_refresh = now
 
         live = {}
         with concurrent.futures.ThreadPoolExecutor(max_workers=16) as ex:
-            results = list(ex.map(lambda p: lp.pair_structures(p, args.pm_fee_bps), watch))
+            results = list(ex.map(
+                lambda p: lp.pair_structures(p, args.pm_fee_bps, pm_book_fn=_pm_books),
+                watch))
             results.extend([r] for r in ex.map(_price_candidate, hot))
         for rs in results:
             for r in rs or []:
@@ -308,7 +342,51 @@ def main(argv=None) -> int:
 
         if args.duration and now - t_start >= args.duration:
             break
-        time.sleep(args.interval)
+        # Sleep in ~1s slices, draining the WS dirty set: pairs whose books
+        # just moved get re-priced immediately (tick-resolution OPENs/peaks;
+        # CLOSEs stay sweep-based so episode semantics are unchanged).
+        deadline = now + args.interval
+        while True:
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                break
+            if args.duration and time.time() - t_start >= args.duration:
+                break
+            time.sleep(min(1.0, remaining))
+            if feed is None:
+                continue
+            dirty = feed.dirty_pairs() & set(pairs_by_ktk)
+            if not dirty:
+                continue
+            ts = datetime.now(timezone.utc).strftime("%H:%M:%S")
+            for ktk in dirty:
+                try:
+                    rs = lp.pair_structures(pairs_by_ktk[ktk], args.pm_fee_bps,
+                                            pm_book_fn=_pm_books)
+                except Exception:
+                    continue
+                for r in rs or []:
+                    if not (r["net"] >= args.min_net_usd
+                            and args.min_net_edge <= r["net_edge"] <= args.max_net_edge):
+                        continue
+                    key = r.get("key") or r["ktk"]
+                    live[key] = r
+                    ep = open_eps.get(key)
+                    if ep is None:
+                        open_eps[key] = {"start": time.time(), "peak_net": r["net"],
+                                         "peak_edge": r["net_edge"], "ticks": 1,
+                                         "kt": r["kt"], "ktk": r.get("ktk", ""),
+                                         "strategy": r.get("strategy", "comp")}
+                        tag = " [BASIS-RISK]" if r.get("uncertain") else ""
+                        print(f"{ts:<9} {'OPEN':<6} {r['net']:7.2f} "
+                              f"{r['net_edge']*100:5.1f}% {r['size']:7.0f}  "
+                              f"{r['kt'][:40]}{tag} <ws>", flush=True)
+                        if executor is not None and r.get("strategy", "comp") == "comp":
+                            _fire(r)
+                    else:
+                        ep["peak_net"] = max(ep["peak_net"], r["net"])
+                        ep["peak_edge"] = max(ep["peak_edge"], r["net_edge"])
+                        ep["ticks"] += 1
 
     elapsed = (time.time() - t_start) / 3600.0
     still_open = sum(e["peak_net"] for e in open_eps.values())
