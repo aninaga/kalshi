@@ -215,7 +215,21 @@ def set_paused() -> None:
                 item["status"] = "queued"
         save_queue(q)
     n = terminate_children()
-    log(f"mode -> PAUSED (terminated {n} children)")
+    # also sweep apex-launched codex agents (quarantines under /tmp) so PAUSE
+    # really means "safe to close the laptop"
+    n_ext = 0
+    for key, ch in _external_codex().items():
+        if str(ch.get("cwd", "")).startswith(("/tmp/codex", "/private/tmp/codex")):
+            try:
+                os.killpg(os.getpgid(ch["pid"]), signal.SIGTERM)
+                n_ext += 1
+            except OSError:
+                try:
+                    os.kill(ch["pid"], signal.SIGTERM)
+                    n_ext += 1
+                except OSError:
+                    pass
+    log(f"mode -> PAUSED (terminated {n} children, {n_ext} apex codex agents)")
 
 
 # --------------------------------------------------------------------------- #
@@ -409,12 +423,46 @@ def ledger_tail(n: int = 6) -> list:
     return rows
 
 
+def _external_codex() -> dict:
+    """Codex agents launched outside the controller (apex shell fleets).
+    Display-only adoption so the dashboard never lies about what's running."""
+    out = {}
+    try:
+        ps = subprocess.run(["ps", "-axo", "pid=,etime=,command="],
+                            capture_output=True, text=True, timeout=5).stdout
+        for line in ps.splitlines():
+            if "codex exec" not in line or "ps -axo" in line:
+                continue
+            pid, etime = line.split(None, 2)[:2]
+            # cwd reveals which quarantine the agent works in
+            cwd = subprocess.run(["lsof", "-a", "-p", pid, "-d", "cwd", "-Fn"],
+                                 capture_output=True, text=True, timeout=5).stdout
+            wd = next((l[1:] for l in cwd.splitlines() if l.startswith("n")), "?")
+            label = Path(wd).name if wd != "?" else f"pid{pid}"
+            parts = etime.replace("-", ":").split(":")
+            secs = 0
+            for p in parts:
+                secs = secs * 60 + int(p)
+            out[f"codex:{label}"] = {"pid": int(pid), "kind": "codex (apex)",
+                                     "cmd": wd, "alive": True,
+                                     "started": time.time() - secs,
+                                     "elapsed_s": secs, "cwd": wd}
+    except Exception:  # noqa: BLE001
+        pass
+    return out
+
+
 def status() -> dict:
     with _lock:
         st = json.loads(json.dumps(STATE))  # snapshot
     st["children"] = {k: {**v, "alive": _alive(v["pid"]),
                           "elapsed_s": int(time.time() - v["started"])}
                       for k, v in st["children"].items()}
+    st["children"].update(_external_codex())
+    # next scheduled beats so the dashboard explains "idle" honestly
+    rec = st.get("recurring", {})
+    st["next_beats"] = {jid: int(rec.get(jid, 0) + iv - time.time())
+                        for iv, jid, _ in PAPER_JOBS} if st["mode"] == "running" else {}
     disk = shutil.disk_usage(str(REPO))
     return {
         "mode": st["mode"],

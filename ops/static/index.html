@@ -139,7 +139,11 @@ async function refresh() {
   const ch = $("children");
   ch.innerHTML = "<tr><th>lane</th><th>kind</th><th>elapsed</th><th>log</th></tr>";
   const entries = Object.entries(r.children);
-  if (!entries.length) ch.innerHTML += "<tr><td colspan=4 class=dim>idle</td></tr>";
+  if (!entries.length) {
+    const beats = Object.entries(r.next_beats || {})
+      .map(([k, s]) => `${k.replace("paper_","")} in ${fmtElapsed(Math.max(0,s))}`).join(" · ");
+    ch.innerHTML += `<tr><td colspan=4 class=dim>idle — next beats: ${beats || "—"}</td></tr>`;
+  }
   for (const [id, c] of entries)
     ch.innerHTML += `<tr><td>${id}</td><td>${c.kind}</td>
       <td>${fmtElapsed(c.elapsed_s)}</td>
