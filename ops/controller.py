@@ -1,0 +1,409 @@
+"""Fund controller daemon — the single always-on process of the desk.
+
+Runs the localhost dashboard (http://localhost:8777) and owns every fund
+process: analyst lanes (codex exec / scripts), nightly data top-ups, and the
+caffeinate sleep-blocker. One state machine, two buttons:
+
+    RUN    -> caffeinate on, queue drains (max N concurrent lanes), top-ups fire
+    PAUSE  -> SIGTERM every child, caffeinate released, laptop can sleep
+
+Design rules:
+  * Models are cloud-side; this box only conducts. Memory budget ~tens of MB.
+  * Controller manages ONLY processes it spawned (never adopts strangers).
+  * Lanes are idempotent by program convention; killing one loses at most its
+    in-flight run, never committed state.
+  * State lives OUTSIDE iCloud-synced paths (~/.kalshi_fund), code in the repo.
+
+Run:  python3 ops/controller.py            (foreground; launchd keeps it alive)
+"""
+from __future__ import annotations
+
+import json
+import os
+import shutil
+import signal
+import subprocess
+import sys
+import threading
+import time
+import datetime as dt
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parent.parent
+STATE_DIR = Path.home() / ".kalshi_fund"
+LANE_DIR = STATE_DIR / "lanes"
+STATE_PATH = STATE_DIR / "state.json"
+QUEUE_PATH = STATE_DIR / "queue.json"
+LOG_PATH = STATE_DIR / "controller.log"
+LEDGER = REPO / "research/reports/alpha/ledger.jsonl"
+WEATHER_CACHE = REPO / "market_data/weather/_cache"
+CRYPTO_CACHE = REPO / "market_data/crypto/_cache"
+PORT = 8777
+MAX_CONCURRENT_LANES = 2
+TOPUP_HOUR_LOCAL = 3          # nightly data top-up at 03:00
+PYTHON = sys.executable
+
+TOPUP_CMDS = [
+    f"{PYTHON} -m research.lab.providers.weather --build --cities NYC,CHI,MIA,AUS,DEN --max-events 250",
+    f"{PYTHON} -m research.lab.providers.crypto --build --assets BTC --max-events 800 --stride 2 --shard 0 --nshards 1",
+    f"{PYTHON} -m research.lab.providers.crypto --build --assets ETH --max-events 200 --stride 8 --shard 0 --nshards 1",
+]
+
+_lock = threading.RLock()
+
+
+def log(msg: str) -> None:
+    line = f"{dt.datetime.now().isoformat(timespec='seconds')} {msg}"
+    print(line, flush=True)
+    with open(LOG_PATH, "a") as fh:
+        fh.write(line + "\n")
+
+
+# --------------------------------------------------------------------------- #
+# State
+# --------------------------------------------------------------------------- #
+def _default_state() -> dict:
+    return {"mode": "paused", "since": time.time(), "caffeinate_pid": None,
+            "children": {}, "last_topup": None}
+
+
+def load_state() -> dict:
+    if STATE_PATH.exists():
+        try:
+            return json.loads(STATE_PATH.read_text())
+        except Exception:
+            pass
+    return _default_state()
+
+
+def save_state(st: dict) -> None:
+    tmp = STATE_PATH.with_suffix(".tmp")
+    tmp.write_text(json.dumps(st, indent=1))
+    tmp.replace(STATE_PATH)
+
+
+def load_queue() -> list:
+    if QUEUE_PATH.exists():
+        try:
+            return json.loads(QUEUE_PATH.read_text())
+        except Exception:
+            pass
+    return []
+
+
+def save_queue(q: list) -> None:
+    tmp = QUEUE_PATH.with_suffix(".tmp")
+    tmp.write_text(json.dumps(q, indent=1))
+    tmp.replace(QUEUE_PATH)
+
+
+STATE = load_state()
+
+
+def _alive(pid) -> bool:
+    if not pid:
+        return False
+    try:
+        os.kill(int(pid), 0)
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+# --------------------------------------------------------------------------- #
+# Process management (children only)
+# --------------------------------------------------------------------------- #
+def spawn(lane_id: str, cmd: str, cwd: str | None = None, kind: str = "lane") -> int:
+    LANE_DIR.mkdir(parents=True, exist_ok=True)
+    out = open(LANE_DIR / f"{lane_id}.log", "ab")
+    proc = subprocess.Popen(cmd, shell=True, cwd=cwd or str(REPO),
+                            stdout=out, stderr=subprocess.STDOUT,
+                            start_new_session=True)
+    with _lock:
+        STATE["children"][lane_id] = {
+            "pid": proc.pid, "cmd": cmd, "kind": kind,
+            "started": time.time(), "cwd": cwd or str(REPO)}
+        save_state(STATE)
+    log(f"spawned {kind} {lane_id} pid={proc.pid}")
+    return proc.pid
+
+
+def terminate_children() -> int:
+    n = 0
+    with _lock:
+        for lane_id, ch in list(STATE["children"].items()):
+            if _alive(ch["pid"]):
+                try:
+                    os.killpg(os.getpgid(ch["pid"]), signal.SIGTERM)
+                    n += 1
+                except OSError:
+                    pass
+            STATE["children"].pop(lane_id, None)
+        save_state(STATE)
+    return n
+
+
+def reap() -> None:
+    """Remove finished children from the registry; mark queue items done."""
+    with _lock:
+        q = load_queue()
+        changed = False
+        for lane_id, ch in list(STATE["children"].items()):
+            if not _alive(ch["pid"]):
+                STATE["children"].pop(lane_id)
+                for item in q:
+                    if item["id"] == lane_id and item.get("status") == "running":
+                        item["status"] = "done"
+                        item["finished"] = time.time()
+                        changed = True
+                log(f"reaped {lane_id}")
+        if changed:
+            save_queue(q)
+        save_state(STATE)
+
+
+# --------------------------------------------------------------------------- #
+# RUN / PAUSE
+# --------------------------------------------------------------------------- #
+def set_running() -> None:
+    with _lock:
+        if STATE["mode"] == "running":
+            return
+        STATE["mode"] = "running"
+        STATE["since"] = time.time()
+        if not _alive(STATE.get("caffeinate_pid")):
+            p = subprocess.Popen(["caffeinate", "-dims"], start_new_session=True)
+            STATE["caffeinate_pid"] = p.pid
+        save_state(STATE)
+    log("mode -> RUNNING")
+
+
+def set_paused() -> None:
+    with _lock:
+        STATE["mode"] = "paused"
+        STATE["since"] = time.time()
+        n = 0
+        cp = STATE.get("caffeinate_pid")
+        if _alive(cp):
+            try:
+                os.kill(int(cp), signal.SIGTERM)
+            except OSError:
+                pass
+        STATE["caffeinate_pid"] = None
+        save_state(STATE)
+        # mark running queue items back to queued so they relaunch on RUN
+        q = load_queue()
+        for item in q:
+            if item.get("status") == "running":
+                item["status"] = "queued"
+        save_queue(q)
+    n = terminate_children()
+    log(f"mode -> PAUSED (terminated {n} children)")
+
+
+# --------------------------------------------------------------------------- #
+# Scheduler loop
+# --------------------------------------------------------------------------- #
+def scheduler() -> None:
+    while True:
+        try:
+            reap()
+            with _lock:
+                running_mode = STATE["mode"] == "running"
+            if running_mode:
+                _maybe_launch_lanes()
+                _maybe_topup()
+        except Exception as exc:  # noqa: BLE001
+            log(f"scheduler error: {exc!r}")
+        time.sleep(10)
+
+
+def _maybe_launch_lanes() -> None:
+    with _lock:
+        active = sum(1 for c in STATE["children"].values()
+                     if c["kind"] == "lane" and _alive(c["pid"]))
+        if active >= MAX_CONCURRENT_LANES:
+            return
+        q = load_queue()
+        for item in q:
+            if item.get("status") == "queued" and item.get("enabled", True):
+                item["status"] = "running"
+                item["started"] = time.time()
+                save_queue(q)
+                spawn(item["id"], item["cmd"], cwd=item.get("cwd"), kind="lane")
+                return
+
+
+def _maybe_topup() -> None:
+    now = dt.datetime.now()
+    last = STATE.get("last_topup")
+    today_3am = now.replace(hour=TOPUP_HOUR_LOCAL, minute=0, second=0)
+    due = now >= today_3am and (not last or last < today_3am.timestamp())
+    if not due:
+        return
+    with _lock:
+        if any(c["kind"] == "topup" and _alive(c["pid"])
+               for c in STATE["children"].values()):
+            return
+        STATE["last_topup"] = time.time()
+        save_state(STATE)
+    chain = " && sleep 30 && ".join(TOPUP_CMDS)
+    spawn(f"topup_{now:%Y%m%d}", chain, kind="topup")
+
+
+# --------------------------------------------------------------------------- #
+# Status assembly
+# --------------------------------------------------------------------------- #
+def codex_credits() -> dict:
+    """Estimate codex credits spent from lane .jsonl event logs (GPT-5.5 rates)."""
+    tin = tcache = tout = 0
+    for p in LANE_DIR.glob("*.log"):
+        try:
+            with open(p, "rb") as fh:
+                for raw in fh:
+                    if b'"turn.completed"' not in raw:
+                        continue
+                    try:
+                        u = json.loads(raw)["usage"]
+                        tin += u.get("input_tokens", 0)
+                        tcache += u.get("cached_input_tokens", 0)
+                        tout += u.get("output_tokens", 0)
+                    except Exception:
+                        continue
+        except OSError:
+            continue
+    credits = ((tin - tcache) * 125 + tcache * 12.5 + tout * 750) / 1e6
+    return {"input_tokens": tin, "cached": tcache, "output_tokens": tout,
+            "credits_est": round(credits, 1)}
+
+
+def ledger_tail(n: int = 6) -> list:
+    if not LEDGER.exists():
+        return []
+    rows = []
+    for raw in LEDGER.read_text().strip().splitlines()[-n:]:
+        try:
+            r = json.loads(raw)
+            rows.append({k: r.get(k) for k in
+                         ("ts", "hyp_id", "family", "verdict", "cents_per_contract",
+                          "passed") if k in r})
+        except Exception:
+            continue
+    return rows
+
+
+def status() -> dict:
+    with _lock:
+        st = json.loads(json.dumps(STATE))  # snapshot
+    st["children"] = {k: {**v, "alive": _alive(v["pid"]),
+                          "elapsed_s": int(time.time() - v["started"])}
+                      for k, v in st["children"].items()}
+    disk = shutil.disk_usage(str(REPO))
+    return {
+        "mode": st["mode"],
+        "since": st["since"],
+        "children": st["children"],
+        "queue": load_queue(),
+        "caches": {"weather": len(list(WEATHER_CACHE.glob("*.pkl")))
+                   if WEATHER_CACHE.exists() else 0,
+                   "crypto": len(list(CRYPTO_CACHE.glob("*.pkl")))
+                   if CRYPTO_CACHE.exists() else 0},
+        "disk_free_gb": round(disk.free / 1e9, 1),
+        "codex_budget": codex_credits(),
+        "ledger_tail": ledger_tail(),
+        "last_topup": st.get("last_topup"),
+        "ts": time.time(),
+    }
+
+
+# --------------------------------------------------------------------------- #
+# HTTP
+# --------------------------------------------------------------------------- #
+class Handler(BaseHTTPRequestHandler):
+    def _send(self, code: int, body: bytes, ctype: str = "application/json"):
+        self.send_response(code)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self):  # noqa: N802
+        if self.path in ("/", "/index.html"):
+            html = (REPO / "ops/static/index.html").read_bytes()
+            self._send(200, html, "text/html; charset=utf-8")
+        elif self.path == "/api/status":
+            self._send(200, json.dumps(status()).encode())
+        elif self.path.startswith("/api/log/"):
+            lane = self.path.rsplit("/", 1)[-1]
+            p = LANE_DIR / f"{Path(lane).name}.log"
+            body = p.read_bytes()[-20000:] if p.exists() else b"(no log)"
+            self._send(200, body, "text/plain; charset=utf-8")
+        else:
+            self._send(404, b"{}")
+
+    def do_POST(self):  # noqa: N802
+        if self.client_address[0] not in ("127.0.0.1", "::1"):
+            self._send(403, b'{"error":"localhost only"}')
+            return
+        if self.path == "/api/run":
+            set_running()
+            self._send(200, b'{"ok":true,"mode":"running"}')
+        elif self.path == "/api/pause":
+            set_paused()
+            self._send(200, b'{"ok":true,"mode":"paused"}')
+        elif self.path == "/api/enqueue":
+            n = int(self.headers.get("Content-Length", 0))
+            item = json.loads(self.rfile.read(n) or b"{}")
+            if not item.get("id") or not item.get("cmd"):
+                self._send(400, b'{"error":"need id and cmd"}')
+                return
+            with _lock:
+                q = load_queue()
+                q.append({"id": item["id"], "cmd": item["cmd"],
+                          "cwd": item.get("cwd"), "status": "queued",
+                          "enabled": True, "added": time.time()})
+                save_queue(q)
+            self._send(200, b'{"ok":true}')
+        elif self.path.startswith("/api/lane_toggle/"):
+            lane = self.path.rsplit("/", 1)[-1]
+            with _lock:
+                q = load_queue()
+                for it in q:
+                    if it["id"] == lane:
+                        it["enabled"] = not it.get("enabled", True)
+                save_queue(q)
+            self._send(200, b'{"ok":true}')
+        else:
+            self._send(404, b"{}")
+
+    def log_message(self, *a):  # quiet
+        pass
+
+
+def main() -> int:
+    STATE_DIR.mkdir(exist_ok=True)
+    LANE_DIR.mkdir(parents=True, exist_ok=True)
+    # crash recovery: forget dead children, keep mode
+    with _lock:
+        STATE["children"] = {k: v for k, v in STATE["children"].items()
+                             if _alive(v["pid"])}
+        if STATE["mode"] == "running" and not _alive(STATE.get("caffeinate_pid")):
+            p = subprocess.Popen(["caffeinate", "-dims"], start_new_session=True)
+            STATE["caffeinate_pid"] = p.pid
+        save_state(STATE)
+
+    threading.Thread(target=scheduler, daemon=True).start()
+
+    def shutdown(*_):
+        log("controller shutting down (children left running per mode)")
+        raise SystemExit(0)
+
+    signal.signal(signal.SIGTERM, shutdown)
+    log(f"controller up on http://localhost:{PORT} mode={STATE['mode']}")
+    ThreadingHTTPServer(("127.0.0.1", PORT), Handler).serve_forever()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
