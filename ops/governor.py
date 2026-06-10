@@ -170,6 +170,43 @@ def _operator_forecast_usd(hours_left: float) -> tuple[float, str]:
     return fc, f"{exp_active:.0f} expected active-h x ${usd_hr:.0f}/h"
 
 
+def _seat_models(surplus: float, cfh: float, hours_to_reset: float) -> dict:
+    """Opportunistic upgrading — the inverse of never-degrade. Recomputed on
+    every policy() call and keyed to THIS HOUR's expected operator demand
+    (learned profile), so the answer changes hour by hour:
+      * operator likely away + surplus that would expire -> Sonnet seats run
+        Opus (quality is free when budget dies at reset anyway)
+      * operator's heavy hours approaching or 5h window warm -> defaults
+    Floors cap the downside; surplus raises the ceiling.
+    """
+    try:
+        from ops import usage_profile
+    except ModuleNotFoundError:
+        import sys
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+        from ops import usage_profile
+    d = usage_profile.demand_now()
+    demand = d["demand"]
+    # surplus is end-of-week $; what matters hourly is surplus per remaining
+    # hour vs what an upgrade costs (~$4/h extra for Opus-over-Sonnet seats)
+    surplus_hr = surplus / max(hours_to_reset, 1.0)
+    up = (surplus > 0 and surplus_hr > 4.0 and cfh < 60.0 and demand < 0.5
+          and not d.get("realtime_user_active"))
+    big = up and surplus_hr > 12.0
+    return {
+        "scout_claude": "opus" if up else "sonnet",
+        "analyst_templated": "opus" if up else "sonnet",
+        "ops": "sonnet" if big else "haiku",
+        "upgrade_active": up,
+        "inputs": {"surplus_usd_hr": round(surplus_hr, 1),
+                   "hour_demand": demand, "five_hour_pct": cfh,
+                   "realtime_user_active": d.get("realtime_user_active")},
+        "reason": (f"surplus ${surplus_hr:.0f}/h, demand {demand:.2f}, "
+                   f"5h {cfh:.0f}% -> " + ("UPGRADE (quality is free)" if up
+                                           else "defaults")),
+    }
+
+
 # ---- the policy ----------------------------------------------------------- #
 def policy() -> dict:
     c = _cache()
@@ -237,6 +274,7 @@ def policy() -> dict:
         },
         "seat_floors": SEAT_FLOOR,
         "basis": {"week_size": cwk_basis},
+        "seat_models": _seat_models(surplus, cfh, ch_left),
         "reason": (f"${cremaining:.0f} left − ${op_fc:.0f} operator forecast − "
                    f"${apex_reserve:.0f} apex reserve = ${surplus:.0f} surplus"
                    + ("" if surplus > 0 else " — desk locked out of claude")),
