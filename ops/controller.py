@@ -434,9 +434,14 @@ def _external_codex() -> dict:
             if "codex exec" not in line or "ps -axo" in line:
                 continue
             pid, etime = line.split(None, 2)[:2]
-            # cwd reveals which quarantine the agent works in
-            cwd = subprocess.run(["lsof", "-a", "-p", pid, "-d", "cwd", "-Fn"],
-                                 capture_output=True, text=True, timeout=5).stdout
+            # cwd reveals which quarantine the agent works in (absolute path:
+            # launchd PATH lacks /usr/sbin)
+            try:
+                cwd = subprocess.run(
+                    ["/usr/sbin/lsof", "-a", "-p", pid, "-d", "cwd", "-Fn"],
+                    capture_output=True, text=True, timeout=5).stdout
+            except Exception:  # noqa: BLE001
+                cwd = ""
             wd = next((l[1:] for l in cwd.splitlines() if l.startswith("n")), "?")
             label = Path(wd).name if wd != "?" else f"pid{pid}"
             parts = etime.replace("-", ":").split(":")
@@ -468,6 +473,7 @@ def status() -> dict:
         "mode": st["mode"],
         "since": st["since"],
         "children": st["children"],
+        "next_beats": st.get("next_beats", {}),
         "queue": load_queue(),
         "caches": {"weather": len(list(WEATHER_CACHE.glob("*.pkl")))
                    if WEATHER_CACHE.exists() else 0,
