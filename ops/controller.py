@@ -246,6 +246,7 @@ def scheduler() -> None:
                 _usage_next[0] = time.time() + 600
                 threading.Thread(target=usage_meter.refresh_cache,
                                  daemon=True).start()
+            _track_externals()
             with _lock:
                 running_mode = STATE["mode"] == "running"
             if running_mode:
@@ -289,7 +290,15 @@ def _vendor_pct(vendor: str) -> dict:
 
 
 def _vendor_throttled(vendor: str) -> str | None:
-    """Return a reason string if this vendor's window is too hot to launch."""
+    """Return a reason string if this vendor's budget disallows a launch.
+    Claude: seniority/surplus decision from the governor (operator > apex >
+    desk). Codex: 5h/weekly static caps (pacing handles the rest)."""
+    if vendor == "claude":
+        from ops import governor
+        cl = governor.policy()["claude"]
+        if not cl["desk_may_spend"]:
+            return f"claude: no desk surplus ({cl['reason']})"
+        return None
     table = _defer_table(vendor)
     if not table:
         return None
@@ -348,6 +357,25 @@ def _maybe_launch_lanes() -> None:
                 save_queue(q)
                 spawn(item["id"], item["cmd"], cwd=item.get("cwd"), kind="lane")
                 return
+
+
+_ext_seen: dict = {}
+
+
+def _track_externals() -> None:
+    """Log apex-launched codex agents into lane_history when they finish, so
+    the governor can measure weekly-budget burn per codex agent-hour."""
+    now_ext = _external_codex()
+    for key, ch in now_ext.items():
+        _ext_seen.setdefault(key, ch["started"])
+    for key, started in list(_ext_seen.items()):
+        if key not in now_ext:
+            with open(STATE_DIR / "lane_history.jsonl", "a") as fh:
+                fh.write(json.dumps({
+                    "ts": round(time.time()), "id": key, "kind": "codex-apex",
+                    "vendor": "codex",
+                    "runtime_s": round(time.time() - started)}) + "\n")
+            _ext_seen.pop(key)
 
 
 def _maybe_paper() -> None:
