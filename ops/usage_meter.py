@@ -100,8 +100,41 @@ def claude_block() -> dict:
     }
 
 
+def claude_limits() -> dict:
+    """Anthropic's own plan meter — the same numbers /usage shows in-app.
+
+    Reads the Claude Code OAuth token from the macOS Keychain (stays local;
+    the only request goes to api.anthropic.com).
+    """
+    import urllib.request
+    try:
+        raw = subprocess.run(
+            ["security", "find-generic-password", "-s",
+             "Claude Code-credentials", "-w"],
+            capture_output=True, text=True, timeout=10).stdout
+        tok = json.loads(raw)
+        tok = (tok.get("claudeAiOauth") or tok)["accessToken"]
+        req = urllib.request.Request(
+            "https://api.anthropic.com/api/oauth/usage",
+            headers={"Authorization": f"Bearer {tok}",
+                     "anthropic-beta": "oauth-2025-04-20"})
+        d = json.loads(urllib.request.urlopen(req, timeout=15).read())
+    except Exception as exc:  # noqa: BLE001
+        return {"error": repr(exc)[:120]}
+    out = {}
+    for k, label in (("five_hour", "five_hour"), ("seven_day", "weekly"),
+                     ("seven_day_opus", "weekly_opus"),
+                     ("seven_day_sonnet", "weekly_sonnet")):
+        v = d.get(k)
+        if isinstance(v, dict):
+            out[f"{label}_pct"] = v.get("utilization")
+            out[f"{label}_resets_at"] = v.get("resets_at")
+    return out
+
+
 def refresh_cache() -> dict:
-    data = {"codex": codex_limits(), "claude": claude_block(), "ts": time.time()}
+    data = {"codex": codex_limits(), "claude": claude_block(),
+            "claude_plan": claude_limits(), "ts": time.time()}
     tmp = CACHE.with_suffix(".tmp")
     tmp.write_text(json.dumps(data, indent=1))
     tmp.replace(CACHE)

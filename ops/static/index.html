@@ -67,11 +67,11 @@
       <div class="stat"><span>Lane credits est.</span><b id="credits" class="dim">—</b></div>
     </div>
     <div class="panel">
-      <h2>Claude (measured, this 5h block)</h2>
-      <div class="stat"><span>API-equivalent</span><b id="clusd">—</b></div>
-      <div class="stat"><span>Burn rate</span><b id="clburn">—</b></div>
-      <div class="stat"><span>Output tokens</span><b id="clout">—</b></div>
-      <div class="stat"><span>Block ends</span><b id="clends" class="dim">—</b></div>
+      <h2>Claude (Anthropic's own meter)</h2>
+      <div class="stat"><span>5-hour window</span><b id="cl5h">—</b></div>
+      <div class="stat"><span>Weekly (all models)</span><b id="clwk">—</b></div>
+      <div class="stat"><span>Resets</span><b id="clreset" class="dim">—</b></div>
+      <div class="stat"><span>Burn (API-equiv)</span><b id="clburn" class="dim">—</b></div>
     </div>
   </div>
 
@@ -127,10 +127,14 @@ async function refresh() {
   $("cdxwk").className = (cdx.weekly_pct || 0) > 80 ? "bad" : (cdx.weekly_pct || 0) > 50 ? "warn" : "ok";
   $("cdxreset").textContent = cdx.five_hour_resets_at ?
       new Date(cdx.five_hour_resets_at * 1000).toLocaleTimeString() : "—";
-  $("clusd").textContent = cl.api_equiv_usd != null ? "$" + cl.api_equiv_usd : "—";
+  const clp = (r.usage || {}).claude_plan || {};
+  $("cl5h").textContent = pct(clp.five_hour_pct);
+  $("cl5h").className = (clp.five_hour_pct || 0) > 80 ? "bad" : (clp.five_hour_pct || 0) > 50 ? "warn" : "ok";
+  $("clwk").textContent = pct(clp.weekly_pct);
+  $("clwk").className = (clp.weekly_pct || 0) > 80 ? "bad" : (clp.weekly_pct || 0) > 50 ? "warn" : "ok";
+  $("clreset").textContent = clp.five_hour_resets_at ?
+      new Date(clp.five_hour_resets_at).toLocaleTimeString() : "—";
   $("clburn").textContent = cl.burn_usd_per_hr != null ? "$" + cl.burn_usd_per_hr + "/hr" : "—";
-  $("clout").textContent = cl.output_tokens != null ? (cl.output_tokens/1e3).toFixed(0) + "k" : "—";
-  $("clends").textContent = cl.block_ends ? new Date(cl.block_ends).toLocaleTimeString() : "—";
 
   const ch = $("children");
   ch.innerHTML = "<tr><th>lane</th><th>kind</th><th>elapsed</th><th>log</th></tr>";
