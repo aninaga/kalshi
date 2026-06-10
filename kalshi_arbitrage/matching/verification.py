@@ -301,25 +301,43 @@ _TIER_PATTERNS: tuple = tuple(
         ("wild_card", r"\bwild card\b", re.IGNORECASE),
         ("division_series", r"\bDivision Series\b", re.IGNORECASE),
         ("play_in", r"\bplay-in\b", re.IGNORECASE),
-        # Manner-of-outcome qualifiers (same gate logic, different dimension):
-        # "win by KO" is a SUBSET of "win" — live false positive 2026-06-10
-        # when Kalshi's Pereira-wins market matched Polymarket-US's
-        # method-of-victory markets as clean.
-        ("method_ko", r"\bby (ko|tko|knockout|stoppage)\b", re.IGNORECASE),
-        ("method_sub", r"\bby submission\b", re.IGNORECASE),
-        ("method_dec", r"\bby (unanimous |split |majority )?decision\b", re.IGNORECASE),
-        ("method_dq", r"\bby (dq|disqualification)\b", re.IGNORECASE),
-        ("method_points", r"\bon points\b", re.IGNORECASE),
+    )
+)
+
+# Manner-of-outcome qualifiers (same gate logic, different dimension): "win by
+# KO" is a SUBSET of "win" — live false positive 2026-06-10 when Kalshi's
+# Pereira-wins market matched Polymarket-US's method-of-victory markets as
+# clean. Checked on the TITLE ONLY: rules text routinely enumerates methods
+# incidentally while *defining* a win ("wins by KO, TKO, submission, or
+# decision..."), which made a rules-level comparison read symmetric on the
+# very pair that motivated the gate. The title is the proposition.
+_METHOD_TITLE_PATTERNS: tuple = tuple(
+    (tag, re.compile(pat, re.IGNORECASE))
+    for tag, pat in (
+        ("method_ko", r"\bby (ko|tko|knockout|stoppage)\b"),
+        ("method_sub", r"\bby submission\b"),
+        ("method_dec", r"\bby (unanimous |split |majority )?decision\b"),
+        ("method_dq", r"\bby (dq|disqualification)\b"),
+        ("method_points", r"\bon points\b"),
         ("period_qual", r"\bin (round \d+|overtime|extra time|regulation|"
-                        r"the first (half|quarter|period|inning))\b", re.IGNORECASE),
+                        r"the first (half|quarter|period|inning))\b"),
+        # Subject-scope qualifier: "either competitor wins by X" covers BOTH
+        # fighters — a SUPERSET of "<specific fighter> wins by X" (live find
+        # 2026-06-10: if the other fighter wins by that method, both legs of
+        # the would-be hedge lose).
+        ("either_scope", r"\b(either|any) (competitor|fighter|team|player|side)\b"),
     )
 )
 
 
 def _competition_tiers(market: Dict) -> frozenset:
-    """Sub-competition tier qualifiers named in the title + rules text."""
+    """Sub-competition tier qualifiers (title + rules) plus manner-of-outcome
+    qualifiers (title only — see _METHOD_TITLE_PATTERNS)."""
     text = _raw_rules(market)
-    return frozenset(tag for tag, rx in _TIER_PATTERNS if rx.search(text))
+    found = {tag for tag, rx in _TIER_PATTERNS if rx.search(text)}
+    title = str(market.get("title") or "")
+    found |= {tag for tag, rx in _METHOD_TITLE_PATTERNS if rx.search(title)}
+    return frozenset(found)
 
 
 # "Wins the most seats" — the plurality-of-seats criterion used for

@@ -211,3 +211,35 @@ def test_same_method_both_sides_stays_clean():
         _pd("Will Alex Pereira win by submission in Ciryl Gane vs. Alex Pereira?",
             "This market resolves Yes if Alex Pereira wins the bout by submission."))
     assert verdict.passed and not verdict.uncertain
+
+
+def test_either_competitor_scope_asymmetry_flags_review():
+    # Live find (2026-06-10): Kalshi "Will either competitor win by
+    # submission?" matched US "Will Ciryl Gane win by submission" as clean —
+    # the either-scope market is a SUPERSET: if Pereira submits Gane, both
+    # legs of the would-be hedge lose.
+    verdict = CompositeVerifier().verify(
+        _kd("Will either competitor win the Alex Pereira vs. Ciryl Gane "
+            "fight by submission?",
+            "If either competitor wins the fight by submission, then the "
+            "market resolves to Yes."),
+        _pd("Will Ciryl Gane win by submission in Ciryl Gane vs Alex Pereira",
+            "This market resolves Yes if Ciryl Gane wins the bout by submission."))
+    if verdict.passed:
+        assert verdict.uncertain
+        assert any("either_scope" in r for r in verdict.reasons)
+
+
+def test_method_vs_method_same_fighter_stays_clean():
+    # The REAL live pairs (full titles): Kalshi has method markets too —
+    # method-vs-method with the same fighter is genuinely the same event.
+    verdict = CompositeVerifier().verify(
+        _kd("Will Alex Pereira win the Alex Pereira vs. Ciryl Gane fight "
+            "by KO/TKO/DQ?",
+            "If Alex Pereira wins the fight by KO, TKO, or DQ, then the "
+            "market resolves to Yes."),
+        _pd("Will Alex Pereira win by KO, TKO, or DQ in Ciryl Gane vs "
+            "Alex Pereira",
+            "This market resolves Yes if Alex Pereira wins by knockout, "
+            "technical knockout, or disqualification."))
+    assert verdict.passed and not verdict.uncertain
