@@ -60,11 +60,18 @@
       <div class="stat"><span>Last data top-up</span><b id="topup">—</b></div>
     </div>
     <div class="panel">
-      <h2>Codex budget (today's logs)</h2>
-      <div class="stat"><span>Credits est.</span><b id="credits">—</b></div>
-      <div class="stat"><span>Input tokens</span><b id="tin">—</b></div>
-      <div class="stat"><span>&nbsp;&nbsp;of which cached</span><b id="tcache" class="dim">—</b></div>
-      <div class="stat"><span>Output tokens</span><b id="tout">—</b></div>
+      <h2>Codex (OpenAI's own meter)</h2>
+      <div class="stat"><span>5-hour window</span><b id="cdx5h">—</b></div>
+      <div class="stat"><span>Weekly window</span><b id="cdxwk">—</b></div>
+      <div class="stat"><span>Resets</span><b id="cdxreset" class="dim">—</b></div>
+      <div class="stat"><span>Lane credits est.</span><b id="credits" class="dim">—</b></div>
+    </div>
+    <div class="panel">
+      <h2>Claude (measured, this 5h block)</h2>
+      <div class="stat"><span>API-equivalent</span><b id="clusd">—</b></div>
+      <div class="stat"><span>Burn rate</span><b id="clburn">—</b></div>
+      <div class="stat"><span>Output tokens</span><b id="clout">—</b></div>
+      <div class="stat"><span>Block ends</span><b id="clends" class="dim">—</b></div>
     </div>
   </div>
 
@@ -112,9 +119,18 @@ async function refresh() {
   $("topup").textContent = r.last_topup ?
       new Date(r.last_topup * 1000).toLocaleString() : "never";
   $("credits").textContent = r.codex_budget.credits_est;
-  $("tin").textContent = (r.codex_budget.input_tokens/1e6).toFixed(2) + "M";
-  $("tcache").textContent = (r.codex_budget.cached/1e6).toFixed(2) + "M";
-  $("tout").textContent = (r.codex_budget.output_tokens/1e3).toFixed(0) + "k";
+  const cdx = (r.usage || {}).codex || {}, cl = (r.usage || {}).claude || {};
+  const pct = v => v == null ? "—" : v.toFixed(1) + "%";
+  $("cdx5h").textContent = pct(cdx.five_hour_pct);
+  $("cdx5h").className = (cdx.five_hour_pct || 0) > 80 ? "bad" : (cdx.five_hour_pct || 0) > 50 ? "warn" : "ok";
+  $("cdxwk").textContent = pct(cdx.weekly_pct);
+  $("cdxwk").className = (cdx.weekly_pct || 0) > 80 ? "bad" : (cdx.weekly_pct || 0) > 50 ? "warn" : "ok";
+  $("cdxreset").textContent = cdx.five_hour_resets_at ?
+      new Date(cdx.five_hour_resets_at * 1000).toLocaleTimeString() : "—";
+  $("clusd").textContent = cl.api_equiv_usd != null ? "$" + cl.api_equiv_usd : "—";
+  $("clburn").textContent = cl.burn_usd_per_hr != null ? "$" + cl.burn_usd_per_hr + "/hr" : "—";
+  $("clout").textContent = cl.output_tokens != null ? (cl.output_tokens/1e3).toFixed(0) + "k" : "—";
+  $("clends").textContent = cl.block_ends ? new Date(cl.block_ends).toLocaleTimeString() : "—";
 
   const ch = $("children");
   ch.innerHTML = "<tr><th>lane</th><th>kind</th><th>elapsed</th><th>log</th></tr>";

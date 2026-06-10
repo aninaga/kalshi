@@ -31,6 +31,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO))
+from ops import usage_meter  # noqa: E402
 STATE_DIR = Path.home() / ".kalshi_fund"
 LANE_DIR = STATE_DIR / "lanes"
 STATE_PATH = STATE_DIR / "state.json"
@@ -205,10 +207,17 @@ def set_paused() -> None:
 # --------------------------------------------------------------------------- #
 # Scheduler loop
 # --------------------------------------------------------------------------- #
+_usage_next = [0.0]
+
+
 def scheduler() -> None:
     while True:
         try:
             reap()
+            if time.time() >= _usage_next[0]:
+                _usage_next[0] = time.time() + 600
+                threading.Thread(target=usage_meter.refresh_cache,
+                                 daemon=True).start()
             with _lock:
                 running_mode = STATE["mode"] == "running"
             if running_mode:
@@ -311,6 +320,7 @@ def status() -> dict:
                    if CRYPTO_CACHE.exists() else 0},
         "disk_free_gb": round(disk.free / 1e9, 1),
         "codex_budget": codex_credits(),
+        "usage": usage_meter.read_cache(),
         "ledger_tail": ledger_tail(),
         "last_topup": st.get("last_topup"),
         "ts": time.time(),
