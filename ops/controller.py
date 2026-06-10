@@ -167,6 +167,12 @@ def reap() -> None:
                         item["status"] = "done"
                         item["finished"] = time.time()
                         changed = True
+                with open(STATE_DIR / "lane_history.jsonl", "a") as fh:
+                    fh.write(json.dumps({
+                        "ts": round(time.time()), "id": lane_id,
+                        "kind": ch["kind"], "vendor": ch.get("vendor", "none"),
+                        "runtime_s": round(time.time() - ch["started"]),
+                        "cmd": ch["cmd"][:160]}) + "\n")
                 log(f"reaped {lane_id}")
         if changed:
             save_queue(q)
@@ -237,6 +243,51 @@ def scheduler() -> None:
         time.sleep(10)
 
 
+# Cross-vendor load policy. Same-tier balancing, never quality degradation:
+# when one vendor's window runs hot, work shifts to (or waits for) the other.
+# Claude thresholds are deliberately LOWER — an APEX RESERVE: background lanes
+# must leave headroom so the operator/apex session can always coordinate.
+# Codex thresholds are high because nothing else competes for that budget.
+# Fable counts 2x against the Claude window (promo through 2026-06-22), which
+# is why Claude depletes fastest and why the reserve exists.
+DEFER_PCT = {
+    "claude": {"five_hour": 60.0, "weekly": 75.0},   # apex reserve
+    "codex": {"five_hour": 85.0, "weekly": 90.0},
+}
+
+
+def _vendor_pct(vendor: str) -> dict:
+    u = usage_meter.read_cache()
+    src = u.get("codex") if vendor == "codex" else u.get("claude_plan")
+    return src if isinstance(src, dict) else {}
+
+
+def _vendor_throttled(vendor: str) -> str | None:
+    """Return a reason string if this vendor's window is too hot to launch."""
+    if vendor not in DEFER_PCT:
+        return None
+    src = _vendor_pct(vendor)
+    for win, cap in DEFER_PCT[vendor].items():
+        pct = src.get(f"{win}_pct")
+        if pct is not None and pct >= cap:
+            return f"{vendor} {win} at {pct:.0f}% (defer until reset)"
+    return None
+
+
+def pick_vendor() -> str:
+    """For vendor-agnostic work: route to the cooler vendor (headroom-weighted,
+    Claude's apex reserve already priced into its thresholds)."""
+    head = {}
+    for v in DEFER_PCT:
+        if _vendor_throttled(v):
+            head[v] = -1.0
+            continue
+        src = _vendor_pct(v)
+        head[v] = min(cap - (src.get(f"{w}_pct") or 0.0)
+                      for w, cap in DEFER_PCT[v].items())
+    return max(head, key=head.get)
+
+
 def _maybe_launch_lanes() -> None:
     with _lock:
         active = sum(1 for c in STATE["children"].values()
@@ -246,6 +297,14 @@ def _maybe_launch_lanes() -> None:
         q = load_queue()
         for item in q:
             if item.get("status") == "queued" and item.get("enabled", True):
+                reason = _vendor_throttled(item.get("vendor", "none"))
+                if reason:
+                    if item.get("deferred_reason") != reason:
+                        item["deferred_reason"] = reason
+                        save_queue(q)
+                        log(f"lane {item['id']} deferred: {reason}")
+                    continue
+                item.pop("deferred_reason", None)
                 item["status"] = "running"
                 item["started"] = time.time()
                 save_queue(q)

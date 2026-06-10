@@ -132,12 +132,29 @@ def claude_limits() -> dict:
     return out
 
 
+HISTORY = Path.home() / ".kalshi_fund/usage_history.jsonl"
+
+
 def refresh_cache() -> dict:
     data = {"codex": codex_limits(), "claude": claude_block(),
             "claude_plan": claude_limits(), "ts": time.time()}
     tmp = CACHE.with_suffix(".tmp")
     tmp.write_text(json.dumps(data, indent=1))
     tmp.replace(CACHE)
+    # analytics trail: one compact snapshot per refresh (~144 rows/day).
+    cdx, clp, clb = data["codex"], data["claude_plan"], data["claude"]
+    snap = {
+        "ts": round(data["ts"]),
+        "codex_5h": cdx.get("five_hour_pct"), "codex_wk": cdx.get("weekly_pct"),
+        "claude_5h": clp.get("five_hour_pct") if isinstance(clp, dict) else None,
+        "claude_wk": clp.get("weekly_pct") if isinstance(clp, dict) else None,
+        "claude_wk_sonnet": clp.get("weekly_sonnet_pct") if isinstance(clp, dict) else None,
+        "claude_block_usd": clb.get("api_equiv_usd"),
+        "claude_burn_hr": clb.get("burn_usd_per_hr"),
+        "claude_models": clb.get("models"),
+    }
+    with open(HISTORY, "a") as fh:
+        fh.write(json.dumps(snap) + "\n")
     return data
 
 
