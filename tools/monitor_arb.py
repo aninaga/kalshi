@@ -234,6 +234,16 @@ def main(argv=None) -> int:
     pairs_by_ktk = {p.get("ktk"): p for p in watch}
     hot = _load_screens(args)   # event-dutch candidates, refreshed with the watch-list
     feed = _start_ws_feed(args, watch)
+    # Graceful shutdown: deploy restarts kill the monitor with episodes open in
+    # memory — flush them to the ledger instead of losing them. (signal.signal
+    # only works on the main thread; tests drive main() in-thread, so guard.)
+    stop_flag = {"stop": False}
+    try:
+        import signal as _signal
+        _signal.signal(_signal.SIGTERM, lambda s, f: stop_flag.__setitem__("stop", True))
+        _signal.signal(_signal.SIGINT, lambda s, f: stop_flag.__setitem__("stop", True))
+    except ValueError:
+        pass
     print(f"{'time':<9} {'event':<6} {'net$':>7} {'edge':>6} {'size':>7}  market", flush=True)
 
     def _pm_books(token):
@@ -254,7 +264,7 @@ def main(argv=None) -> int:
         except Exception:
             return None
 
-    while True:
+    while not stop_flag["stop"]:
         now = time.time()
         if args.refresh_watchlist and now - last_refresh > args.refresh_watchlist:
             watch = _load_watchlist(args)
@@ -350,7 +360,7 @@ def main(argv=None) -> int:
         # just moved get re-priced immediately (tick-resolution OPENs/peaks;
         # CLOSEs stay sweep-based so episode semantics are unchanged).
         deadline = now + args.interval
-        while True:
+        while not stop_flag["stop"]:
             remaining = deadline - time.time()
             if remaining <= 0:
                 break
@@ -394,14 +404,19 @@ def main(argv=None) -> int:
 
     elapsed = (time.time() - t_start) / 3600.0
     still_open = sum(e["peak_net"] for e in open_eps.values())
-    # Flush still-open episodes to the ledger so a bounded run is fully recorded.
+    # Flush still-open episodes so bounded runs AND deploy restarts (SIGTERM)
+    # are fully recorded.
     ts = datetime.now(timezone.utc).strftime("%H:%M:%S")
-    for ktk, ep in open_eps.items():
-        _record(args.ledger, {"ts": ts, "ktk": ktk, "market": ep["kt"],
+    for key, ep in open_eps.items():
+        _record(args.ledger, {"ts": ts, "ktk": ep.get("ktk") or key, "market": ep["kt"],
+                              "strategy": ep.get("strategy", "comp"), "key": key,
                               "peak_net": round(ep["peak_net"], 4),
                               "peak_edge": round(ep["peak_edge"], 5),
                               "open_minutes": round((time.time() - ep["start"]) / 60, 2),
-                              "ticks": ep["ticks"], "still_open": True})
+                              "ticks": ep["ticks"], "still_open": True,
+                              "terminated": stop_flag["stop"]})
+    if feed is not None:
+        feed.stop()
     print(f"\nMonitored {elapsed:.2f}h | episodes closed={closed} open={len(open_eps)} | "
           f"capturable net ~${captured_total + still_open:.2f} "
           f"(best-entry-per-episode, fee-aware @ {args.pm_fee_bps}bps PM)", flush=True)

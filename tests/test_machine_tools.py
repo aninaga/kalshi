@@ -163,3 +163,30 @@ def test_run_machine_writes_allowlist_excluding_review(tmp_path, monkeypatch):
     # Genuine allowlisted; the uncertain/review pair is excluded by design.
     ids = {e["kalshi"] for e in data["approved"]}
     assert ids == {"KG"}
+
+
+def test_monitor_sigterm_flushes_open_episodes(tmp_path, monkeypatch):
+    # Deploy restarts SIGTERM the monitor with episodes open in memory — they
+    # must be flushed to the ledger (still_open + terminated), not lost.
+    import os
+    import signal
+    import threading
+    from tools import monitor_arb
+    pair = {"ktk": "K1", "pid": "P1", "kt": "T", "pt": "T", "tokens": [],
+            "polarity": "aligned"}
+    monkeypatch.setattr(monitor_arb.lp, "discover", lambda: [pair])
+    monkeypatch.setattr(monitor_arb, "_load_screens", lambda a: [])
+    monkeypatch.setattr(monitor_arb, "_start_ws_feed", lambda a, w: None)
+    monkeypatch.setattr(monitor_arb.lp, "pair_structures",
+                        lambda p, bps, **kw: [{**pair, "net": 5.0, "net_edge": 0.03,
+                                               "size": 100, "cost": 95}])
+    ledger = tmp_path / "led.jsonl"
+    threading.Timer(0.3, lambda: os.kill(os.getpid(), signal.SIGTERM)).start()
+    rc = monitor_arb.main(["--interval", "600", "--duration", "0",
+                           "--ledger", str(ledger)])
+    assert rc == 0
+    rows = [json.loads(l) for l in ledger.read_text().splitlines()
+            if '"snapshot"' not in l]
+    assert len(rows) == 1
+    assert rows[0]["still_open"] is True and rows[0]["terminated"] is True
+    assert rows[0]["peak_net"] == 5.0
