@@ -185,3 +185,29 @@ def test_seats_plurality_on_one_side_only_flags_uncertain():
             "government announcements of the final result."))
     assert verdict.passed and verdict.uncertain
     assert any("seats_plurality_asymmetry" in r for r in verdict.reasons)
+
+
+def test_method_of_victory_qualifier_asymmetry_flags_review():
+    # Live false positive (2026-06-10, first PM-US match smoke): Kalshi's
+    # plain win market matched US "win by KO/TKO/DQ" as clean — a SUBSET
+    # proposition, not the same event. The dangerous shape is pure-subset
+    # titles (no Kalshi-only token survives the entity check, so only this
+    # gate stands between the pair and a clean label).
+    verdict = CompositeVerifier().verify(
+        _kd("Alex Pereira vs. Ciryl Gane: Will Alex Pereira win?",
+            "If Alex Pereira wins, then the market resolves to Yes."),
+        _pd("Will Alex Pereira win by KO, TKO, or DQ in Ciryl Gane vs. Alex Pereira?",
+            "This market resolves Yes if Alex Pereira wins the bout by knockout, "
+            "technical knockout, or disqualification."))
+    assert verdict.passed and verdict.uncertain
+    assert any("competition_tier_asymmetry" in r and "method_ko" in r
+               for r in verdict.reasons)
+
+
+def test_same_method_both_sides_stays_clean():
+    verdict = CompositeVerifier().verify(
+        _kd("Alex Pereira vs. Ciryl Gane: Will Alex Pereira win by submission?",
+            "If Alex Pereira wins by submission, then the market resolves to Yes."),
+        _pd("Will Alex Pereira win by submission in Ciryl Gane vs. Alex Pereira?",
+            "This market resolves Yes if Alex Pereira wins the bout by submission."))
+    assert verdict.passed and not verdict.uncertain

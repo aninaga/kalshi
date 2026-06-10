@@ -153,10 +153,20 @@ def pair_structures(pair: Dict, pm_fee_bps: int = 500,
     toks = {str(t.get("outcome", "")).lower(): t["token_id"] for t in pair["tokens"]}
     yes_t = toks.get("yes") or pair["tokens"][0]["token_id"]
     no_t = toks.get("no") or pair["tokens"][1]["token_id"]
-    # pm_book_fn lets the monitor serve books from the live WS mirror
-    # (REST only on mirror miss/staleness).
-    fetch_pm = pm_book_fn or pm_asks
-    pyes, pno = fetch_pm(yes_t), fetch_pm(no_t)
+    if str(yes_t).startswith("us:"):
+        # Polymarket US pair: unified per-market book (one fetch serves both
+        # sides) and no separate token books -> no pm_intra structure. US fees
+        # (0.05*C*p*(1-p)) == the PM parabolic model at the default 500 bps,
+        # so the leg flags below stay 'PM'.
+        from .pmus import pmus_book, us_slug
+        pyes, pno = pmus_book(us_slug(yes_t) or "")
+        us_pair = True
+    else:
+        # pm_book_fn lets the monitor serve books from the live WS mirror
+        # (REST only on mirror miss/staleness).
+        fetch_pm = pm_book_fn or pm_asks
+        pyes, pno = fetch_pm(yes_t), fetch_pm(no_t)
+        us_pair = False
 
     # -- cross-venue complementary ------------------------------------------ #
     inv = pair["polarity"] == INVERTED
@@ -187,6 +197,8 @@ def pair_structures(pair: Dict, pm_fee_bps: int = 500,
                 out.append(res)
 
     # -- PM intra (YES + NO tokens < $1) ------------------------------------ #
+    if us_pair:
+        return out   # unified book: yes_ask + no_ask = 1 + spread, never < 1
     intra = walk_basket([_tag(pyes, False), _tag(pno, False)], pm_fee_bps, payout=1.0)
     if intra:
         intra.update({"strategy": "pm_intra", "key": f"pm_intra:{pair['ktk']}",
@@ -451,7 +463,12 @@ def reverify_pair(pair: Dict, verifier=None) -> Optional[Dict]:
     """
     pdesc = pair.get("pdesc")
     if pdesc is None:
-        pdesc = _pm_description(pair.get("pid") or "")
+        pid = str(pair.get("pid") or "")
+        if pid.startswith("us:"):
+            from .pmus import pmus_description
+            pdesc = pmus_description(pid)
+        else:
+            pdesc = _pm_description(pid)
         if pdesc is None:
             return pair
     krules = _kalshi_rules(pair.get("ktk") or "")
@@ -519,8 +536,20 @@ def to_opportunity(priced: Dict) -> Dict:
 
 
 def discover() -> List[Dict]:
-    """Full sweep: fetch both catalogs and return verified same-event pairs."""
-    return match_pairs(fetch_polymarket(), fetch_kalshi())
+    """Full sweep: fetch all venue catalogs and return verified same-event
+    pairs. Polymarket US rows ride the same matcher/verifier/arbitration via
+    their catalog-row mapping (synthetic 'us:'-prefixed ids)."""
+    ks = fetch_kalshi()
+    pairs = match_pairs(fetch_polymarket(), ks)
+    try:
+        from .pmus import fetch_pmus
+        us = fetch_pmus()
+        if us:
+            pairs = _arbitrate_conflicts(pairs + match_pairs(us, ks))
+    except Exception as exc:   # third venue is additive, never fatal
+        import sys as _sys
+        print(f"pm-us catalog unavailable: {exc}", file=_sys.stderr)
+    return pairs
 
 
 # --------------------------------------------------------------------------- #

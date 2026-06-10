@@ -234,6 +234,7 @@ def main(argv=None) -> int:
     pairs_by_ktk = {p.get("ktk"): p for p in watch}
     hot = _load_screens(args)   # event-dutch candidates, refreshed with the watch-list
     feed = _start_ws_feed(args, watch)
+    us_off = 0                  # round-robin offset over rate-limited US pairs
     # Graceful shutdown: deploy restarts kill the monitor with episodes open in
     # memory — flush them to the ledger instead of losing them. (signal.signal
     # only works on the main thread; tests drive main() in-thread, so guard.)
@@ -275,11 +276,23 @@ def main(argv=None) -> int:
                 feed = _start_ws_feed(args, watch)
             last_refresh = now
 
+        # Polymarket US's public tier allows 60 req/min: price at most 15 US
+        # pairs per sweep, round-robin, and never spuriously close an episode
+        # for a pair that simply wasn't priced this sweep.
+        us_watch = [p for p in watch if str(p.get("pid", "")).startswith("us:")]
+        rest = [p for p in watch if not str(p.get("pid", "")).startswith("us:")]
+        if len(us_watch) > 15:
+            sel = [us_watch[(us_off + i) % len(us_watch)] for i in range(15)]
+            us_off = (us_off + 15) % len(us_watch)
+        else:
+            sel = us_watch
+        deferred_ktks = {p.get("ktk") for p in us_watch} - {p.get("ktk") for p in sel}
+
         live = {}
         with concurrent.futures.ThreadPoolExecutor(max_workers=16) as ex:
             results = list(ex.map(
                 lambda p: lp.pair_structures(p, args.pm_fee_bps, pm_book_fn=_pm_books),
-                watch))
+                rest + sel))
             results.extend([r] for r in ex.map(_price_candidate, hot))
         for rs in results:
             for r in rs or []:
@@ -306,8 +319,10 @@ def main(argv=None) -> int:
                 ep["peak_net"] = max(ep["peak_net"], r["net"])
                 ep["peak_edge"] = max(ep["peak_edge"], r["net_edge"])
                 ep["ticks"] += 1
-        # episodes that just closed (were open, now gone)
-        for key in [k for k in open_eps if k not in live]:
+        # episodes that just closed (were open, now gone) — except pairs the
+        # US rate-limit rotation deferred this sweep (not priced != closed).
+        for key in [k for k in open_eps if k not in live
+                    and (open_eps[k].get("ktk") or "") not in deferred_ktks]:
             ep = open_eps.pop(key)
             dur = now - ep["start"]
             closed += 1

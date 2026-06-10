@@ -317,7 +317,9 @@ class WsBookFeed:
             tickers.append(ktk)
             for t in p.get("tokens") or []:
                 tid = str(t.get("token_id") or "")
-                if tid:
+                # 'us:' ids are synthetic Polymarket-US slugs, not CLOB tokens
+                # — the global PM channel doesn't know them.
+                if tid and not tid.startswith("us:"):
                     tokens.append(tid)
                     self.token_to_pair[tid] = ktk
         self.pm = PMWsClient(self.mirror, tokens)

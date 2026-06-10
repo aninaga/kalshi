@@ -301,6 +301,17 @@ _TIER_PATTERNS: tuple = tuple(
         ("wild_card", r"\bwild card\b", re.IGNORECASE),
         ("division_series", r"\bDivision Series\b", re.IGNORECASE),
         ("play_in", r"\bplay-in\b", re.IGNORECASE),
+        # Manner-of-outcome qualifiers (same gate logic, different dimension):
+        # "win by KO" is a SUBSET of "win" — live false positive 2026-06-10
+        # when Kalshi's Pereira-wins market matched Polymarket-US's
+        # method-of-victory markets as clean.
+        ("method_ko", r"\bby (ko|tko|knockout|stoppage)\b", re.IGNORECASE),
+        ("method_sub", r"\bby submission\b", re.IGNORECASE),
+        ("method_dec", r"\bby (unanimous |split |majority )?decision\b", re.IGNORECASE),
+        ("method_dq", r"\bby (dq|disqualification)\b", re.IGNORECASE),
+        ("method_points", r"\bon points\b", re.IGNORECASE),
+        ("period_qual", r"\bin (round \d+|overtime|extra time|regulation|"
+                        r"the first (half|quarter|period|inning))\b", re.IGNORECASE),
     )
 )
 
