@@ -5,11 +5,14 @@ launched moves to IN-FLIGHT; verdicts move to DONE with a one-line result.
 Priority = expected information value about making (at least paper) money.
 
 ## NOW (top = next lane to launch)
-1. **fav_tail gated lane** (crypto, TAKER) — round-2 verified at +2.94c net,
-   t=2.62 clustered. Pre-register the narrowed rule exactly: buy 65-75c
-   favorites at T-15 AND short 2-5c longshots at T-5, positive reported
-   volume required, max one threshold per event-side. Full gate on locked
-   splits. If PASS -> paper tenant #2 (taker!) + capital conversation.
+1. **BTC stride-1 backfill** (data desk) — favorite leg standalone died ONLY
+   on n<200 stability (net +6.40c nontest, CI [+0.32,+12.28], n=151). Stride-1
+   doubles BTC event density over the same 66 days; n>=200 becomes reachable.
+   Rate-limit-paced fetch, idempotent. Then:
+2. **Favorite-leg standalone gated lane** (crypto hyp #3) — T-15 buy YES
+   ask in [0.70,0.75], volume>0, one per event. Watch the walkforward decay
+   (Apr +3.3 -> May +0.9 combined) — if the refreshed sample decays the same
+   way it's regime, kill without regret.
 2. **Crypto paper-trading support** (build lane) — paper.py is
    weather-specific (_live_weather_events). Generalize the live-panel seam so
    crypto tenants can enroll: late-ATM maker variant + the wave-3 spread
@@ -37,8 +40,11 @@ Priority = expected information value about making (at least paper) money.
   honest negative).
 
 ## DONE (recent)
-- Round-2 verification: fav_tail WEAKEN->narrow rule survives (+2.94c net
-  taker); xasset KILL; wx_favorite KILL (zero-volume entries fatal);
-  wx_revision KILL as taker (market prices the vintage within ~1 min).
+- Crypto hyp #2 fav_tail composite: **DEAD in-gate** (combined net +1.81c
+  nontest but walkforward decay Apr->May->Jun + longshot CI<=0; commit
+  1771e68). Survivor: favorite leg standalone (+6.40c, n-starved).
+- Round-2 verification: fav_tail WEAKEN (then died in-gate, above); xasset
+  KILL; wx_favorite KILL (zero-volume); wx_revision KILL (market prices the
+  vintage within ~1 min).
 - Maker study (weather forecast-gap): OOS +1.14c/signal, promoted to paper.
 - Crypto hyp #1 late-ATM sell: honest DEAD (taker costs).
