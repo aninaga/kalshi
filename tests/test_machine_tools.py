@@ -37,21 +37,22 @@ def test_cli_help_lists_machine_subcommands():
 
 
 def test_monitor_ledger_records_episode(tmp_path, monkeypatch):
-    # Stub discovery to a single pair and price_pair to a steady open gap, then a
-    # close — assert the closed episode is written to the ledger.
+    # Stub discovery to a single pair and pair_structures to a steady open gap,
+    # then a close — assert the closed episode is written to the ledger.
     from tools import monitor_arb
     pair = {"ktk": "K1", "pid": "P1", "kt": "Test market", "pt": "Test", "tokens": [], "polarity": "aligned"}
     monkeypatch.setattr(monitor_arb.lp, "discover", lambda: [pair])
+    monkeypatch.setattr(monitor_arb, "_load_screens", lambda a: [])
     state = {"n": 0}
 
-    def fake_price(p, bps):
+    def fake_structures(p, bps):
         state["n"] += 1
         if state["n"] == 1:  # gap open on first poll, closed thereafter
-            return {**pair, "net": 5.0, "net_edge": 0.03, "size": 100, "cost": 95,
-                    "a_src": "K", "b_src": "P"}
-        return None
+            return [{**pair, "net": 5.0, "net_edge": 0.03, "size": 100, "cost": 95,
+                     "a_src": "K", "b_src": "P"}]
+        return []
 
-    monkeypatch.setattr(monitor_arb.lp, "price_pair", fake_price)
+    monkeypatch.setattr(monitor_arb.lp, "pair_structures", fake_structures)
 
     ledger = tmp_path / "paper.jsonl"
     # Small positive duration so the bounded loop runs >=2 polls then stops.
@@ -60,6 +61,7 @@ def test_monitor_ledger_records_episode(tmp_path, monkeypatch):
     rows = [json.loads(line) for line in ledger.read_text().splitlines()]
     assert len(rows) == 1
     assert rows[0]["ktk"] == "K1" and rows[0]["peak_net"] == 5.0
+    assert rows[0]["strategy"] == "comp"
 
 
 def test_merge_watchlists_retains_pairs_dropped_by_catalog():
@@ -101,7 +103,8 @@ def test_monitor_watchlist_cache_persists_and_merges(tmp_path, monkeypatch):
     from tools import monitor_arb
     pair = {"ktk": "K1", "pid": "P1", "kt": "T", "pt": "T", "tokens": [],
             "polarity": "aligned"}
-    monkeypatch.setattr(monitor_arb.lp, "price_pair", lambda p, bps: None)
+    monkeypatch.setattr(monitor_arb.lp, "pair_structures", lambda p, bps: [])
+    monkeypatch.setattr(monitor_arb, "_load_screens", lambda a: [])
     monkeypatch.setattr(monitor_arb, "_kalshi_alive", lambda p: True)
     monkeypatch.setattr(monitor_arb, "_reverify", lambda p: p)
     cache = tmp_path / "watch.json"
@@ -132,7 +135,8 @@ def test_watchlist_cache_respects_allowlist_removal(tmp_path, monkeypatch):
     monkeypatch.setattr(monitor_arb.lp, "discover", lambda: [])  # catalogs forgot both
     monkeypatch.setattr(monitor_arb, "_kalshi_alive", lambda p: True)
     monkeypatch.setattr(monitor_arb, "_reverify", lambda p: p)
-    monkeypatch.setattr(monitor_arb.lp, "price_pair", lambda p, bps: None)
+    monkeypatch.setattr(monitor_arb.lp, "pair_structures", lambda p, bps: [])
+    monkeypatch.setattr(monitor_arb, "_load_screens", lambda a: [])
     assert monitor_arb.main(["--interval", "0", "--duration", "0.01",
                              "--allowlist", str(allow),
                              "--watchlist-cache", str(cache)]) == 0

@@ -118,6 +118,31 @@ def _load_watchlist(args) -> list:
     return pairs
 
 
+def _load_screens(args) -> list:
+    """Full-venue event-dutch screen: top-of-book over BOTH venues' catalog
+    feeds (Kalshi open events + PM neg-risk events), refreshed with the
+    watch-list. Returns the 'hot' candidates that get precise fee-aware
+    book-walk pricing every poll. Capped to keep per-poll fetches bounded."""
+    if getattr(args, "no_event_screens", False):
+        return []
+    hot = []
+    try:
+        hot.extend(lp.kalshi_event_screens(lp.fetch_kalshi_events()))
+    except Exception as exc:    # screen failure must never kill the monitor
+        print(f"kalshi event screen failed: {exc}", file=sys.stderr)
+    try:
+        hot.extend(lp.pm_event_screens())
+    except Exception as exc:
+        print(f"pm event screen failed: {exc}", file=sys.stderr)
+    hot = [c for c in hot if 2 <= c.get("n", 0) <= 25]   # bounded leg count
+    hot.sort(key=lambda c: -c.get("gross", 0.0))
+    hot = hot[:12]
+    print("Event-dutch screen: " + ("; ".join(
+        f"{c['kind']} {c['ev']} (gross ${c['gross']:.2f} x{c['n']})" for c in hot)
+        if hot else "no candidates"), file=sys.stderr)
+    return hot
+
+
 def _record(ledger_path, rec):
     if not ledger_path:
         return
@@ -146,6 +171,9 @@ def main(argv=None) -> int:
                          "(paper unless EXECUTION_MODE=live AND allowlisted AND armed).")
     ap.add_argument("--refresh-watchlist", type=float, default=1800,
                     help="Re-discover the watch-list every N seconds (markets open/close).")
+    ap.add_argument("--no-event-screens", action="store_true",
+                    help="Disable the full-venue event-dutch screens (pair "
+                         "structures only).")
     ap.add_argument("--watchlist-cache", type=str, default=None,
                     help="Persist verified pairs to this JSON so pairs that drop out "
                          "of the venue catalogs (e.g. PM /sampling-markets sheds "
@@ -175,52 +203,73 @@ def main(argv=None) -> int:
         return 0
 
     import concurrent.futures
-    open_eps: dict = {}      # ktk -> {start, peak_net, peak_edge, ticks}
+    open_eps: dict = {}      # key -> {start, peak_net, peak_edge, ticks, strategy}
     closed = 0
     captured_total = 0.0
     t_start = time.time()
     last_refresh = t_start
     last_snapshot = t_start
+    pairs_by_ktk = {p.get("ktk"): p for p in watch}
+    hot = _load_screens(args)   # event-dutch candidates, refreshed with the watch-list
     print(f"{'time':<9} {'event':<6} {'net$':>7} {'edge':>6} {'size':>7}  market", flush=True)
+
+    def _price_candidate(c):
+        try:
+            if str(c.get("ev", "")).startswith("pm:"):
+                return lp.price_pm_dutch(c, args.pm_fee_bps)
+            return lp.price_kalshi_dutch(c, pairs_by_ktk, args.pm_fee_bps)
+        except Exception:
+            return None
 
     while True:
         now = time.time()
         if args.refresh_watchlist and now - last_refresh > args.refresh_watchlist:
             watch = _load_watchlist(args)
+            pairs_by_ktk = {p.get("ktk"): p for p in watch}
+            hot = _load_screens(args)
             last_refresh = now
 
         live = {}
         with concurrent.futures.ThreadPoolExecutor(max_workers=16) as ex:
-            for r in ex.map(lambda p: lp.price_pair(p, args.pm_fee_bps), watch):
+            results = list(ex.map(lambda p: lp.pair_structures(p, args.pm_fee_bps), watch))
+            results.extend([r] for r in ex.map(_price_candidate, hot))
+        for rs in results:
+            for r in rs or []:
                 if (r and r["net"] >= args.min_net_usd and r["net_edge"] >= args.min_net_edge
                         and r["net_edge"] <= args.max_net_edge):
-                    live[r["ktk"]] = r
+                    live[r.get("key") or r["ktk"]] = r
 
         ts = datetime.now(timezone.utc).strftime("%H:%M:%S")
         # newly opened / still-open episodes
-        for ktk, r in live.items():
-            ep = open_eps.get(ktk)
+        for key, r in live.items():
+            ep = open_eps.get(key)
+            strat = r.get("strategy", "comp")
             if ep is None:
-                open_eps[ktk] = {"start": now, "peak_net": r["net"], "peak_edge": r["net_edge"],
-                                 "ticks": 1, "kt": r["kt"]}
+                open_eps[key] = {"start": now, "peak_net": r["net"], "peak_edge": r["net_edge"],
+                                 "ticks": 1, "kt": r["kt"], "strategy": strat,
+                                 "ktk": r.get("ktk", "")}
                 tag = " [BASIS-RISK]" if r.get("uncertain") else ""
+                stag = f" <{strat}>" if strat != "comp" else ""
                 print(f"{ts:<9} {'OPEN':<6} {r['net']:7.2f} {r['net_edge']*100:5.1f}% "
-                      f"{r['size']:7.0f}  {r['kt'][:40]}{tag}", flush=True)
-                if executor is not None:
+                      f"{r['size']:7.0f}  {r['kt'][:40]}{tag}{stag}", flush=True)
+                if executor is not None and strat == "comp":
                     _fire(r)
             else:
                 ep["peak_net"] = max(ep["peak_net"], r["net"])
                 ep["peak_edge"] = max(ep["peak_edge"], r["net_edge"])
                 ep["ticks"] += 1
         # episodes that just closed (were open, now gone)
-        for ktk in [k for k in open_eps if k not in live]:
-            ep = open_eps.pop(ktk)
+        for key in [k for k in open_eps if k not in live]:
+            ep = open_eps.pop(key)
             dur = now - ep["start"]
             closed += 1
             captured_total += ep["peak_net"]
+            stag = f" <{ep['strategy']}>" if ep.get("strategy", "comp") != "comp" else ""
             print(f"{ts:<9} {'CLOSE':<6} {ep['peak_net']:7.2f} {ep['peak_edge']*100:5.1f}% "
-                  f"{'':>7}  {ep['kt'][:40]} (open {dur/60:.1f}m, {ep['ticks']} ticks)", flush=True)
-            _record(args.ledger, {"ts": ts, "ktk": ktk, "market": ep["kt"],
+                  f"{'':>7}  {ep['kt'][:40]}{stag} (open {dur/60:.1f}m, {ep['ticks']} ticks)",
+                  flush=True)
+            _record(args.ledger, {"ts": ts, "ktk": ep.get("ktk") or key, "market": ep["kt"],
+                                  "strategy": ep.get("strategy", "comp"), "key": key,
                                   "peak_net": round(ep["peak_net"], 4),
                                   "peak_edge": round(ep["peak_edge"], 5),
                                   "open_minutes": round(dur / 60, 2), "ticks": ep["ticks"]})
@@ -230,9 +279,22 @@ def main(argv=None) -> int:
         if args.snapshot_every and now - last_snapshot >= args.snapshot_every:
             last_snapshot = now
             # Separate clean (risk-free) from basis-risk (uncertain resolution,
-            # e.g. arrests) so the headline capturable isn't overstated.
-            clean = {k: r for k, r in live.items() if not r.get("uncertain")}
-            unc = {k: r for k, r in live.items() if r.get("uncertain")}
+            # e.g. arrests) so the headline capturable isn't overstated. The
+            # open_net/open_count series keeps its historical meaning (cross-
+            # venue complementary only); other structures report by_strategy.
+            comp = {k: r for k, r in live.items() if r.get("strategy", "comp") == "comp"}
+            other = {k: r for k, r in live.items() if r.get("strategy", "comp") != "comp"}
+            clean = {k: r for k, r in comp.items() if not r.get("uncertain")}
+            unc = {k: r for k, r in comp.items() if r.get("uncertain")}
+            by_strategy = {}
+            for k, r in other.items():
+                s = by_strategy.setdefault(r["strategy"], {"count": 0, "net": 0.0,
+                                                           "net_uncertain": 0.0})
+                s["count"] += 1
+                s["net" if not r.get("uncertain") else "net_uncertain"] += r["net"]
+            for s in by_strategy.values():
+                s["net"] = round(s["net"], 4)
+                s["net_uncertain"] = round(s["net_uncertain"], 4)
             _record(args.ledger, {
                 "ts": ts, "kind": "snapshot", "epoch": round(now, 1),
                 "open_count": len(clean),
@@ -241,6 +303,7 @@ def main(argv=None) -> int:
                 "open_net_uncertain": round(sum(r["net"] for r in unc.values()), 4),
                 "by_market": {k: round(r["net"], 2) for k, r in clean.items()},
                 "by_market_uncertain": {k: round(r["net"], 2) for k, r in unc.items()},
+                "by_strategy": by_strategy,
             })
 
         if args.duration and now - t_start >= args.duration:

@@ -15,6 +15,7 @@ real once it clears the dominant Kalshi taker fee curve 0.07*P*(1-P).
 from __future__ import annotations
 
 import json
+import re
 import time
 import urllib.request
 from collections import defaultdict
@@ -136,14 +137,24 @@ def pm_asks(token: str) -> list:
     return sorted((float(a["price"]), float(a["size"])) for a in (b or {}).get("asks", []))
 
 
-def price_pair(pair: Dict, pm_fee_bps: int = 500) -> Optional[Dict]:
-    """Fetch synchronized books for a verified pair and price the cross-venue
-    complementary arb. ``pair`` carries ktk, tokens, polarity (from a verdict)."""
+def pair_structures(pair: Dict, pm_fee_bps: int = 500) -> List[Dict]:
+    """Fetch synchronized books for a verified pair ONCE and price every arb
+    structure the pair supports:
+
+      - 'comp': cross-venue complementary (buy A + B across venues < $1)
+      - 'pm_intra': PM YES-token + NO-token asks sum < $1 (separate books)
+
+    (Kalshi has no intra structure: its YES/NO sides are one unified book, so
+    yes_ask + no_ask = 1 + spread >= 1 by construction.)
+    """
+    out: List[Dict] = []
     kyes, kno = kalshi_book(pair["ktk"])
     toks = {str(t.get("outcome", "")).lower(): t["token_id"] for t in pair["tokens"]}
     yes_t = toks.get("yes") or pair["tokens"][0]["token_id"]
     no_t = toks.get("no") or pair["tokens"][1]["token_id"]
     pyes, pno = pm_asks(yes_t), pm_asks(no_t)
+
+    # -- cross-venue complementary ------------------------------------------ #
     inv = pair["polarity"] == INVERTED
     pm_A, pm_B = (pno, pyes) if inv else (pyes, pno)  # A = Kalshi-YES outcome
     ka = kyes[0][0] if kyes else 9
@@ -152,26 +163,43 @@ def price_pair(pair: Dict, pm_fee_bps: int = 500) -> Optional[Dict]:
     pb = pm_B[0][0] if pm_B else 9
     a_is_k = ka <= pa
     b_is_k = kb <= pb
-    if a_is_k == b_is_k:  # need one leg per venue
-        return None
-    A = kyes if a_is_k else pm_A
-    B = kno if b_is_k else pm_B
-    if not A or not B:
-        return None
-    # Polarity fail-safe (economics-level, polarity-INDEPENDENT): two genuinely
-    # complementary outcomes of the same event have P(A)+P(B)=1, so their ask
-    # prices must sum to ~$1 (a real arb edge is only a few %). A sum far below 1
-    # means the two legs are NOT complementary — a polarity error or false match
-    # would otherwise fabricate a huge phantom edge (e.g. buying NO on both
-    # venues sums to ~0.17). Reject rather than trust the polarity flag alone.
-    if (A[0][0] + B[0][0]) < _MIN_COMPLEMENTARY_SUM:
-        return None
-    res = walk_complementary(A, B, a_is_k, b_is_k, pm_fee_bps)
-    if not res:
-        return None
-    res.update({**pair, "a_src": "K" if a_is_k else "P", "b_src": "K" if b_is_k else "P"})
-    res["implausible"] = res["net_edge"] > getattr(Config, "MAX_PLAUSIBLE_PROFIT_MARGIN", 0.15)
-    return res
+    if a_is_k != b_is_k:  # need one leg per venue
+        A = kyes if a_is_k else pm_A
+        B = kno if b_is_k else pm_B
+        # Polarity fail-safe (economics-level, polarity-INDEPENDENT): two
+        # genuinely complementary outcomes of the same event have P(A)+P(B)=1,
+        # so their ask prices must sum to ~$1 (a real arb edge is only a few
+        # %). A sum far below 1 means the legs are NOT complementary — a
+        # polarity error / false match would otherwise fabricate a phantom
+        # edge. Reject rather than trust the polarity flag alone.
+        if A and B and (A[0][0] + B[0][0]) >= _MIN_COMPLEMENTARY_SUM:
+            res = walk_complementary(A, B, a_is_k, b_is_k, pm_fee_bps)
+            if res:
+                res.update({**pair, "a_src": "K" if a_is_k else "P",
+                            "b_src": "K" if b_is_k else "P",
+                            "strategy": "comp", "key": f"comp:{pair['ktk']}"})
+                res["implausible"] = res["net_edge"] > getattr(
+                    Config, "MAX_PLAUSIBLE_PROFIT_MARGIN", 0.15)
+                out.append(res)
+
+    # -- PM intra (YES + NO tokens < $1) ------------------------------------ #
+    intra = walk_basket([_tag(pyes, False), _tag(pno, False)], pm_fee_bps, payout=1.0)
+    if intra:
+        intra.update({"strategy": "pm_intra", "key": f"pm_intra:{pair['ktk']}",
+                      "ktk": pair["ktk"], "kt": pair.get("pt") or pair.get("kt", ""),
+                      "uncertain": False})
+        intra["implausible"] = intra["net_edge"] > getattr(
+            Config, "MAX_PLAUSIBLE_PROFIT_MARGIN", 0.15)
+        out.append(intra)
+    return out
+
+
+def price_pair(pair: Dict, pm_fee_bps: int = 500) -> Optional[Dict]:
+    """Back-compat: the cross-venue complementary structure only."""
+    for r in pair_structures(pair, pm_fee_bps):
+        if r.get("strategy") == "comp":
+            return r
+    return None
 
 
 # --------------------------------------------------------------------------- #
@@ -489,3 +517,263 @@ def to_opportunity(priced: Dict) -> Dict:
 def discover() -> List[Dict]:
     """Full sweep: fetch both catalogs and return verified same-event pairs."""
     return match_pairs(fetch_polymarket(), fetch_kalshi())
+
+
+# --------------------------------------------------------------------------- #
+#  Structure-complete capture: PM intra-market + event-level dutch arbs        #
+#                                                                              #
+#  A single Kalshi binary market cannot self-arb (its YES and NO sides are one #
+#  unified book: no_ask = 1 - yes_bid, so yes_ask + no_ask = 1 + spread >= 1). #
+#  But PM's YES/NO tokens trade in SEPARATE books (sum can transiently dip     #
+#  under $1), and multi-outcome EVENTS have a separate book per outcome on     #
+#  both venues, so the event-level sum can stray from $1 in either direction:  #
+#    - YES-dutch: buy YES on every outcome, cost < $1. Pays exactly $1 only    #
+#      if the outcome set is EXHAUSTIVE (gate on a catch-all outcome).         #
+#    - NO-dutch:  buy NO on every outcome, cost < N-1. Pays >= N-1 whenever    #
+#      AT MOST one outcome happens, i.e. safe under mutual exclusivity alone   #
+#      (zero YES outcomes pays N, even better).                                #
+#  Full-venue detection is a top-of-book screen over the catalog feeds (zero   #
+#  extra calls); precise fee-aware book-walks run only on screen hits.         #
+# --------------------------------------------------------------------------- #
+
+def walk_basket(ladders: List[list], pm_fee_bps: int = 500,
+                payout: float = 1.0) -> Optional[Dict]:
+    """Walk N ascending ask ladders bought SIMULTANEOUSLY (same size per leg),
+    accumulating while each marginal contract is net-positive after fees.
+
+    Each ladder level is ``(price, size, is_kalshi)`` so a single leg can mix
+    venues (cross-venue-improved dutch merges both venues' asks per outcome).
+    ``payout`` is the guaranteed $ per unit basket (1.0 for YES-dutch / intra,
+    N-1 for NO-dutch). Returns dict(size, cost, net, net_edge, avg_prices) or
+    None if no net-positive size exists.
+    """
+    qs = [[list(lvl) for lvl in lad] for lad in ladders]
+    if not qs or any(not lad for lad in qs):
+        return None
+    idx = [0] * len(qs)
+    n = 0.0
+    costs = [0.0] * len(qs)
+    total_fees = 0.0   # accumulated marginal fees: exact even for mixed-venue legs
+    while all(i < len(lad) for i, lad in zip(idx, qs)):
+        levels = [lad[i] for i, lad in zip(idx, qs)]
+        step = min(s for _, s, _ in levels)
+        if step <= 0:
+            for j, (_, s, _) in enumerate(levels):
+                if s <= 0:
+                    idx[j] += 1
+            continue
+        fees = sum(
+            FeeModel.kalshi_taker_fee(p, step) if is_k
+            else FeeModel.polymarket_taker_fee(p, step, pm_fee_bps)
+            for p, _, is_k in levels)
+        if (payout - sum(p for p, _, _ in levels)) * step - fees <= 0:
+            break
+        n += step
+        total_fees += fees
+        for j, lvl in enumerate(levels):
+            costs[j] += lvl[0] * step
+            lvl[1] -= step
+            if lvl[1] <= 1e-9:
+                idx[j] += 1
+    if n <= 0:
+        return None
+    cost = sum(costs)
+    net = payout * n - cost - total_fees
+    if net <= 0:
+        return None
+    return {"size": n, "cost": cost, "net": net,
+            "net_edge": net / cost if cost else 0.0,
+            "avg_prices": [c / n for c in costs]}
+
+
+def _tag(ladder, is_kalshi):
+    """Attach a venue flag to a plain (price, size) ladder."""
+    return [(p, s, is_kalshi) for p, s in ladder]
+
+
+def _merge_ladders(*tagged):
+    """Merge venue-tagged ladders into one ascending ladder (buy from either)."""
+    out = []
+    for lad in tagged:
+        out.extend(lad or [])
+    return sorted(out)
+
+
+# Exhaustiveness signals: an explicit catch-all outcome ("any other candidate",
+# "none of the above") or a range-ladder endpoint ("X or above" / "X or below"
+# — temperature/GDP/margin events whose buckets tile the whole real line).
+_CATCHALL_RX = re.compile(
+    r"\b(another|other|none of|no one|nobody|neither|someone else|the field|"
+    r"any other|or (above|below|higher|lower|more|less|later|earlier))\b",
+    re.IGNORECASE)
+
+
+def kalshi_event_screens(events: List[Dict], min_gross: float = 0.01) -> List[Dict]:
+    """Top-of-book event-dutch screen over the Kalshi events feed (no calls).
+
+    Returns candidate dicts {ev, kind, gross, n, tickers, exhaustive} where
+    kind is 'dutch_yes' (sum of yes-asks < 1-min_gross; requires exhaustive
+    catch-all) or 'dutch_no' (sum of yes-bids > 1+min_gross; safe under the
+    event's mutually_exclusive flag).
+    """
+    out = []
+    for e in events:
+        if not e.get("mutually_exclusive"):
+            continue
+        ms = [m for m in (e.get("markets") or [])
+              if str(m.get("status", "active")).lower() in ("", "active", "open", "initialized")]
+        if len(ms) < 2:
+            continue
+        asks, bids, ok = [], [], True
+        for m in ms:
+            try:
+                a = float(m.get("yes_ask_dollars") or 0)
+                b = float(m.get("yes_bid_dollars") or 0)
+            except (TypeError, ValueError):
+                ok = False
+                break
+            if a <= 0:   # no offer on some outcome -> YES-dutch impossible
+                a = 9.0
+            asks.append(a)
+            bids.append(b)
+        if not ok:
+            continue
+        exhaustive = any(_CATCHALL_RX.search(
+            f"{m.get('title','')} {m.get('yes_sub_title','')}") for m in ms)
+        tickers = [m.get("ticker") for m in ms]
+        ev = e.get("event_ticker") or (tickers[0] if tickers else "")
+        if sum(asks) < 1.0 - min_gross and exhaustive:
+            out.append({"ev": ev, "kind": "dutch_yes", "gross": 1.0 - sum(asks),
+                        "n": len(ms), "tickers": tickers, "exhaustive": True,
+                        "title": e.get("title", "")})
+        if sum(bids) > 1.0 + min_gross:
+            out.append({"ev": ev, "kind": "dutch_no", "gross": sum(bids) - 1.0,
+                        "n": len(ms), "tickers": tickers, "exhaustive": exhaustive,
+                        "title": e.get("title", "")})
+    return out
+
+
+def price_kalshi_dutch(cand: Dict, pairs_by_ktk: Optional[Dict] = None,
+                       pm_fee_bps: int = 500) -> Optional[Dict]:
+    """Precise fee-aware pricing of a screened event-dutch candidate.
+
+    Fetches each outcome's Kalshi book; when an outcome has a verified PM pair
+    (aligned polarity), the PM ladder is merged in so each leg buys from
+    whichever venue is cheaper level-by-level.
+    """
+    pairs_by_ktk = pairs_by_ktk or {}
+    yes_legs, no_legs = [], []
+    for tk in cand["tickers"]:
+        kyes, kno = kalshi_book(tk)
+        if not kyes and not kno:
+            return None
+        y_lad, n_lad = _tag(kyes, True), _tag(kno, True)
+        pair = pairs_by_ktk.get(tk)
+        if pair and not pair.get("uncertain"):
+            toks = {str(t.get("outcome", "")).lower(): t["token_id"]
+                    for t in pair.get("tokens") or []}
+            inv = pair.get("polarity") == INVERTED
+            yes_t = toks.get("no") if inv else toks.get("yes")
+            no_t = toks.get("yes") if inv else toks.get("no")
+            if yes_t:
+                y_lad = _merge_ladders(y_lad, _tag(pm_asks(yes_t), False))
+            if no_t:
+                n_lad = _merge_ladders(n_lad, _tag(pm_asks(no_t), False))
+        yes_legs.append(y_lad)
+        no_legs.append(n_lad)
+    if cand["kind"] == "dutch_yes":
+        res = walk_basket(yes_legs, pm_fee_bps, payout=1.0)
+    else:
+        res = walk_basket(no_legs, pm_fee_bps, payout=float(len(no_legs)) - 1.0)
+    if not res:
+        return None
+    res.update({"strategy": cand["kind"], "key": f"{cand['kind']}:{cand['ev']}",
+                "kt": cand.get("title") or cand["ev"], "n_legs": cand["n"],
+                # NO-dutch is guaranteed by exclusivity alone; YES-dutch relies
+                # on the catch-all exhaustiveness heuristic -> review.
+                "uncertain": cand["kind"] == "dutch_yes" and not cand.get("exhaustive")})
+    res["implausible"] = res["net_edge"] > getattr(Config, "MAX_PLAUSIBLE_PROFIT_MARGIN", 0.15)
+    return res
+
+
+def fetch_kalshi_events() -> List[Dict]:
+    """Open Kalshi events with nested markets (the dutch screen's input)."""
+    evs, cur, pages = [], "", 0
+    while pages < 45:
+        d = get(f"{KBASE}/events?limit=200&status=open&with_nested_markets=true"
+                + (f"&cursor={cur}" if cur else ""))
+        if not d:
+            break
+        evs.extend(d.get("events", []))
+        cur = d.get("cursor", "")
+        pages += 1
+        if not cur or not d.get("events"):
+            break
+    return evs
+
+
+def pm_event_screens(min_gross: float = 0.01, max_pages: int = 10) -> List[Dict]:
+    """Top-of-book dutch screen over PM neg-risk events via Gamma (paged by
+    volume). negRisk events are mutually exclusive by construction; the
+    exhaustiveness heuristic gates YES-dutch exactly as on Kalshi."""
+    out, offset = [], 0
+    for _ in range(max_pages):
+        d = get(f"{GAMMA}/events?closed=false&order=volume&ascending=false"
+                f"&limit=100&offset={offset}")
+        if not isinstance(d, list) or not d:
+            break
+        for e in d:
+            if not e.get("negRisk"):
+                continue
+            ms = [m for m in (e.get("markets") or [])
+                  if m.get("active") and not m.get("closed")]
+            if len(ms) < 2:
+                continue
+            try:
+                asks = [float(m.get("bestAsk") or 9) for m in ms]
+                bids = [float(m.get("bestBid") or 0) for m in ms]
+            except (TypeError, ValueError):
+                continue
+            exhaustive = any(_CATCHALL_RX.search(m.get("question") or "") for m in ms)
+            toks = []
+            for m in ms:
+                try:
+                    toks.append(json.loads(m.get("clobTokenIds") or "[]"))
+                except (json.JSONDecodeError, TypeError):
+                    toks.append([])
+            ev = e.get("slug") or e.get("id") or ""
+            if sum(asks) < 1.0 - min_gross and exhaustive:
+                out.append({"ev": f"pm:{ev}", "kind": "dutch_yes",
+                            "gross": 1.0 - sum(asks), "n": len(ms),
+                            "tokens": toks, "exhaustive": True,
+                            "title": e.get("title", "")})
+            if sum(bids) > 1.0 + min_gross:
+                out.append({"ev": f"pm:{ev}", "kind": "dutch_no",
+                            "gross": sum(bids) - 1.0, "n": len(ms),
+                            "tokens": toks, "exhaustive": exhaustive,
+                            "title": e.get("title", "")})
+        offset += len(d)
+        if len(d) < 100:
+            break
+    return out
+
+
+def price_pm_dutch(cand: Dict, pm_fee_bps: int = 500) -> Optional[Dict]:
+    """Precise pricing of a PM neg-risk dutch candidate (PM books only)."""
+    yes_legs, no_legs = [], []
+    for pairids in cand.get("tokens") or []:
+        if len(pairids) != 2:
+            return None
+        yes_legs.append(_tag(pm_asks(str(pairids[0])), False))
+        no_legs.append(_tag(pm_asks(str(pairids[1])), False))
+    if cand["kind"] == "dutch_yes":
+        res = walk_basket(yes_legs, pm_fee_bps, payout=1.0)
+    else:
+        res = walk_basket(no_legs, pm_fee_bps, payout=float(len(no_legs)) - 1.0)
+    if not res:
+        return None
+    res.update({"strategy": cand["kind"], "key": f"{cand['kind']}:{cand['ev']}",
+                "kt": cand.get("title") or cand["ev"], "n_legs": cand["n"],
+                "uncertain": cand["kind"] == "dutch_yes" and not cand.get("exhaustive")})
+    res["implausible"] = res["net_edge"] > getattr(Config, "MAX_PLAUSIBLE_PROFIT_MARGIN", 0.15)
+    return res
