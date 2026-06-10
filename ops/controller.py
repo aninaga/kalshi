@@ -303,15 +303,25 @@ def pick_vendor() -> str:
 
 
 def _maybe_launch_lanes() -> None:
+    from ops import governor
+    codex_cap = governor.codex_policy()["codex_lane_concurrency"]
     with _lock:
-        active = sum(1 for c in STATE["children"].values()
-                     if c["kind"] == "lane" and _alive(c["pid"]))
-        if active >= MAX_CONCURRENT_LANES:
+        active_by_vendor = {}
+        for c in STATE["children"].values():
+            if c["kind"] == "lane" and _alive(c["pid"]):
+                v = c.get("vendor", "none")
+                active_by_vendor[v] = active_by_vendor.get(v, 0) + 1
+        total = sum(active_by_vendor.values())
+        if total >= MAX_CONCURRENT_LANES + codex_cap:
             return
         q = load_queue()
         for item in q:
             if item.get("status") == "queued" and item.get("enabled", True):
-                reason = _vendor_throttled(item.get("vendor", "none"))
+                vend = item.get("vendor", "none")
+                cap = codex_cap if vend == "codex" else MAX_CONCURRENT_LANES
+                if active_by_vendor.get(vend, 0) >= cap:
+                    continue
+                reason = _vendor_throttled(vend)
                 if reason:
                     if item.get("deferred_reason") != reason:
                         item["deferred_reason"] = reason
@@ -419,6 +429,7 @@ def status() -> dict:
         "codex_budget": codex_credits(),
         "usage": usage_meter.read_cache(),
         "claude_policy": usage_profile.claude_defer_thresholds(),
+        "throughput_policy": __import__("ops.governor", fromlist=["x"]).codex_policy(),
         "ledger_tail": ledger_tail(),
         "last_topup": st.get("last_topup"),
         "ts": time.time(),
