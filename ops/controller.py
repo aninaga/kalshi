@@ -250,10 +250,22 @@ def scheduler() -> None:
 # Codex thresholds are high because nothing else competes for that budget.
 # Fable counts 2x against the Claude window (promo through 2026-06-22), which
 # is why Claude depletes fastest and why the reserve exists.
+from ops import usage_profile  # noqa: E402
+
+# Codex static; Claude thresholds are DYNAMIC — usage_profile learns the
+# operator's personal usage rhythm (claude.ai + Claude Code share windows)
+# and shrinks/grows the apex reserve accordingly: soak the window when the
+# operator is typically away, yield hard when they are (or go) active.
 DEFER_PCT = {
-    "claude": {"five_hour": 60.0, "weekly": 75.0},   # apex reserve
     "codex": {"five_hour": 85.0, "weekly": 90.0},
 }
+
+
+def _defer_table(vendor: str) -> dict:
+    if vendor == "claude":
+        t = usage_profile.claude_defer_thresholds()
+        return {"five_hour": t["five_hour"], "weekly": t["weekly"]}
+    return DEFER_PCT.get(vendor, {})
 
 
 def _vendor_pct(vendor: str) -> dict:
@@ -264,27 +276,29 @@ def _vendor_pct(vendor: str) -> dict:
 
 def _vendor_throttled(vendor: str) -> str | None:
     """Return a reason string if this vendor's window is too hot to launch."""
-    if vendor not in DEFER_PCT:
+    table = _defer_table(vendor)
+    if not table:
         return None
     src = _vendor_pct(vendor)
-    for win, cap in DEFER_PCT[vendor].items():
+    for win, cap in table.items():
         pct = src.get(f"{win}_pct")
         if pct is not None and pct >= cap:
-            return f"{vendor} {win} at {pct:.0f}% (defer until reset)"
+            return f"{vendor} {win} at {pct:.0f}% >= {cap:.0f}% cap (defer)"
     return None
 
 
 def pick_vendor() -> str:
     """For vendor-agnostic work: route to the cooler vendor (headroom-weighted,
-    Claude's apex reserve already priced into its thresholds)."""
+    Claude's dynamic apex reserve already priced into its thresholds)."""
     head = {}
-    for v in DEFER_PCT:
+    for v in ("codex", "claude"):
         if _vendor_throttled(v):
             head[v] = -1.0
             continue
         src = _vendor_pct(v)
+        table = _defer_table(v)
         head[v] = min(cap - (src.get(f"{w}_pct") or 0.0)
-                      for w, cap in DEFER_PCT[v].items())
+                      for w, cap in table.items())
     return max(head, key=head.get)
 
 
@@ -404,6 +418,7 @@ def status() -> dict:
         "disk_free_gb": round(disk.free / 1e9, 1),
         "codex_budget": codex_credits(),
         "usage": usage_meter.read_cache(),
+        "claude_policy": usage_profile.claude_defer_thresholds(),
         "ledger_tail": ledger_tail(),
         "last_topup": st.get("last_topup"),
         "ts": time.time(),
