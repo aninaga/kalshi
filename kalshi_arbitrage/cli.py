@@ -189,6 +189,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("backtest-arb", help="retroactive capturable arb over the past N days", add_help=False)
     sub.add_parser("analyze-ledger", help="summarize a monitor --ledger paper session", add_help=False)
     sub.add_parser("machine", help="one-command: discover -> allowlist -> paper-harvest", add_help=False)
+    sub.add_parser("review", help="walk held-for-review pairs -> allow/deny decisions", add_help=False)
 
     return p
 
@@ -201,6 +202,7 @@ _PASSTHROUGH = {
     "monitor": "tools.monitor_arb",
     "backtest-arb": "tools.backtest_arb",
     "machine": "tools.run_machine",
+    "review": "tools.review_pairs",
     "analyze-ledger": "tools.analyze_ledger",
     "readiness": "kalshi_arbitrage.validation.pilot.live_readiness_checklist",
     "reconcile": "kalshi_arbitrage.reconcile",
