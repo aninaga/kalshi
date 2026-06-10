@@ -148,6 +148,36 @@ def test_kalshi_screen_flags_no_dutch_under_mx_alone():
     assert lp.kalshi_event_screens([_mk_event(False, [0.5] * 3, [0.4] * 3)]) == []
 
 
+def test_conditional_race_with_subject_catchall_is_not_exhaustive():
+    # The live false positive (2026-06-10): "Which AI will be the first to hit
+    # 1550?" summed to $0.83 with an "Other" outcome — but "Other" only covers
+    # subject-space; if NO model ever hits 1550 every outcome resolves NO and
+    # the basket pays $0. A subject catch-all must NOT make a race exhaustive.
+    ev = _mk_event(True, [0.30, 0.30, 0.23], [0.25, 0.25, 0.20],
+                   titles=["Claude", "ChatGPT", "Other"])
+    ev["title"] = "Which AI will be the first to hit 1550 on Text Arena?"
+    assert lp.kalshi_event_screens([ev]) == []
+    # An explicit NONE outcome covers the never-happens path -> exhaustive.
+    ev2 = _mk_event(True, [0.30, 0.30, 0.23], [0.25, 0.25, 0.20],
+                    titles=["Claude", "ChatGPT", "No one hits it"])
+    ev2["title"] = "Which AI will be the first to hit 1550 on Text Arena?"
+    out = lp.kalshi_event_screens([ev2])
+    assert len(out) == 1 and out[0]["kind"] == "dutch_yes" and out[0]["exhaustive"]
+    # Winner-type contest (someone always wins): subject catch-all suffices.
+    ev3 = _mk_event(True, [0.30, 0.30, 0.23], [0.25, 0.25, 0.20],
+                    titles=["Seattle", "San Francisco", "Any other team"])
+    ev3["title"] = "NFC West Division Winner"
+    assert [c["kind"] for c in lp.kalshi_event_screens([ev3])] == ["dutch_yes"]
+
+
+def test_range_ladder_endpoints_are_exhaustive():
+    ev = _mk_event(True, [0.30, 0.30, 0.30], [0.25, 0.25, 0.25],
+                   titles=["89° or below", "90° to 91°", "92° or above"])
+    ev["title"] = "Highest temperature in Washington DC on Jun 10?"
+    out = lp.kalshi_event_screens([ev])
+    assert len(out) == 1 and out[0]["kind"] == "dutch_yes" and out[0]["exhaustive"]
+
+
 def test_kalshi_screen_missing_offer_blocks_yes_dutch():
     ev = _mk_event(True, [0.30, 0.30, 0], [0.25, 0.25, 0.25],
                    titles=["A", "B", "Any other"])

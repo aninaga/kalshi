@@ -599,13 +599,40 @@ def _merge_ladders(*tagged):
     return sorted(out)
 
 
-# Exhaustiveness signals: an explicit catch-all outcome ("any other candidate",
-# "none of the above") or a range-ladder endpoint ("X or above" / "X or below"
-# — temperature/GDP/margin events whose buckets tile the whole real line).
-_CATCHALL_RX = re.compile(
-    r"\b(another|other|none of|no one|nobody|neither|someone else|the field|"
-    r"any other|or (above|below|higher|lower|more|less|later|earlier))\b",
-    re.IGNORECASE)
+# Exhaustiveness (exactly one outcome must resolve YES) is what makes a
+# YES-dutch pay $1. Three signal tiers, learned from a live false positive
+# (2026-06-10: "Which AI will be the first to hit 1550?" — outcomes summed to
+# $0.83 with an "Other" catch-all, but if NO model ever hits 1550 every
+# outcome including Other resolves NO and the basket pays $0; the missing
+# $0.17 was the market's probability of exactly that):
+#   - range-ladder endpoints ("or above"/"or below") tile the real line of a
+#     measured quantity -> exhaustive;
+#   - an explicit NONE outcome ("none of the above", "no one") covers the
+#     event-never-happens path -> exhaustive;
+#   - a SUBJECT catch-all ("any other candidate") only covers subject-space:
+#     exhaustive for winner-type contests (someone always wins), but NOT for
+#     conditional races ("first to hit X", "will anyone...") where the event
+#     itself may never happen.
+_ENDPOINT_RX = re.compile(
+    r"\bor (above|below|higher|lower|more|less|later|earlier)\b", re.IGNORECASE)
+_NONE_OUTCOME_RX = re.compile(
+    r"\b(none|no one|nobody|neither|no winner)\b", re.IGNORECASE)
+_SUBJ_CATCHALL_RX = re.compile(
+    r"\b(another|other|someone else|the field|any other)\b", re.IGNORECASE)
+_RACE_RX = re.compile(
+    r"\b(first to|to (hit|reach|cross|pass|top|exceed)|will any(one|body)?|"
+    r"anyone)\b", re.IGNORECASE)
+
+
+def _event_exhaustive(event_title: str, outcome_texts: List[str]) -> bool:
+    """True only when exactly one outcome must resolve YES (YES-dutch pays $1)."""
+    joined = " ".join(outcome_texts)
+    if _ENDPOINT_RX.search(joined):
+        return True
+    if _NONE_OUTCOME_RX.search(joined):
+        return True
+    return bool(_SUBJ_CATCHALL_RX.search(joined)
+                and not _RACE_RX.search(event_title or ""))
 
 
 def kalshi_event_screens(events: List[Dict], min_gross: float = 0.01) -> List[Dict]:
@@ -638,8 +665,9 @@ def kalshi_event_screens(events: List[Dict], min_gross: float = 0.01) -> List[Di
             bids.append(b)
         if not ok:
             continue
-        exhaustive = any(_CATCHALL_RX.search(
-            f"{m.get('title','')} {m.get('yes_sub_title','')}") for m in ms)
+        exhaustive = _event_exhaustive(
+            e.get("title", ""),
+            [f"{m.get('title','')} {m.get('yes_sub_title','')}" for m in ms])
         tickers = [m.get("ticker") for m in ms]
         ev = e.get("event_ticker") or (tickers[0] if tickers else "")
         if sum(asks) < 1.0 - min_gross and exhaustive:
@@ -734,7 +762,8 @@ def pm_event_screens(min_gross: float = 0.01, max_pages: int = 10) -> List[Dict]
                 bids = [float(m.get("bestBid") or 0) for m in ms]
             except (TypeError, ValueError):
                 continue
-            exhaustive = any(_CATCHALL_RX.search(m.get("question") or "") for m in ms)
+            exhaustive = _event_exhaustive(
+                e.get("title", ""), [m.get("question") or "" for m in ms])
             toks = []
             for m in ms:
                 try:
