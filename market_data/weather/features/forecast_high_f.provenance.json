@@ -104,5 +104,21 @@
     "total_cached_events": 1250
   },
   "written_at": "2026-06-09T21:45:39+00:00",
-  "rows": 2500
+  "rows": 2500,
+  "live_updates": [
+    {
+      "script": "research/scripts/update_forecast_vintages.py",
+      "fetched_at": "2026-06-10T06:19:10+00:00",
+      "rows_appended": 12,
+      "events": [
+        "KXHIGHAUS-26JUN10",
+        "KXHIGHCHI-26JUN10",
+        "KXHIGHDEN-26JUN09",
+        "KXHIGHDEN-26JUN10",
+        "KXHIGHMIA-26JUN10",
+        "KXHIGHNY-26JUN10"
+      ],
+      "rule": "identical PIT rule; complete-local-day vintages only; known_from_ts always in the past at write time"
+    }
+  ]
 }
