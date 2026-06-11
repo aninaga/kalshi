@@ -46,6 +46,14 @@ MAX_CONCURRENT_LANES = 2
 TOPUP_HOUR_LOCAL = 3          # nightly data top-up at 03:00
 PYTHON = sys.executable
 
+# Machine-resident apex beat: a headless orchestration session every 5h that
+# survives chat-session death (the 2026-06-10 failure mode: session-only cron
+# meant a full day of no grading/launching). Spawned like any child — PAUSE
+# kills it, the meters bill it, the beat log records it.
+APEX_BEAT = (18000, "apex_beat",
+             f"/Users/anirudh/.local/bin/claude -p \"$(cat {REPO}/ops/apex_beat_prompt.md)\" "
+             "--dangerously-skip-permissions --model opus")
+
 # Recurring paper-trading cadence (only while RUNNING; all passes idempotent).
 PAPER_JOBS = [
     (3600, "paper_vintages", f"{PYTHON} -m research.scripts.update_forecast_vintages"),
@@ -247,6 +255,7 @@ def scheduler() -> None:
                 threading.Thread(target=usage_meter.refresh_cache,
                                  daemon=True).start()
             _track_externals()
+            _sweep_zombies()
             with _lock:
                 running_mode = STATE["mode"] == "running"
             if running_mode:
@@ -378,11 +387,25 @@ def _track_externals() -> None:
             _ext_seen.pop(key)
 
 
+def _sweep_zombies() -> None:
+    """Dead-agent detection: codex agents running >2h are hung — kill + log."""
+    for key, ch in _external_codex().items():
+        if ch["elapsed_s"] > 7200:
+            try:
+                os.killpg(os.getpgid(ch["pid"]), signal.SIGTERM)
+            except OSError:
+                try:
+                    os.kill(ch["pid"], signal.SIGTERM)
+                except OSError:
+                    continue
+            log(f"zombie swept: {key} after {ch['elapsed_s'] // 60}m")
+
+
 def _maybe_paper() -> None:
     now = time.time()
     with _lock:
         rec = STATE.setdefault("recurring", {})
-        for interval, jid, cmd in PAPER_JOBS:
+        for interval, jid, cmd in PAPER_JOBS + [APEX_BEAT]:
             if now - rec.get(jid, 0) < interval:
                 continue
             if any(k == jid and _alive(c["pid"])
