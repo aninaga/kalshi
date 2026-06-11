@@ -46,3 +46,8 @@ THE BEAT (in order, skip what doesn't apply):
 HARD RULES: never read or run anything against test splits; never place real
 orders or touch order-placement APIs; never exceed governor fleet caps; never
 delete caches/books/ledgers; an honest "nothing to do" beat is a valid beat.
+
+CONCURRENCY RULE: before ANY edit to research/lab/AGENDA.md, acquire the lock:
+`until mkdir /tmp/agenda.lock 2>/dev/null; do sleep 5; done` — and release it
+(`rmdir /tmp/agenda.lock`) immediately after committing. The interactive apex
+uses the same lock. Never hold it longer than one edit+commit.

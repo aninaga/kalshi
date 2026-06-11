@@ -4,20 +4,31 @@ Apex-maintained backlog. The 5h apex loop consumes from the top; anything
 launched moves to IN-FLIGHT; verdicts move to DONE with a one-line result.
 Priority = expected information value about making (at least paper) money.
 
+## HARD RULES (2026-06-10 first-principles audit)
+- **Selection declaration**: every registered hypothesis MUST declare K (how
+  many candidates scout/verify waves examined in its family first) in its run
+  note, and clear its bootstrap CI at alpha/K until governance counts
+  scout-examined candidates natively. A PASS without declared K is invalid.
+- **Splits re-lock**: stride-1 added events outside the locked crypto id
+  lists. Re-lock deterministically (same date boundaries) before any new
+  crypto hypothesis registers.
+- **Agenda lock**: two apexes edit this file — take /tmp/agenda.lock (mkdir)
+  before editing, release after committing. A lost update already happened.
+
 ## NOW (top = next lane to launch)
-1. **Favorite-leg standalone gated lane** (crypto hyp #3) — T-15 buy YES
-   ask in [0.70,0.75], volume>0, one per event. BLOCKED two ways this beat:
-   (a) needs the stride-1 backfill (IN-FLIGHT) to finish so n>=200; (b)
-   Claude-side GATED and claude_policy.desk_may_spend was not set. Leave for
-   the interactive apex / when surplus opens. Watch the walkforward decay
-   (Apr +3.3 -> May +0.9 combined) — if the refreshed sample decays the same
-   way it's regime, kill without regret.
-2. **Crypto paper-trading support** (build lane) — paper.py is
-   weather-specific (_live_weather_events). Generalize the live-panel seam so
-   crypto tenants can enroll: late-ATM maker variant + the wave-3 spread
-   maker pilot (measure-only: record conditional-on-fill win rates). NOTE:
-   load-bearing paper-engine refactor -> interactive apex/Claude, not a
-   fire-and-forget codex lane.
+1. **Crypto paper-trading support** (build lane) — fills are the program's
+   binding uncertainty (paper 0/3 vs ~26-42% expected; crypto books give ~48
+   events/day vs weather's ~5, so fill evidence accumulates 10x faster).
+   Load-bearing paper-engine refactor -> interactive apex, not a codex lane.
+   Then enroll measure-only: late-ATM maker + spread maker pilot.
+2. ~~Favorite-leg taker lane (hyp #3)~~ **CANCELLED pre-gate** by the spool
+   wave (backfill DONE at 1,994 events; the beat's 04:41Z relaunch duplicates
+   it — idempotent, harmless): doubled-density re-test WEAKENED the rule
+   (+3.38c, CI [-1.71,+8.48], May holdout +1.22c t=0.33); hour_regime shows
+   the surviving structure is the **80-99c band** (drift-independent: +2.16c
+   Apr / +1.97c May, R2-vs-drift 0.002) and "not a clean taker trade."
+   Successor: **80-99c favorite maker expression**, designed after #1 lands.
+   A gated lane was saved tonight by ~$2 of scouts.
 3. **Crypto late-ATM maker variant** (gated lane) — the DEAD taker lane's
    survivor insight + maker-study methodology applied to KXBTC/KXETH books.
 
