@@ -35,3 +35,13 @@ Same 3 crypto lenses run by GPT-5.5 xhigh (codex) and Opus 4.8 (Claude
 subagents) in parallel quarantines. Hypothesis: vendor scouts differ in
 finding quality per dollar. Grading: blind cross-verification of each pair's
 findings + cost from meters.
+
+## First-principles audit rules (2026-06-10)
+- **Selection inflation**: scout waves examine K candidates per family;
+  registration of a survivor must declare K and apply an alpha/K haircut to
+  its gate CI until lab.governance counts scout-examined candidates natively
+  (governance patch = owner-approved structural change, queued).
+- **Beat scope**: the headless beat runs --dangerously-skip-permissions on a
+  trusted personal machine. Boundary unchanged: no structural code self-mods,
+  no order APIs, no test splits, no deletes. Revisit the permission model
+  BEFORE any real-capital phase.
