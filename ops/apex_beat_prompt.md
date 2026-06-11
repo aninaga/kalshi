@@ -27,7 +27,18 @@ THE BEAT (in order, skip what doesn't apply):
    exists, else leave for the interactive apex and say so in the report.
 4. PAPER: /Users/anirudh/anaconda3/bin/python3 -m research.lab.paper --status
    --book weather_maker_v1 — append the maker block numbers to the beat report.
-5. REPORT: append a dated section to research/reports/foreman/apex_beats.log:
+5. SELF-OPTIMIZE (the owner's standing /loop mandate, verbatim: "Go through
+   the apex experimenting on itself and decide what changes to make to the
+   overall system to improve strategic outcomes and make more money (at least
+   paper)."): review ~/.kalshi_fund/experiments.jsonl outcomes, the governor's
+   analytics trails (usage_history/lane_history), and the beat log's own
+   recent decisions. Decide AT MOST ONE system change per beat. Small + safe
+   (prompt tweaks, agenda reprioritization, fleet-recipe changes, new
+   experiment wave): implement it and log it. Structural (controller/governor
+   code, paper tenants, anything touching money or the gate): write it up in
+   the beat report as a proposal for the owner/interactive apex — do NOT
+   self-modify load-bearing code.
+6. REPORT: append a dated section to research/reports/foreman/apex_beats.log:
    what you graded, launched, killed, paper state, meters, and the single most
    important thing the next beat (or the owner) should know. Then `git add` the
    agenda + beat log and commit "ops: apex beat <UTC timestamp>".
