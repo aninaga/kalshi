@@ -413,6 +413,21 @@ def _feed_codex() -> None:
         except Exception:
             continue
     changed = False
+    live_keys = {k.replace("codex:spool_", "").replace("codex:", "")
+                 for k in _external_codex()}
+    for it in items:
+        # dead-letter recovery: launched, no live proc, no memo -> requeue once
+        if it.get("status") == "launched" and it["id"] not in live_keys:
+            if Path(it.get("workdir", ""), "analyst_memo.md").exists():
+                it["status"] = "done"
+                changed = True
+            elif time.time() - it.get("launched_ts", 0) > 600:
+                tries = it.get("tries", 1)
+                it["status"] = "queued" if tries < 2 else "failed"
+                it["tries"] = tries + 1
+                changed = True
+                log(f"codex feeder: {it['id']} died memo-less -> "
+                    f"{it['status']} (try {tries})")
     for it in items:
         if live >= target:
             break
