@@ -41,16 +41,25 @@ Priority = expected information value about making (at least paper) money.
    adverse selection; gated lane saved). See DONE. The hardening successors
    (wx_maker_schedule/queue/gap_realfill, btc_9599_subspec) ALL graded
    2026-06-11T14:41Z — none promotable (see DONE).
-4. **(self-opt 2026-06-11T14:41Z) Codex direction pivots to NEW families.**
-   Weather/crypto top-of-book microstructure is now exhausted from a 4th angle:
-   8 lenses + 4 hardening lanes all died or shrank to ex-post-selected thin
-   slices once fills/haircuts were conditioned. Backtests can no longer resolve
-   maker viability there — only the LIVE paper books can. So codex effort now
-   splits: (a) selection-robustness re-tests of the few standing candidates
-   (wx_sched_walkforward, btc_9599_selection, wx_gap_taker — already spooled),
-   and (b) NEW families whose edge is NOT a microstructure-fill edge. First (b)
-   lane spooled this beat: nba_revrev_oos (NBA moneyline revision-reversion OOS
-   on the polymarket_ticks lake). Promotes QUEUED#7 into the active wave.
+4. **(self-opt 2026-06-11T19:41Z) Surface collapsed to ONE survivor; new wave.**
+   The robustness pass (graded this beat) leaves the entire program with exactly
+   ONE surviving backtested edge: **BTC 95-99c, hour=20 ET, spread=1c, 31-60m,
+   vol=1-99 taker** — +1.63c/contract, K=386 declared, clears alpha/K AND stable
+   under all 3 boundary shifts (btc_9599_selection). Everything else died:
+   wx_sched_walkforward proved the 66-cell weather schedule is EX-POST-ONLY
+   (negative REPORT EV, CI crosses 0) -> **the live-book re-point proposal is
+   DEAD**; wx_gap_taker -2.32c (taker can't rescue the maker calibration);
+   nba_revrev_oos DEAD (but the home moneyline leg is clean & reusable).
+   Codex wave this beat (all 4 spooled): (a) **btc_9599_capacity** — is the lone
+   survivor tradeable at size or a thin-book (vol1-99) artifact?; (b)
+   **btc_session_regime** — is hour=20 a coherent ET-session effect or an
+   isolated-spike artifact?; (c) **nba_clv_homeleg** — favorite-longshot CLV on
+   the clean home leg (tests the desk's cross-family theme in NBA); (d)
+   **wx_xcity_spillover** — NEW weather family, cross-city realized-temp signal,
+   non-microstructure. **Next interactive-apex build thread (gated on the
+   capacity verdict): a crypto paper pilot of the BTC hour=20 survivor** — the
+   first edge that has earned a forward test. Do NOT pilot until btc_9599_capacity
+   confirms it is one-sided/real and sized, not an illiquidity artifact.
 
 ## QUEUED
 5. Crypto top-up cadence: daily -> 6h (controller TOPUP change) once any lane
@@ -65,16 +74,18 @@ Priority = expected information value about making (at least paper) money.
 
 ## IN-FLIGHT
 - weather_maker_v1 paper book (forecast_gap_maker) — live, beats every 15m.
-  As of 2026-06-11 14:41Z: still 0 fills, 3 cancelled, fill_rate 0.0. **NOT a
-  broken tenant** — Pr(0/3)=19-34% under a strict proxy (wx_fill_geography).
-  KEEP RUNNING. **NEW CAVEAT (wx_gap_realfill):** the book's quote logic is
-  all-city 30c, whose backtest edge is haircut-fragile (mark-to-unfilled
-  artifact; -0.49c strict passive). At 0/3 fills it is also generating ZERO
-  evidence. STRUCTURAL PROPOSAL for the interactive apex (do NOT self-modify the
-  tenant): re-point the book to the wx_maker_schedule 66-cell survivor list with
-  60m rest (~39.5% modeled fill) so it actually produces real fills — the only
-  instrument left that can settle maker viability. Levers: 60m>>30m rest, city
-  NYC/CHI>DEN, AM-mid-afternoon.
+  As of 2026-06-11 19:41Z: 0 fills, **5 cancelled**, fill_rate 0.0, ev 0.0.
+  **RE-POINT PROPOSAL NOW DEAD:** wx_sched_walkforward (graded this beat) proved
+  the 66-cell schedule is EX-POST-ONLY (negative REPORT EV, Bonferroni CI crosses
+  0), so there is NO validated spec to re-point the book to. The book is now a
+  zero-evidence tenant running a spec (all-city 30c) whose own backtest rationale
+  is a mark-to-unfilled artifact, AND it produces 0 fills, so it cannot even serve
+  as a passive fill-rate measurement. **STRUCTURAL PROPOSAL for the owner/
+  interactive apex (do NOT self-modify the tenant): either (a) PAUSE the book —
+  it is burning a tenant slot for zero information — or (b) re-point it to a
+  TIGHTER, more-aggressive quote (touch/cross, fewer cities) purely to manufacture
+  fills, accepting it as a fill-mechanics probe not an alpha bet.** Maker viability
+  is otherwise resolvable only by real fills, which this book is not generating.
 - **BTC stride-1 backfill** — **DONE** (pid 48627 exited; crypto cache 2011,
   full ~66d BTC density; log summary skipped=1574 empty=9). Favorite-leg
   standalone re-test is NOT being re-run: the favorite leg + its maker successor
@@ -82,6 +93,28 @@ Priority = expected information value about making (at least paper) money.
   surviving crypto thread (BTC 95-99c sleeve) is queued as btc_9599_subspec.
 
 ## DONE (recent)
+- **Robustness + new-family wave graded (2026-06-11T19:41Z)** — 4 memos; the
+  surviving surface collapses to ONE candidate and the live-book re-point dies.
+  - `wx_sched_walkforward`: EX-POST-ONLY — the 66-cell weather schedule does NOT
+    generalize. On the untouched REPORT window (05-15..06-08) the SELECT-survivor
+    list has NEGATIVE EV/signal (-0.606c, barely better than -0.615c quote-
+    everywhere) and its Bonferroni CI [-3.95c,+2.49c] crosses 0. **Kills the
+    prior beat's structural re-point proposal.**
+  - `btc_9599_selection`: PARTIAL SURVIVE — K=386; hour=20 ET cell clears alpha/K
+    on the declared split AND stays significant under all 3 boundary shifts
+    (+1.63c/contract, CI [+0.56c,+1.97c]); hour=09 boundary-fragile. **The desk's
+    only surviving backtested edge.** -> btc_9599_capacity (size?) +
+    btc_session_regime (real session effect?) lanes.
+  - `wx_gap_taker`: TAKER DEAD — best cell -2.32c; every threshold x side
+    negative; no city slice survives event-cluster CI. Crossing the spread cannot
+    monetize the unfilled-maker calibration.
+  - `nba_revrev_oos`: DEAD (1st new family) — holdout reversion mean positive but
+    adjusted CI crosses 0, train config negative after 2c. **Reusable data fact:**
+    away leg unrecoverable from token IDs, but the home moneyline leg is clean
+    (terminal mid matched result 1205/1221) -> nba_clv_homeleg builds on it.
+  META: surviving surface = 1 candidate (BTC hour=20). Replaced by 4 lanes:
+  btc_9599_capacity, btc_session_regime, nba_clv_homeleg, wx_xcity_spillover.
+  Row in experiments.jsonl.
 - **Maker-hardening spool wave graded (2026-06-11T14:41Z)** — 4 memos, all
   reinforce the STOP rule from a 4th angle. None promotable.
   - `wx_maker_schedule`: CONDITIONAL/WEAK — quote-everywhere all-cell book
