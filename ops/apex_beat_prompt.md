@@ -51,3 +51,11 @@ CONCURRENCY RULE: before ANY edit to research/lab/AGENDA.md, acquire the lock:
 `until mkdir /tmp/agenda.lock 2>/dev/null; do sleep 5; done` — and release it
 (`rmdir /tmp/agenda.lock`) immediately after committing. The interactive apex
 uses the same lock. Never hold it longer than one edit+commit.
+
+BACKLOG FLOOR: the codex backlog (~/.kalshi_fund/codex_backlog.jsonl) must
+hold >= 4 queued items when your beat ends. If the agenda's NOW items are not
+codex-shaped, derive spoolable research questions from QUEUED items, graded
+memos' open threads, or robustness checks of standing findings — an idle
+codex week is destroyed budget. Quarantine recipe: dir under /tmp with
+TASK.md + the relevant exported parquet, git init + seed commit, append
+{"id","workdir","status":"queued"} to the backlog. The feeder does the rest.
