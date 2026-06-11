@@ -14,6 +14,17 @@ Priority = expected information value about making (at least paper) money.
   crypto hypothesis registers.
 - **Agenda lock**: two apexes edit this file — take /tmp/agenda.lock (mkdir)
   before editing, release after committing. A lost update already happened.
+- **No-dead-microstructure STOP rule (2026-06-11 self-opt)**: do NOT spool any
+  more top-of-book-only maker/taker microstructure backtests on crypto/weather.
+  Eight lenses (taker volume-bursts/spread/ladder; maker late-ATM/80-99c-band/
+  wide-spread-NO/under-side) have ALL died on the same wall — the apparent edge
+  is unfilled-quote calibration that goes adversely-selected-negative once
+  conditioned on fills, and the parquet has no queue/depth to model it. Maker
+  viability is now resolvable ONLY by (a) real paper fills or (b) an explicit
+  queue/fill-position model. Codex effort redirects to: hardening the LIVE
+  weather maker (fill-schedule, queue-haircut, real-fill EV), the one
+  weakly-alive BTC 95-99c thread, and NEW families whose edge is not a
+  microstructure-fill edge.
 
 ## NOW (top = next lane to launch)
 1. **Crypto paper-trading support** (build lane) — fills are the program's
@@ -21,16 +32,15 @@ Priority = expected information value about making (at least paper) money.
    events/day vs weather's ~5, so fill evidence accumulates 10x faster).
    Load-bearing paper-engine refactor -> interactive apex, not a codex lane.
    Then enroll measure-only: late-ATM maker + spread maker pilot.
-2. ~~Favorite-leg taker lane (hyp #3)~~ **CANCELLED pre-gate** by the spool
-   wave (backfill DONE at 1,994 events; the beat's 04:41Z relaunch duplicates
-   it — idempotent, harmless): doubled-density re-test WEAKENED the rule
-   (+3.38c, CI [-1.71,+8.48], May holdout +1.22c t=0.33); hour_regime shows
-   the surviving structure is the **80-99c band** (drift-independent: +2.16c
-   Apr / +1.97c May, R2-vs-drift 0.002) and "not a clean taker trade."
-   Successor: **80-99c favorite maker expression**, designed after #1 lands.
-   A gated lane was saved tonight by ~$2 of scouts.
-3. **Crypto late-ATM maker variant** (gated lane) — the DEAD taker lane's
-   survivor insight + maker-study methodology applied to KXBTC/KXETH books.
+2. ~~Favorite-leg taker lane (hyp #3) + 80-99c maker successor~~ **BOTH DEAD**
+   (taker cancelled pre-gate; 80-99c maker successor KILLED by band8099_maker
+   memo 2026-06-11: no maker spec survives holdout, -1.49c bid/-2.91c mid on
+   fills, only 40% restable). See DONE.
+3. ~~Crypto late-ATM maker variant~~ **DEAD pre-launch** (late_atm_maker memo
+   2026-06-11: UNDER-side late-window maker neg dev+holdout, -11.64c holdout,
+   adverse selection; gated lane saved). See DONE. Successor codex lanes now
+   in the backlog: weather-maker hardening (wx_maker_schedule / wx_maker_queue
+   / wx_gap_realfill) + the one weakly-alive crypto thread (btc_9599_subspec).
 
 ## QUEUED
 5. Crypto top-up cadence: daily -> 6h (controller TOPUP change) once any lane
@@ -45,15 +55,36 @@ Priority = expected information value about making (at least paper) money.
 
 ## IN-FLIGHT
 - weather_maker_v1 paper book (forecast_gap_maker) — live, beats every 15m.
-  As of 2026-06-11 04:41Z: 0 fills, 3 cancelled, fill_rate 0.0 (no touch
-  fill yet).
-- **BTC stride-1 backfill** — launched 2026-06-11 04:41Z, pid 48627, detached,
-  `--assets BTC --max-events 1600 --stride 1` (covers same ~66d window at full
-  density). Idempotent/resumable; log ~/.kalshi_fund/lanes/crypto_btc_stride1.log
-  (python block-buffers stdout — judge progress by cache count, not the log).
-  When done, re-run favorite-leg standalone to test n>=200 stability.
+  As of 2026-06-11 09:41Z: 0 fills, 3 cancelled, fill_rate 0.0. **NOT a broken
+  tenant** — wx_fill_geography memo shows Pr(0 fills in 3)=19-34% under a strict
+  cross-through-bid proxy, so 0/3 is well within chance. KEEP RUNNING; the
+  fill-rate levers (60m>>30m rest, city select NYC/CHI>DEN, morning-mid-afternoon
+  hours) are being quantified by the wx_maker_* backlog lanes.
+- **BTC stride-1 backfill** — **DONE** (pid 48627 exited; crypto cache 2011,
+  full ~66d BTC density; log summary skipped=1574 empty=9). Favorite-leg
+  standalone re-test is NOT being re-run: the favorite leg + its maker successor
+  are now DEAD (see DONE), so the n>=200 stability re-test is moot. The only
+  surviving crypto thread (BTC 95-99c sleeve) is queued as btc_9599_subspec.
 
 ## DONE (recent)
+- **Maker-expression spool wave graded (2026-06-11T09:41Z)** — 5 memos, all
+  converge: every top-of-book maker expression of a surviving calibration edge
+  DIES on adverse selection once conditioned on fills.
+  - `late_atm_maker`: DEAD — UNDER-side late-window maker neg dev+holdout
+    (-11.64c holdout); passive fills selected exactly when UNDER is wrong side.
+  - `band8099_maker`: DEAD — no maker spec survives holdout; YES 80-99c favorite
+    -1.49c bid/-2.91c mid on fills; only 40% of band-events restable.
+  - `wide_spread_no`: DEAD on fills — unfilled edge +8.63c in low-mid wide but
+    -10c markout once filled (fills arrive as the market moves against).
+  - `eth_btc_structure`: calibration confirmed; BTC 95-99c favorite +1.20c/
+    contract holdout post-fee WITH real capacity (vol ~2,610) vs ETH no
+    capacity (vol 25); but SIDE edge flips train->holdout => not directional
+    alpha. The desk's only weakly-alive crypto thread -> btc_9599_subspec lane.
+  - `wx_fill_geography`: weather 0/3 fills is NORMAL (Pr(0/3)=19-34% under strict
+    proxy), NOT a broken tenant. Levers: 60m rest, city select (NYC/CHI best,
+    DEN worst), morning-mid-afternoon. -> wx_maker_schedule/queue/realfill lanes.
+  META: maker viability is resolvable ONLY by real paper fills or an explicit
+  queue/fill model -> see No-dead-microstructure STOP rule. Row in experiments.jsonl.
 - **Wave-3 vendor A/B graded (2026-06-11)** — 5/6 scouts landed; w3_cdx_2
   (spread lens, codex) died with NO memo. On the two lenses where both vendors
   delivered, conclusions CONVERGE (taker is dead; the apparent edge IS the
