@@ -257,6 +257,10 @@ def scheduler() -> None:
             _track_externals()
             _sweep_zombies()
             with _lock:
+                feeding = STATE["mode"] == "running"
+            if feeding:
+                _feed_codex()
+            with _lock:
                 running_mode = STATE["mode"] == "running"
             if running_mode:
                 _maybe_launch_lanes()
@@ -385,6 +389,57 @@ def _track_externals() -> None:
                     "vendor": "codex",
                     "runtime_s": round(time.time() - started)}) + "\n")
             _ext_seen.pop(key)
+
+
+BACKLOG = STATE_DIR / "codex_backlog.jsonl"
+
+
+def _feed_codex() -> None:
+    """Keep codex saturated: launch queued backlog items until the live agent
+    count reaches the governor's paced fleet size. Beats THINK (fill the
+    backlog); this feeder EXECUTES (every scheduler pass). Decoupling them is
+    what kills idle — pulsed thinking can't feed continuous capacity."""
+    if not BACKLOG.exists():
+        return
+    from ops import governor
+    target = governor.codex_policy()["codex_fleet_size"]
+    live = len(_external_codex())
+    if live >= target:
+        return
+    items = []
+    for raw in BACKLOG.read_text().splitlines():
+        try:
+            items.append(json.loads(raw))
+        except Exception:
+            continue
+    changed = False
+    for it in items:
+        if live >= target:
+            break
+        if it.get("status") != "queued":
+            continue
+        wd = it.get("workdir", "")
+        if not Path(wd, "TASK.md").exists():
+            it["status"] = "missing"
+            changed = True
+            continue
+        logf = LANE_DIR / f"codex_{it['id']}.jsonl"
+        subprocess.Popen(
+            f"cd {wd} && codex exec --json --skip-git-repo-check -s workspace-write "
+            f"\"Read TASK.md and complete the task.\" > {logf} 2>&1",
+            shell=True, start_new_session=True,
+            env={**os.environ,
+                 "PATH": f"{os.environ.get('PATH', '')}:"
+                         f"{Path.home()}/.nvm/versions/node/v20.19.2/bin"})
+        it["status"] = "launched"
+        it["launched_ts"] = time.time()
+        changed = True
+        live += 1
+        log(f"codex feeder launched {it['id']} ({live}/{target})")
+    if changed:
+        tmp = BACKLOG.with_suffix(".tmp")
+        tmp.write_text("\n".join(json.dumps(i) for i in items) + "\n")
+        tmp.replace(BACKLOG)
 
 
 def _sweep_zombies() -> None:
