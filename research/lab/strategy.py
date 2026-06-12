@@ -33,21 +33,24 @@ from typing import Callable, Optional, Union
 import numpy as np
 
 from research.lab.types import (
+    OVER_SIDES,
     SPREAD,
     TOTAL,
     WINNER,
     Panel,
     Trade,
     Trades,
+    is_over_side,
 )
 
 # Side labels that mean "bet the outcome ends ABOVE the strike / home wins".
-# Everything else is treated as the opposite ("below" / away).
-# Sides that bet the line is too LOW (final outcome > strike): over / long-home /
-# cover-home. Their complement (under / short / cover-away) bets below. These must
-# stay in sync with execution._SHORT_SIDES so fill and settlement agree on the
-# direction (a mismatch silently inverts spread P&L — found by the live agent test).
-_OVER_SIDES = frozenset({"over", "long_home", "home", "long", "buy", "yes", "cover_home"})
+# De-duplicated 2026-06-12: this is now an ALIAS of the single source of truth
+# ``research.lab.types.OVER_SIDES`` (its complement ``SHORT_SIDES`` carries
+# ``long_away`` etc.). Settlement/exit orientation goes through
+# ``is_over_side`` so an UNKNOWN label raises rather than silently settling as
+# the away/below bet (audit defect C3). ``_OVER_SIDES`` is kept as a name for
+# the existing taxonomy test that imports ``strategy._OVER_SIDES``.
+_OVER_SIDES = OVER_SIDES
 
 
 def staleness_min(panel: Panel) -> np.ndarray:
@@ -144,10 +147,14 @@ class Strategy:
         if fill is None or not np.isfinite(fill.fill_mid):
             return None
 
-        exit_bar, exit_ts, payoff = self._resolve_exit(panel, bar, side, fill)
+        exit_bar, exit_ts, payoff, exit_cost = self._resolve_exit(
+            panel, bar, side, fill, fill_model)
 
         all_in = fill.all_in_price
-        pnl = float(payoff - all_in)
+        # ``payoff`` is the GROSS settlement/mark value; a non-hold exit also
+        # pays the exit-side half-spread + venue fee to close (``exit_cost``).
+        # Settlement (hold to the whistle) has no exit transaction -> 0.
+        pnl = float(payoff - all_in - exit_cost)
 
         return Trade(
             game_id=panel.game_id,
@@ -169,6 +176,7 @@ class Strategy:
                 "half_spread": float(fill.half_spread),
                 "fee": float(fill.fee),
                 "all_in_price": float(all_in),
+                "exit_cost": float(exit_cost),
             },
         )
 
@@ -181,22 +189,60 @@ class Strategy:
             return None
         return int(qualifying[0])
 
-    def _resolve_exit(self, panel: Panel, entry_bar: int, side: str, fill):
-        """Return ``(exit_bar, exit_ts, payoff)`` for the chosen exit policy."""
+    def _resolve_exit(self, panel: Panel, entry_bar: int, side: str, fill,
+                      fill_model):
+        """Return ``(exit_bar, exit_ts, payoff, exit_cost)`` for the exit policy.
+
+        ``exit_cost`` is 0 for a hold-to-settlement exit (no transaction) and
+        the exit-side half-spread + venue fee for a callable mark-to-market exit
+        (you cross to close). A callable exit MUST select a bar strictly AFTER
+        the entry bar (priced one ``entry_latency_min`` after entry); a
+        ``exit_bar <= entry_bar`` would mark the close before — or at — the open
+        and is rejected (raise) rather than booking a same-bar round trip.
+        """
         ts = np.asarray(panel.minute_ts, dtype=float)
         if self.exit == "settlement":
             exit_bar = panel.n - 1
             payoff = self._settlement_payoff(panel, side, fill.strike)
-            return exit_bar, ts[exit_bar], payoff
+            return exit_bar, ts[exit_bar], payoff, 0.0
 
         if callable(self.exit):
-            exit_bar = int(self.exit(panel, entry_bar))
-            exit_bar = max(0, min(exit_bar, panel.n - 1))
-            payoff = self._exit_price(panel, exit_bar, side, fill.strike)
-            return exit_bar, ts[exit_bar], payoff
+            raw_exit_bar = int(self.exit(panel, entry_bar))
+            exit_bar = min(raw_exit_bar, panel.n - 1)
+            # Reject a close at/before the open AFTER clamping to the last bar:
+            # an entry on the final bar leaves no future bar to exit into.
+            if exit_bar <= entry_bar:
+                raise ValueError(
+                    f"exit bar {raw_exit_bar} (clamped {exit_bar}) is not after "
+                    f"the entry bar {entry_bar} for game {panel.game_id}: a "
+                    f"callable exit may not close before/at the open (would book "
+                    f"a same-bar or look-ahead round trip)")
+            gross = self._exit_price(panel, exit_bar, side, fill.strike)
+            # Crossing to CLOSE costs the same half-spread + venue fee as the
+            # open (the i+1 latency is already baked into requiring exit>entry).
+            exit_cost = self._exit_cost(fill_model, fill, gross)
+            return exit_bar, ts[exit_bar], gross, exit_cost
 
         raise ValueError(
             f"exit must be 'settlement' or a callable, got {self.exit!r}")
+
+    @staticmethod
+    def _exit_cost(fill_model, fill, gross: float) -> float:
+        """Exit-side half-spread + venue fee charged to CLOSE at ``gross``.
+
+        A real :class:`lab.execution.FillModel` exposes ``half_spread`` and a
+        ``fee(price)`` schedule — price the exit on the gross mark, exactly as
+        the open was priced. A duck-typed stub fill model (test plumbing) may
+        expose neither; fall back to the recorded ENTRY costs so the exit at
+        least pays a symmetric half-spread + fee rather than zero.
+        """
+        hs = getattr(fill_model, "half_spread", None)
+        fee_fn = getattr(fill_model, "fee", None)
+        if hs is not None and callable(fee_fn):
+            return float(hs) + float(fee_fn(gross))
+        # Stub fallback: mirror the entry's own half-spread + fee.
+        return float(getattr(fill, "half_spread", 0.0)) + float(
+            getattr(fill, "fee", 0.0))
 
     def _settlement_payoff(self, panel: Panel, side: str, strike) -> float:
         """Settlement value in [0, 1] for the bet ``side`` vs the filled strike.
@@ -204,8 +250,11 @@ class Strategy:
         Winner market settles against ``home_won`` (no strike ladder). Total and
         spread settle against the final outcome vs the locked strike: an "over"
         (or long-home) side pays 1 iff the outcome ended ABOVE the strike.
+
+        ``is_over_side`` raises on an UNKNOWN label rather than silently
+        treating it as the away/below bet (audit defect C3).
         """
-        bet_above = side in _OVER_SIDES
+        bet_above = is_over_side(side)
 
         if panel.market == WINNER:
             if panel.home_won is None:
@@ -230,8 +279,9 @@ class Strategy:
 
         Reads the quoted prob of the filled strike from the ladder (the value the
         position is worth if closed), oriented to the side actually held.
+        ``is_over_side`` raises on an UNKNOWN label (audit defect C3).
         """
-        bet_above = side in _OVER_SIDES
+        bet_above = is_over_side(side)
 
         if panel.market == WINNER:
             prob_home = float(panel.mid[exit_bar])
@@ -252,6 +302,7 @@ class Strategy:
 
         Over/long-home sides map to the home team; under/away to the away team.
         Market-agnostic labels (e.g. "over") still resolve to a concrete team so
-        the gate's concentration check has a stable key.
+        the gate's concentration check has a stable key. ``is_over_side`` raises
+        on an UNKNOWN label (audit defect C3).
         """
-        return panel.home_team if side in _OVER_SIDES else panel.away_team
+        return panel.home_team if is_over_side(side) else panel.away_team

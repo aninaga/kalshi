@@ -74,14 +74,18 @@ from typing import Optional
 
 import numpy as np
 
-from research.lab.types import Panel
+from research.lab.types import OVER_SIDES, Panel, is_over_side
 
 _ROOT = Path(__file__).resolve().parents[2]
 PAPER_DIR = _ROOT / "market_data" / "paper"
 
-# Sides that pay 1.0 when the outcome ends ABOVE the strike (lab.strategy).
-_OVER_SIDES = frozenset({"over", "long_home", "home", "long", "buy", "yes",
-                         "cover_home"})
+# Sides that pay 1.0 when the outcome ends ABOVE the strike. De-duplicated
+# 2026-06-12: ALIAS of the single source of truth ``research.lab.types``;
+# this independent copy previously carried the SAME ``long_away`` gap as
+# execution/strategy (audit defect C3). Settlement goes through
+# ``is_over_side`` so an unknown side raises rather than silently settling as
+# the away/below bet.
+_OVER_SIDES = OVER_SIDES
 
 
 # --------------------------------------------------------------------------- #
@@ -975,7 +979,9 @@ def settle_book(book: str, *, live_rec=None, log=print) -> list:
         if panel is None or panel.final_total is None:
             continue   # not resolved yet (or ambiguous) — stays open
         outcome = float(panel.final_total)
-        bet_above = pos["side"] in _OVER_SIDES
+        # Fail loud on an unknown side rather than silently settling as the
+        # away/below bet (audit defect C3).
+        bet_above = is_over_side(pos["side"])
         strike = pos.get("strike")
         if strike is None:
             continue

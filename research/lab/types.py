@@ -28,6 +28,74 @@ SPREAD = "spread"   # contract: P(home margin > strike); mid = implied home marg
 MARKETS = (WINNER, TOTAL, SPREAD)
 
 
+# --------------------------------------------------------------------------- #
+# Side-label taxonomy — THE single source of truth (de-duplicated 2026-06-12).
+#
+# Every human side label resolves to exactly one orientation against the
+# ladder's quoted P(over/cover) (or the winner mid = P(home win)):
+#
+#   * OVER_SIDES  — bet the outcome ends ABOVE the strike / the home side wins.
+#     Fill is LONG the quote (``fill_mid = p``); settlement pays 1 iff the
+#     outcome ended above (or home won).
+#   * SHORT_SIDES — bet the outcome ends BELOW the strike / the away side wins.
+#     Fill is the COMPLEMENT (``fill_mid = 1 - p``); settlement pays 1 iff the
+#     outcome ended at-or-below (or away won).
+#
+# These two sets MUST be disjoint and MUST cover every emitted label. A label
+# in neither set is a BUG (audit defect C3: ``long_away`` filled LONG — paying
+# the home/favorite price — while settling as the away bet, fabricating a fake
+# ~+84c/contract edge). ``is_short_side`` / ``is_over_side`` FAIL LOUD on any
+# unknown label rather than defaulting to "long" — never silently default a
+# fill orientation. ``execution.py``, ``strategy.py`` and ``paper.py`` all
+# import these; nothing keeps an independent copy.
+OVER_SIDES = frozenset({
+    "over", "long_home", "home", "long", "buy", "yes", "cover_home",
+})
+SHORT_SIDES = frozenset({
+    "under", "short", "short_home", "short_away", "no", "sell", "cover_away",
+    "long_away",   # WINNER away bet: complement of P(home win) — C3 fix.
+})
+KNOWN_SIDES = OVER_SIDES | SHORT_SIDES
+
+# Build-time invariant: the taxonomy must be consistent (disjoint, no label in
+# both orientations). A duplicate would silently invert P&L for that side.
+assert OVER_SIDES.isdisjoint(SHORT_SIDES), (
+    "side-label taxonomy is inconsistent: "
+    f"{sorted(OVER_SIDES & SHORT_SIDES)} in BOTH OVER_SIDES and SHORT_SIDES")
+
+
+def _norm_side(side: str) -> str:
+    return str(side).strip().lower()
+
+
+def is_short_side(side: str) -> bool:
+    """True if ``side`` bets the outcome ends BELOW the strike / away wins.
+
+    Raises ``ValueError`` for any label in NEITHER taxonomy set — the fill and
+    settlement orientation are undefined for an unknown side, and silently
+    defaulting to "long" is exactly the C3 defect. Fail loud.
+    """
+    s = _norm_side(side)
+    if s in SHORT_SIDES:
+        return True
+    if s in OVER_SIDES:
+        return False
+    raise ValueError(
+        f"unknown side label {side!r}: not in OVER_SIDES nor SHORT_SIDES. "
+        f"Add it to research.lab.types.{{OVER,SHORT}}_SIDES with its "
+        f"orientation; never default a fill/settlement direction. "
+        f"Known: {sorted(KNOWN_SIDES)}")
+
+
+def is_over_side(side: str) -> bool:
+    """True if ``side`` bets the outcome ends ABOVE the strike / home wins.
+
+    The strict complement of :func:`is_short_side`; raises identically on an
+    unknown label.
+    """
+    return not is_short_side(side)
+
+
 @dataclass
 class Panel:
     """One game's per-minute frame for ONE market.

@@ -41,7 +41,13 @@ from dataclasses import dataclass
 import numpy as np
 
 import venue_fees
-from research.lab.types import FillResult, Panel, WINNER
+from research.lab.types import (
+    FillResult,
+    Panel,
+    SHORT_SIDES,
+    WINNER,
+    is_short_side,
+)
 
 # Legacy re-exports (pre-2026-06-12 memo reproduction ONLY; the official
 # schedule has no flat-on-notional piece).
@@ -49,24 +55,40 @@ PM_FLAT_TAKER_RATE = venue_fees.LEGACY_PM_FLAT_TAKER_RATE
 PM_CURVE_FEE_RATE_BPS = venue_fees.LEGACY_PM_CURVE_FEE_RATE_BPS
 
 # Sides that bet the COMPLEMENT of the ladder's quoted P(over/cover) — i.e. the
-# line is too HIGH (final outcome < strike). Must stay in sync with
-# strategy._OVER_SIDES (its complement): cover_away bets below, cover_home above.
-_SHORT_SIDES = frozenset({"under", "short", "short_home", "short_away", "no", "sell", "cover_away"})
+# line is too HIGH (final outcome < strike). De-duplicated 2026-06-12: this is
+# now an ALIAS of the single source of truth ``research.lab.types.SHORT_SIDES``
+# (kept for the ``maker_fill_study`` import that already binds this name).
+# ``long_away`` lives there now (audit defect C3): it bets the away winner — the
+# complement of P(home win) — and was previously in NEITHER set, so it filled
+# LONG (paying the home/favorite price) while settling as the away bet,
+# fabricating a fake ~+84c/contract edge on longshot fades.
+_SHORT_SIDES = SHORT_SIDES
 
 
 def _interp_at(ts: float, xp: np.ndarray, fp: np.ndarray) -> float:
-    """Interpolate ``fp`` at ``ts`` over ``xp``, skipping NaNs.
+    """As-of value of ``fp`` at ``ts`` over ``xp`` (backward fill, no look-ahead).
 
-    ``np.interp`` propagates NaN through any bracketing NaN; the ported
-    ``totals_realistic._load`` instead used only the finite quotes (ffill /
-    last-known). Mirror that: interpolate over the finite samples only. Returns
-    NaN only when *every* sample is NaN.
+    A fill at entry time ``ts`` must NEVER borrow a quote that printed AFTER
+    ``ts``: ``np.interp`` over all samples would bridge to a later (possibly
+    near-settlement) price and bleed the future into the entry. We restrict to
+    FINITE samples whose ``xp <= ts`` and take the last-known among them (true
+    as-of / ffill — matching the ported ``totals_realistic._load`` ffill, which
+    also skipped NaNs).
+
+    Returns NaN when no finite sample is at-or-before ``ts`` (every quote is
+    later, or all are NaN): the value is genuinely unknown as-of ``ts`` and the
+    caller raises rather than fabricating a price from the future.
     """
     fp = np.asarray(fp, dtype=float)
-    mask = np.isfinite(fp) & np.isfinite(xp)
+    xp = np.asarray(xp, dtype=float)
+    mask = np.isfinite(fp) & np.isfinite(xp) & (xp <= ts)
     if not mask.any():
         return float("nan")
-    return float(np.interp(ts, xp[mask], fp[mask]))
+    xs, ys = xp[mask], fp[mask]
+    # With future samples excluded, ts is at/after the right edge, so np.interp
+    # clamps to the last finite at-or-before sample — exactly the as-of/ffill.
+    order = np.argsort(xs)
+    return float(np.interp(ts, xs[order], ys[order]))
 
 
 @dataclass
@@ -130,12 +152,16 @@ class FillModel:
         The winner market has no strike ladder; there the "strike" is the 0.5
         crossing and ``fill_mid`` is the interpolated win-prob (or its complement
         for a short side).
+
+        Raises ``ValueError`` for any ``side`` label in NEITHER the over nor the
+        short taxonomy — never silently default a fill to LONG (audit defect C3).
         """
         if panel.n == 0:
             raise ValueError("cannot fill on an empty panel")
 
         xp = np.asarray(panel.minute_ts, dtype=float)
-        short = side.strip().lower() in _SHORT_SIDES
+        # Fail loud on an unknown label rather than defaulting to LONG (C3).
+        short = is_short_side(side)
 
         # --- Winner market: no ladder; the level IS the price. -------------
         if panel.market == WINNER or not panel.ladder:
@@ -188,4 +214,5 @@ def cost_sweep(values=(0.0, 0.01, 0.015, 0.02, 0.025)) -> list[FillModel]:
 REALISTIC: FillModel = FillModel()
 
 __all__ = ["FillModel", "cost_sweep", "REALISTIC",
-           "PM_FLAT_TAKER_RATE", "PM_CURVE_FEE_RATE_BPS"]
+           "PM_FLAT_TAKER_RATE", "PM_CURVE_FEE_RATE_BPS",
+           "SHORT_SIDES", "is_short_side"]

@@ -14,6 +14,7 @@ from research.lab.execution import (
     PM_FLAT_TAKER_RATE,
     REALISTIC,
     FillModel,
+    _interp_at,
     cost_sweep,
 )
 from research.lab.types import (
@@ -262,3 +263,100 @@ def test_e2e_smoke_realistic_fill_fields_sane():
     assert res.half_spread == 0.015
     assert res.fee > 0.0
     assert 0.0 < res.all_in_price < 1.0
+
+
+# --------------------------------------------------------------------------- #
+# C3: long_away fills as the COMPLEMENT of P(home), and UNKNOWN labels raise
+# --------------------------------------------------------------------------- #
+
+
+def test_long_away_fills_as_complement_of_home_winprob():
+    """Audit defect C3: ``long_away`` (WINNER away bet) must fill at 1 - P(home),
+    NOT long the home/favorite price. Before the fix it was in NEITHER side set
+    and filled LONG (paying p_home ~0.10 on a longshot fade) while settling as
+    the away bet (paid ~0.90 of the time) — a fabricated ~+84c/contract edge."""
+    panel = synthetic_panel(market=WINNER, seed=0)
+    assert panel.ladder == {}
+    ts = float(panel.minute_ts[panel.n // 2])
+    p_home = min(max(float(np.interp(ts, panel.minute_ts, panel.mid)), 0.01), 0.99)
+
+    long_home = REALISTIC.fill(panel, ts, side="long_home")
+    long_away = REALISTIC.fill(panel, ts, side="long_away")
+
+    # long_home pays the home price; long_away pays its COMPLEMENT.
+    assert long_home.fill_mid == pytest.approx(p_home, abs=1e-9)
+    assert long_away.fill_mid == pytest.approx(1.0 - p_home, abs=1e-9)
+    # They must sum to 1 (a fill that bet a side and its complement).
+    assert long_home.fill_mid + long_away.fill_mid == pytest.approx(1.0, abs=1e-9)
+
+
+def test_long_away_on_a_longshot_is_priced_near_the_away_favorite():
+    """When home is the longshot (low P(home)), long_away must be EXPENSIVE
+    (~the away-favorite price), not cheap. A cheap long_away that still settles
+    as the away win is the C3 free-edge artifact."""
+    panel = synthetic_panel(market=WINNER, seed=1)
+    # Force a deep home longshot: P(home) pinned low across the panel.
+    panel.mid = np.full(panel.n, 0.08)
+    ts = float(panel.minute_ts[panel.n // 2])
+    res = REALISTIC.fill(panel, ts, side="long_away")
+    assert res.fill_mid == pytest.approx(0.92, abs=1e-9)   # 1 - 0.08
+    # all_in is well above 0.5 — you pay the away favorite, no free money.
+    assert res.all_in_price > 0.90
+
+
+def test_unknown_side_label_raises_never_defaults_long():
+    """A side label in NEITHER taxonomy set must RAISE (fail loud), never
+    silently default to LONG (the C3 default-orientation footgun)."""
+    panel = synthetic_panel(market=TOTAL, seed=2)
+    ts = float(panel.minute_ts[10])
+    with pytest.raises(ValueError):
+        REALISTIC.fill(panel, ts, side="frobnicate")
+    # And on the winner (ladder-less) path too.
+    wpanel = synthetic_panel(market=WINNER, seed=2)
+    wts = float(wpanel.minute_ts[10])
+    with pytest.raises(ValueError):
+        REALISTIC.fill(wpanel, wts, side="sideways")
+
+
+# --------------------------------------------------------------------------- #
+# _interp_at: as-of / backward fill — a FUTURE quote never affects the fill
+# --------------------------------------------------------------------------- #
+
+
+def test_interp_at_is_as_of_future_quote_ignored():
+    """A quote that prints AFTER ``ts`` must not bridge back into the fill — the
+    fill borrowing a later (near-settlement) price is look-ahead. The as-of value
+    is the last finite sample at-or-before ``ts``."""
+    xp = np.array([0.0, 60.0, 120.0, 180.0])
+    fp = np.array([0.20, 0.21, 0.90, 0.95])    # a big jump AFTER ts=90
+    # As-of 90s: only the <=90s samples (0.20, 0.21) are visible.
+    val = _interp_at(90.0, xp, fp)
+    assert val == pytest.approx(0.21, abs=1e-9)
+    # The future 0.90/0.95 must not pull it up at all.
+    assert val < 0.5
+
+    # Mutating ONLY the future samples must not change the as-of value.
+    fp_future_changed = fp.copy()
+    fp_future_changed[2:] = [0.01, 0.02]
+    assert _interp_at(90.0, xp, fp_future_changed) == pytest.approx(val, abs=1e-9)
+
+    # Before every sample -> genuinely unknown as-of -> NaN (caller raises).
+    assert not np.isfinite(_interp_at(-30.0, xp, fp))
+
+
+def test_fill_does_not_borrow_a_future_near_settlement_quote():
+    """End-to-end: a strike whose quote spikes to ~1.0 only AFTER the entry ts
+    must fill at the pre-spike price, not the post-spike one."""
+    panel = synthetic_panel(market=TOTAL, seed=3)
+    strikes = sorted(panel.ladder.keys())
+    chosen = strikes[len(strikes) // 2]
+    panel.mid = np.full(panel.n, float(chosen))   # force snapping to `chosen`
+    arr = np.full(panel.n, 0.30)
+    bar = 10
+    arr[bar + 1:] = 0.99                           # quote jumps AFTER the entry bar
+    panel.ladder[chosen] = arr
+    ts = float(panel.minute_ts[bar])
+    res = REALISTIC.fill(panel, ts, side="over")
+    assert res.strike == chosen
+    # Must see the pre-spike 0.30, never the future 0.99.
+    assert res.fill_mid == pytest.approx(0.30, abs=1e-9)

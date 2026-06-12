@@ -23,6 +23,14 @@ OFFSETS = [-2, -1, 0, 1, 2, 3]
 MIN_POST_SEC = 180  # require 3 live minutes after the sub
 
 
+# Data-repro freeze (2026-06-12): set this env var to "1" to recompute each
+# cached pkl's content hash on a CACHE HIT and WARN if it drifts from the
+# recorded sidecar (a re-fetch silently re-stated the odds/minute content under
+# identical code — a non-reproducible verdict). Off by default so routine loads
+# pay no hashing cost; a fresh build ALWAYS writes the sidecar regardless.
+_CACHE_HASH_CHECK_ENV = "NBA_CACHE_HASH_CHECK"
+
+
 def load_or_build(game: dict, kinds=DEFAULT_KINDS, platforms=None, cache_dir=CACHE_DIR) -> ds.Dataset:
     os.makedirs(cache_dir, exist_ok=True)
     ptag = "-".join(sorted(platforms)) if platforms else "all"
@@ -30,11 +38,25 @@ def load_or_build(game: dict, kinds=DEFAULT_KINDS, platforms=None, cache_dir=CAC
     path = os.path.join(cache_dir, key + ".pkl")
     if os.path.exists(path):
         with open(path, "rb") as f:
-            return pickle.load(f)
+            d = pickle.load(f)
+        # Opt-in drift check: record + expose, never raise, never block.
+        if os.environ.get(_CACHE_HASH_CHECK_ENV) == "1":
+            try:
+                from . import cache_hash
+                cache_hash.check_sidecar(path, d, warn=True)
+            except Exception:  # noqa: BLE001 — the freeze is never load-critical
+                pass
+        return d
     d = ds.build(game["date"], game["away"], game["home"], kinds=kinds,
                  platforms=platforms, espn_id=game.get("espn_id"))
     with open(path, "wb") as f:
         pickle.dump(d, f)
+    # Freeze the just-built content next to the pkl (best-effort sidecar).
+    try:
+        from . import cache_hash
+        cache_hash.write_sidecar(path, d)
+    except Exception:  # noqa: BLE001 — never fail a build on the freeze
+        pass
     return d
 
 
