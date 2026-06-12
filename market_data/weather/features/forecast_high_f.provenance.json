@@ -836,6 +836,72 @@
         "KXHIGHNY-26JUN12"
       ],
       "rule": "identical PIT rule; complete-local-day vintages only; known_from_ts always in the past at write time"
+    },
+    {
+      "script": "research/scripts/update_forecast_vintages.py",
+      "fetched_at": "2026-06-12T03:27:12+00:00",
+      "rows_appended": 17,
+      "events": [
+        "KXHIGHAUS-26JUN11",
+        "KXHIGHAUS-26JUN12",
+        "KXHIGHCHI-26JUN11",
+        "KXHIGHCHI-26JUN12",
+        "KXHIGHDEN-26JUN11",
+        "KXHIGHDEN-26JUN12",
+        "KXHIGHMIA-26JUN11",
+        "KXHIGHMIA-26JUN12",
+        "KXHIGHNY-26JUN11",
+        "KXHIGHNY-26JUN12"
+      ],
+      "rule": "identical PIT rule; complete-local-day vintages only; known_from_ts always in the past at write time"
+    },
+    {
+      "script": "research/scripts/update_forecast_vintages.py",
+      "fetched_at": "2026-06-12T04:27:19+00:00",
+      "rows_appended": 19,
+      "events": [
+        "KXHIGHAUS-26JUN11",
+        "KXHIGHAUS-26JUN12",
+        "KXHIGHCHI-26JUN11",
+        "KXHIGHCHI-26JUN12",
+        "KXHIGHDEN-26JUN11",
+        "KXHIGHDEN-26JUN12",
+        "KXHIGHMIA-26JUN11",
+        "KXHIGHMIA-26JUN12",
+        "KXHIGHNY-26JUN11",
+        "KXHIGHNY-26JUN12"
+      ],
+      "rule": "identical PIT rule; complete-local-day vintages only; known_from_ts always in the past at write time"
+    },
+    {
+      "script": "research/scripts/update_forecast_vintages.py",
+      "fetched_at": "2026-06-12T05:27:20+00:00",
+      "rows_appended": 16,
+      "events": [
+        "KXHIGHAUS-26JUN11",
+        "KXHIGHAUS-26JUN12",
+        "KXHIGHCHI-26JUN11",
+        "KXHIGHCHI-26JUN12",
+        "KXHIGHDEN-26JUN11",
+        "KXHIGHDEN-26JUN12",
+        "KXHIGHMIA-26JUN12",
+        "KXHIGHNY-26JUN12"
+      ],
+      "rule": "identical PIT rule; complete-local-day vintages only; known_from_ts always in the past at write time"
+    },
+    {
+      "script": "research/scripts/update_forecast_vintages.py",
+      "fetched_at": "2026-06-12T06:27:32+00:00",
+      "rows_appended": 12,
+      "events": [
+        "KXHIGHAUS-26JUN12",
+        "KXHIGHCHI-26JUN12",
+        "KXHIGHDEN-26JUN11",
+        "KXHIGHDEN-26JUN12",
+        "KXHIGHMIA-26JUN12",
+        "KXHIGHNY-26JUN12"
+      ],
+      "rule": "identical PIT rule; complete-local-day vintages only; known_from_ts always in the past at write time"
     }
   ]
 }
