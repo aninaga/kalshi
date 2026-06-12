@@ -48,6 +48,18 @@ season/parity stability failures are level-independent):
 - totals-extremes: high-price legs were over-charged **9–22×**; family needs a
   cache rebuild + true re-run before any claim.
 
+**END-TO-END RE-RUN (2026-06-12T11:04Z, `runs/fee_audit_rerun_confirm_*.md`):**
+caches rebuilt, evaluators re-run. The **fee Δ is confirmed exactly** (legacy→
+official +1.15¢ spread / +1.22¢ totals) and **every verdict still gate-FAILs on
+the same stability sub-gates** — the decision-relevant conclusion is robust
+end-to-end. BUT the rebuilt cache yields baselines materially *higher* than the
+memos on identical code (totals same-script −1.00¢→+0.72¢ at legacy fees; spread
+taker win 0.563→0.608). This is **data-vintage drift on re-fetch, not an edge
+improvement** (survivorship ruled out — all 1320 pkls present). Treat the
+absolute re-rated levels above (+1.92¢ etc.) as anchored to the original cache
+vintage and NOT reproducible; the carry-forward is unchanged. New H1 blocker:
+content-hash/freeze the study cache before any re-run is used to certify.
+
 **Restated cost floor:** PM-sports taker all-in ≈ **2.25¢** ATM (not ~3.4¢);
 Kalshi taker ≈ 3.25¢ (unchanged, real); **maker fee floor ≈ 0** (PM $0;
 Kalshi NBA 0.44¢ batch; Kalshi crypto/weather series charge makers nothing) —
