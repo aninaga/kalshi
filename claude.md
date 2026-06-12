@@ -66,7 +66,7 @@ kalshi/
 
 ### 4. Advanced Configuration
 - **Adaptive Limits**: Dynamic thresholds based on market conditions
-- **Fee Integration**: Platform-specific fee structures (Kalshi: 0%, Polymarket: ~2%)
+- **Fee Integration**: Official venue schedules via the canonical `venue_fees.py` module — Kalshi taker `ceil_cents(0.07*C*P*(1-P))` (maker = quarter of that, only on `quadratic_with_maker_fees` series like NBA); Polymarket taker = per-category parabolic `C*(bps/10000)*P*(1-P)` (sports 300bps, crypto 700bps, geopolitics 0; makers $0 + rebate). The old "Polymarket ~2% flat" figure never existed in the official schedule — do not reintroduce it.
 - **Risk Management**: Position sizing limits and slippage tolerance
 - **Performance Tuning**: Concurrent processing with rate limiting
 

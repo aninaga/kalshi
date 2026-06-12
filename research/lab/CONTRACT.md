@@ -30,7 +30,7 @@ class FillModel:
     def fill(self, panel: Panel, ts: float, side: str) -> FillResult
         # snap to nearest LISTED strike in panel.ladder; fill at its REAL quoted
         # prob (interp at ts), NOT 0.50; add half_spread; add taker fee.
-    def fee(self, price: float, size: float = 1.0) -> float   # PM 2% + curve / Kalshi
+    def fee(self, price: float, size: float = 1.0) -> float   # official venue_fees schedule (PM per-category parabolic / Kalshi)
 def cost_sweep(values=(0.0,0.01,0.015,0.02,0.025)) -> list[FillModel]
 REALISTIC: FillModel  # module-level default instance
 ```

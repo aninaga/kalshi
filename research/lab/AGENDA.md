@@ -71,8 +71,17 @@ Priority = expected information value about making (at least paper) money.
    0.07*p*(1-p). Arithmetic says it does NOT revive a dead family this round, but
    it systematically over-kills hold edges -> see the fee_model_audit lane +
    report proposal. New codex wave this beat (4 spooled, backlog floor restored):
-   (a) **fee_model_audit** — re-grade all hold cells under one-way fee, does any
-   borderline cell flip?; (b) **btc_9599_mechanism** — is hr20 a real mechanism
+   (a) **fee_model_audit** — ✅ DONE 2026-06-12, scope expanded far beyond the
+   one-way-fee question: the PM flat-2%-of-notional taker fee NEVER EXISTED
+   (official = per-category parabolic, sports 300bps; makers $0+rebate), and
+   Kalshi NBA maker = quarter-of-taker (charged as FULL taker before). All fee
+   logic unified into root `venue_fees.py` (golden tests
+   `tests/test_venue_fees_golden.py`); re-rates in
+   `runs/fee_model_audit_20260612T075325Z.md` + PROGRAM_STATE correction
+   banner (spread taker +0.77→+1.92c; required-n 15.2k→~2.5k; maker fee floor
+   ≈0). REMAINING from original scope: one-way-vs-round-trip re-grade of hold
+   cells still needs the cache rebuild (queued in the run note).
+   (b) **btc_9599_mechanism** — is hr20 a real mechanism
    or noise-to-retire (drop-one-event jackknife)?; (c) **crypto_noside_hold** —
    is the recurring NO-side asymmetry a BROAD hold edge across all hours?;
    (d) **nba_extreme_fav_hold** — re-grade p>=0.85 as a single K=1 hypothesis

@@ -26,6 +26,45 @@ terms. Detail and dissent below.
 
 ---
 
+## CORRECTION (2026-06-12) — fee model audit supersedes the cost-floor numbers
+
+The fee_model_audit lane (`runs/fee_model_audit_20260612T075325Z.md`,
+`research/scripts/fee_audit_rerate.py`, ledger row `fee_model_audit_20260612`)
+found this document's PM cost assumption was wrong: the **flat 2%-of-notional
+Polymarket taker fee does not exist** in the official schedule
+(docs.polymarket.com/trading/fees; the arb line verified this 2026-06-09 on a
+branch never merged into this line). Official PM sports taker = 300 bps
+parabolic ≈ **0.75¢ at ATM**, makers **$0** (+20–25% rebate); Kalshi NBA maker
+= **quarter of taker** (≈0.44¢ batch), not the full taker fee charged as the
+"pessimistic" contingency. Corrected levels (gate *verdicts* unchanged — the
+season/parity stability failures are level-independent):
+
+- spread taker: +0.77¢ → **+1.92¢** net (CI [−0.93, +4.75]; OOS halves now
+  +2.42 → +1.41, both positive) — still gate-FAIL on CI lo + stability.
+- spread maker: PM +2.10¢ already-correct; Kalshi contingency +0.12¢ →
+  **+1.10¢** (1-lot) / **+1.66¢** (batch).
+- totals pace: −1.00¢ → **+0.27¢** — retraction STANDS (no positive edge) but
+  it was not "execution-killed", it is ~breakeven at honest costs.
+- totals-extremes: high-price legs were over-charged **9–22×**; family needs a
+  cache rebuild + true re-run before any claim.
+
+**Restated cost floor:** PM-sports taker all-in ≈ **2.25¢** ATM (not ~3.4¢);
+Kalshi taker ≈ 3.25¢ (unchanged, real); **maker fee floor ≈ 0** (PM $0;
+Kalshi NBA 0.44¢ batch; Kalshi crypto/weather series charge makers nothing) —
+the binding maker costs are fill probability and adverse selection, which the
+live fill probes measure.
+
+**Restated power arithmetic:** §2(c)'s n ≈ 15,200–30,400 was computed at
+μ = +0.77¢. At the corrected μ = +1.92¢ (σ = 0.487 unchanged), a bare 95% CI
+clears 0 at **n ≈ 2,500 games (~2 further seasons)**, stability sub-gates
+roughly double that. The forward-paper option on the spread maker residual is
+therefore far more valuable than this document's "14–27× impossible" framing
+implies — certification is a 2–4 season program, not a multi-decade one. The
+PAUSE recommendation for *backtest mining* stands; the capital/risk dissent
+(§ honest dissent) gains weight.
+
+---
+
 ## 1. Cross-market efficiency map
 
 | market | honest residual found | realistic effect size | classification | decisive evidence |
