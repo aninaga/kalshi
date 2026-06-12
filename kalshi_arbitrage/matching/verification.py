@@ -49,10 +49,14 @@ INVERTED = "inverted"    # Kalshi YES  ==  Polymarket NO token
 UNKNOWN = "unknown"      # could not resolve
 
 # Words that flip the meaning of an otherwise-identical proposition.
+# NOTE: directional words ("down"/"up") are deliberately NOT here — they are
+# handled by the threshold-direction check below. Counting "down" as BOTH a
+# negation and an UNDER-direction double-flipped an up-vs-down pair into a
+# spurious "double_flip_cancels -> ALIGNED" (un-hedged two-leg failure, audit C4).
 _NEGATION_TOKENS = frozenset({
     "not", "no", "never", "without", "fail", "fails", "failed",
     "miss", "misses", "missed", "lose", "loses", "lost",
-    "negative", "decline", "decrease", "down",
+    "negative", "decline", "decrease",
 })
 
 # Direction words for threshold markets (over/under, above/below).
@@ -103,9 +107,21 @@ def _tokens(market: Dict) -> set:
     return set(text.split()) - _BOILERPLATE
 
 
+def _polarity_words(text: str) -> List[str]:
+    """Lowercased word tokens with surrounding punctuation stripped.
+
+    Plain ``str.split`` leaves trailing punctuation attached ("down?" != "down"),
+    which silently defeated the polarity set-membership checks below: a title
+    ending in "...down?" produced no negation/direction signal at all and fell
+    through to a default ALIGNED (audit C4). Strip non-alphanumeric edges (keep
+    inner apostrophes so "won't" survives) before any token comparison.
+    """
+    return [w.strip(".,;:!?\"'()[]{}").lower() for w in text.split()]
+
+
 def _direction(text: str) -> Optional[str]:
     """Return 'over' / 'under' if the title expresses a threshold direction."""
-    words = set(text.lower().split())
+    words = set(_polarity_words(text))
     over = bool(words & _OVER_TOKENS) or "+" in text
     under = bool(words & _UNDER_TOKENS)
     if over and not under:
@@ -117,7 +133,7 @@ def _direction(text: str) -> Optional[str]:
 
 def _negation_parity(text: str) -> bool:
     """True if the title contains an odd number of negations (meaning flipped)."""
-    words = text.lower().split()
+    words = _polarity_words(text)
     neg = sum(1 for w in words if w in _NEGATION_TOKENS)
     # treat "won't" / "wont" style contractions
     neg += len(re.findall(r"\bwon'?t\b|\bcan'?t\b|\bdoesn'?t\b", text.lower()))
@@ -753,14 +769,19 @@ class OutcomePolarityVerifier:
 
         reasons: List[str] = []
 
+        # Tokenize the CLEAN title (punctuation already stripped), never the raw
+        # title: a raw "...down?" leaves "down?" attached, which silently failed
+        # every set-membership check below and defaulted to ALIGNED (audit C4).
+        # _polarity_words is also punctuation-safe as a second line of defense.
+
         # 1) Negation parity: an odd difference flips meaning.
-        k_neg = _negation_parity(kalshi_market.get("title", "") or k_title)
-        p_neg = _negation_parity(polymarket_market.get("title", "") or p_title)
+        k_neg = _negation_parity(k_title)
+        p_neg = _negation_parity(p_title)
         neg_flip = k_neg != p_neg
 
         # 2) Threshold direction.
-        k_dir = _direction(kalshi_market.get("title", "") or k_title)
-        p_dir = _direction(polymarket_market.get("title", "") or p_title)
+        k_dir = _direction(k_title)
+        p_dir = _direction(p_title)
         dir_flip = k_dir is not None and p_dir is not None and k_dir != p_dir
         dir_same = k_dir is not None and p_dir is not None and k_dir == p_dir
 
@@ -933,6 +954,20 @@ class DistinguishingEntityVerifier:
         ke = {w for w in kt if any(c.isalpha() for c in w)}
         pe = {w for w in pt if any(c.isalpha() for c in w)}
         if not ke or not pe:
+            # One side has NO substantive entity token. If the OTHER side carries
+            # a distinguishing leftover (a non-template token, not a predicate
+            # qualifier, and out of the gazetteer vocab — an in-vocab place would
+            # already have tripped the scope veto) we cannot confirm same-event
+            # from the title alone: "2026 election" vs "2026 Jakarta election"
+            # overlaps 1.00 on the year, but "Jakarta" scopes the second to a
+            # city. Flag UNCERTAIN (held-for-review, never auto-clean) rather than
+            # waving it through as a clean "no_entity_tokens" pass.
+            leftover = ((ke | pe) - _TEMPLATE_TOKENS - _PREDICATE_QUALIFIERS)
+            if leftover:
+                return MatchVerdict(
+                    True, UNKNOWN, 0.3,
+                    (f"one_sided_distinguishing_token {sorted(leftover)}",),
+                    self.name, uncertain=True)
             return MatchVerdict(True, UNKNOWN, 0.3, ("no_entity_tokens",), self.name)
         k_only = {w for w in ke if not _token_matches(w, pe)} - _TEMPLATE_TOKENS
         p_only = {w for w in pe if not _token_matches(w, ke)} - _TEMPLATE_TOKENS

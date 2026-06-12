@@ -79,17 +79,43 @@ def main(argv=None) -> int:
     Path(args.allowlist).parent.mkdir(parents=True, exist_ok=True)
     existing = {"approved": [], "denied": []}
     if Path(args.allowlist).exists():
+        # Fail LOUD on a corrupt allowlist rather than silently resetting it:
+        # a swallowed error here would let the merge below drop every operator
+        # approval (review_pairs.py writes them), re-arming pairs a human had
+        # adjudicated. Conservative failure direction = refuse to write.
         try:
             existing = json.loads(Path(args.allowlist).read_text())
-        except (OSError, json.JSONDecodeError):
-            pass
+        except (OSError, json.JSONDecodeError) as exc:
+            print(f"ERROR: cannot read existing allowlist {args.allowlist}: {exc}\n"
+                  f"Refusing to overwrite — operator approvals could be lost. "
+                  f"Inspect/repair the file by hand, then re-run.", file=sys.stderr)
+            return 2
     denied = existing.get("denied", [])
-    approved = [{"kalshi": r["ktk"], "polymarket": r["pid"], "polarity": r["polarity"],
-                 "_note": f"net=${r['net']:.2f} edge={r['net_edge']*100:.1f}% "
-                          f"{r['kt'][:48]} || {r['pt'][:48]}"} for r in found]
+
+    # MERGE approved-by-source: the auto-discovered 'genuine' set is UNIONED with
+    # the operator approvals already on file (anything whose source isn't this
+    # tool's own "auto" — e.g. review_pairs.py's source="review"). Replacing the
+    # whole array each run wiped those human approvals. Keyed by (kalshi,
+    # polymarket); on a pair present in both, the operator entry wins (it is the
+    # more authoritative provenance) and the stale auto entry is dropped.
+    def _key(e):
+        return (str(e.get("kalshi")), str(e.get("polymarket")))
+
+    operator_approved = [e for e in existing.get("approved", [])
+                         if e.get("source") != "auto"]
+    operator_keys = {_key(e) for e in operator_approved}
+    auto_approved = [
+        {"kalshi": r["ktk"], "polymarket": r["pid"], "polarity": r["polarity"],
+         "source": "auto",
+         "_note": f"net=${r['net']:.2f} edge={r['net_edge']*100:.1f}% "
+                  f"{r['kt'][:48]} || {r['pt'][:48]}"}
+        for r in found if (str(r["ktk"]), str(r["pid"])) not in operator_keys
+    ]
+    approved = operator_approved + auto_approved
     Path(args.allowlist).write_text(json.dumps({"approved": approved, "denied": denied}, indent=2))
-    print(f"\n=== ALLOWLIST ===\nWrote {len(approved)} genuine pairs to {args.allowlist} "
-          f"({len(review)} held for review, NOT allowlisted).")
+    print(f"\n=== ALLOWLIST ===\nWrote {len(approved)} approved pairs to {args.allowlist} "
+          f"({len(auto_approved)} auto-discovered + {len(operator_approved)} operator-preserved; "
+          f"{len(review)} held for review, NOT allowlisted).")
     if review:
         print("Review these (confirm both venues resolve identically) before adding:")
         for r in review[:10]:

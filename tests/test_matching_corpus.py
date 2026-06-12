@@ -54,3 +54,31 @@ def test_corpus_matching_gate(pairs):
     decision = MatchingGate(min_precision=0.97, min_recall=0.93,
                             bootstrap_samples=400).evaluate(CompositeVerifier(), pairs)
     assert decision.passed, decision.summary()
+
+
+def _by_id(pairs, kalshi_id):
+    matches = [p for p in pairs if p.kalshi_id == kalshi_id]
+    assert matches, f"audit regression row {kalshi_id!r} missing from corpus"
+    return matches[0]
+
+
+def test_audit_c4_up_vs_down_resolves_inverted(pairs):
+    # Regression row for audit C4: an up-vs-down pair is the SAME event with
+    # OPPOSITE polarity. The verifier must resolve INVERTED (calling it ALIGNED
+    # is an un-hedged two-leg position, the exact failure the module exists to
+    # prevent).
+    pair = _by_id(pairs, "AUDIT-C4-BTC-DOWN")
+    assert pair.polarity == "inverted"
+    verdict = CompositeVerifier().verify(*pair.to_market_dicts())
+    assert verdict.passed
+    assert verdict.polarity == "inverted", verdict.reasons
+
+
+def test_audit_one_sided_scope_is_not_auto_clean(pairs):
+    # Regression row for the one-sided out-of-gazetteer scope: "2026 election"
+    # vs "2026 Jakarta election". It must NOT come back clean — held-for-review
+    # (uncertain) is the floor, so it never auto-allowlists.
+    pair = _by_id(pairs, "AUDIT-SCOPE-ELECTION-NATIONAL")
+    assert not pair.is_true_match()
+    verdict = CompositeVerifier().verify(*pair.to_market_dicts())
+    assert verdict.uncertain, verdict.reasons
