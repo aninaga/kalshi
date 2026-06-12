@@ -225,7 +225,14 @@ def main(argv=None) -> int:
         return 0
 
     import concurrent.futures
-    open_eps: dict = {}      # key -> {start, peak_net, peak_edge, ticks, strategy}
+    import uuid
+    # One id per monitor process: a restart re-opens every standing arb and
+    # re-flushes it as a fresh still_open episode (open_eps is process-memory
+    # only). Stamping each episode row with the run_id + epoch + pm_fee_bps lets
+    # the analyzer dedup those restart-duplicated still_open continuations
+    # instead of summing the same standing market once per restart.
+    run_id = uuid.uuid4().hex[:12]
+    open_eps: dict = {}      # key -> {start, peak_net, peak_edge, ticks, strategy, uncertain}
     closed = 0
     captured_total = 0.0
     t_start = time.time()
@@ -308,7 +315,7 @@ def main(argv=None) -> int:
             if ep is None:
                 open_eps[key] = {"start": now, "peak_net": r["net"], "peak_edge": r["net_edge"],
                                  "ticks": 1, "kt": r["kt"], "strategy": strat,
-                                 "ktk": r.get("ktk", "")}
+                                 "ktk": r.get("ktk", ""), "uncertain": bool(r.get("uncertain"))}
                 tag = " [BASIS-RISK]" if r.get("uncertain") else ""
                 stag = f" <{strat}>" if strat != "comp" else ""
                 print(f"{ts:<9} {'OPEN':<6} {r['net']:7.2f} {r['net_edge']*100:5.1f}% "
@@ -331,8 +338,11 @@ def main(argv=None) -> int:
             print(f"{ts:<9} {'CLOSE':<6} {ep['peak_net']:7.2f} {ep['peak_edge']*100:5.1f}% "
                   f"{'':>7}  {ep['kt'][:40]}{stag} (open {dur/60:.1f}m, {ep['ticks']} ticks)",
                   flush=True)
-            _record(args.ledger, {"ts": ts, "ktk": ep.get("ktk") or key, "market": ep["kt"],
+            _record(args.ledger, {"ts": ts, "run_id": run_id, "epoch": round(now, 1),
+                                  "ktk": ep.get("ktk") or key, "market": ep["kt"],
                                   "strategy": ep.get("strategy", "comp"), "key": key,
+                                  "uncertain": bool(ep.get("uncertain")),
+                                  "pm_fee_bps": args.pm_fee_bps,
                                   "peak_net": round(ep["peak_net"], 4),
                                   "peak_edge": round(ep["peak_edge"], 5),
                                   "open_minutes": round(dur / 60, 2), "ticks": ep["ticks"]})
@@ -359,7 +369,8 @@ def main(argv=None) -> int:
                 s["net"] = round(s["net"], 4)
                 s["net_uncertain"] = round(s["net_uncertain"], 4)
             _record(args.ledger, {
-                "ts": ts, "kind": "snapshot", "epoch": round(now, 1),
+                "ts": ts, "kind": "snapshot", "run_id": run_id, "epoch": round(now, 1),
+                "pm_fee_bps": args.pm_fee_bps,
                 "open_count": len(clean),
                 "open_net": round(sum(r["net"] for r in clean.values()), 4),
                 "open_count_uncertain": len(unc),
@@ -405,7 +416,8 @@ def main(argv=None) -> int:
                         open_eps[key] = {"start": time.time(), "peak_net": r["net"],
                                          "peak_edge": r["net_edge"], "ticks": 1,
                                          "kt": r["kt"], "ktk": r.get("ktk", ""),
-                                         "strategy": r.get("strategy", "comp")}
+                                         "strategy": r.get("strategy", "comp"),
+                                         "uncertain": bool(r.get("uncertain"))}
                         tag = " [BASIS-RISK]" if r.get("uncertain") else ""
                         print(f"{ts:<9} {'OPEN':<6} {r['net']:7.2f} "
                               f"{r['net_edge']*100:5.1f}% {r['size']:7.0f}  "
@@ -422,9 +434,13 @@ def main(argv=None) -> int:
     # Flush still-open episodes so bounded runs AND deploy restarts (SIGTERM)
     # are fully recorded.
     ts = datetime.now(timezone.utc).strftime("%H:%M:%S")
+    flush_epoch = round(time.time(), 1)
     for key, ep in open_eps.items():
-        _record(args.ledger, {"ts": ts, "ktk": ep.get("ktk") or key, "market": ep["kt"],
+        _record(args.ledger, {"ts": ts, "run_id": run_id, "epoch": flush_epoch,
+                              "ktk": ep.get("ktk") or key, "market": ep["kt"],
                               "strategy": ep.get("strategy", "comp"), "key": key,
+                              "uncertain": bool(ep.get("uncertain")),
+                              "pm_fee_bps": args.pm_fee_bps,
                               "peak_net": round(ep["peak_net"], 4),
                               "peak_edge": round(ep["peak_edge"], 5),
                               "open_minutes": round((time.time() - ep["start"]) / 60, 2),

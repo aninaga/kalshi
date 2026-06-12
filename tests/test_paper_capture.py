@@ -72,3 +72,23 @@ def test_analyze_flags_unknown_polarity_as_error(tmp_path):
     cap.record(_opp(polarity="unknown"), _result())
     report = analyze(load_records(str(tmp_path / "ex.jsonl")))
     assert report.polarity_errors == 1
+
+
+def test_capture_refuses_production_ledger_under_pytest():
+    # Defect C6: a test that constructs ExecutionCapture() with the DEFAULT
+    # path (no explicit path, DATA_DIR unpatched) must NOT write the production
+    # ledger — reconcile.py replays confirmation_source=="exchange" rows there
+    # as locked-in live P&L. Under pytest the default path is diverted.
+    import os
+    from kalshi_arbitrage.config import Config
+
+    default_path = os.path.abspath(
+        os.path.join(Config.DATA_DIR, "executions", "executions.jsonl"))
+    cap = ExecutionCapture()  # no path, no DATA_DIR patch — the dangerous case
+    assert os.path.abspath(cap.path) != default_path, (
+        "ExecutionCapture must divert away from the production ledger under pytest")
+    # And it must not have (re)created the production file as a side effect.
+    cap.record(_opp(), _result(confirmation_source="exchange"))
+    written = json.loads(Path(cap.path).read_text().splitlines()[0])
+    assert written["confirmation_source"] == "exchange"
+    assert Path(cap.path).resolve() != Path(default_path).resolve()

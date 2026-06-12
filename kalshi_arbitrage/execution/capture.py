@@ -26,8 +26,27 @@ class ExecutionCapture:
     """Append-only sink for execution estimate/realized records."""
 
     def __init__(self, path: Optional[str] = None):
+        default_path = os.path.join(Config.DATA_DIR, "executions", "executions.jsonl")
         if path is None:
-            path = os.path.join(Config.DATA_DIR, "executions", "executions.jsonl")
+            path = default_path
+        # Guard: under pytest, NEVER write to the production capture ledger.
+        # reconcile.py treats confirmation_source=="exchange" rows as locked-in
+        # live P&L, so a test that constructs ArbitrageExecutor() with capture
+        # enabled and DATA_DIR unpatched would book fake fills as real money.
+        # Divert to a per-process scratch file (under the system temp dir) and
+        # fail loud about it rather than silently corrupting the ledger.
+        if os.environ.get("PYTEST_CURRENT_TEST") and os.path.abspath(path) == os.path.abspath(default_path):
+            import tempfile
+            diverted = os.path.join(
+                tempfile.gettempdir(), f"execcapture_pytest_{os.getpid()}.jsonl"
+            )
+            logger.warning(
+                "ExecutionCapture: under pytest, refusing to write the production "
+                "ledger %s; diverting to %s. Patch Config.DATA_DIR or pass an "
+                "explicit path (the autouse conftest fixture normally does this).",
+                default_path, diverted,
+            )
+            path = diverted
         self.path = path
         self._lock = threading.Lock()
         os.makedirs(os.path.dirname(self.path), exist_ok=True)
