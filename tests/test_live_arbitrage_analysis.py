@@ -8,6 +8,8 @@ import json
 import logging
 from datetime import datetime
 from decimal import Decimal
+
+import venue_fees
 from typing import List, Dict, Any, Optional
 import sys
 import os
@@ -191,10 +193,12 @@ async def analyze_live_markets():
                 profit_margin = Decimal(str(opp.get('profit_margin', 0)))
                 
                 # Simple risk adjustment for the test
-                # Assume 0.5% slippage on each side and Polymarket fees
+                # 0.5% slippage each side; PM fee from the canonical schedule
+                # (worst-case ATM, default 500bps category: 1.25% effective).
+                # The old flat 2%-of-notional fee never existed (venue_fees).
                 kalshi_slippage = Decimal("0.005")
                 polymarket_slippage = Decimal("0.005")
-                polymarket_fees = Decimal("0.02")  # 2% total fees
+                polymarket_fees = Decimal(str(venue_fees.pm_taker_fee(0.5, 1.0)))
                 
                 # Adjust profit margin
                 risk_adjusted_margin = profit_margin - kalshi_slippage - polymarket_slippage - polymarket_fees
@@ -292,13 +296,15 @@ async def test_specific_market_pair():
             poly_buy_price = Decimal(str(pair['polymarket']['yes_ask']))
             kalshi_sell_price = Decimal(str(pair['kalshi']['yes_bid']))
             
-            # Polymarket fees (2% total)
-            poly_cost = poly_buy_price * Decimal("1.02")
-            
+            # Polymarket taker fee from the canonical schedule (per-contract
+            # parabolic at the buy price; the flat 2% never existed)
+            pm_fee = Decimal(str(venue_fees.pm_taker_fee(float(poly_buy_price), 1.0)))
+            poly_cost = poly_buy_price + pm_fee
+
             # Net profit
             net_profit = kalshi_sell_price - poly_cost
             profit_margin = net_profit / poly_cost if poly_cost > 0 else Decimal("0")
-            
+
             print(f"""
 Specific Market Analysis:
 ------------------------
@@ -306,7 +312,7 @@ Kalshi: {pair['kalshi']['title']}
 Polymarket: {pair['polymarket']['title']}
 
 Raw Price Difference: {raw_profit:.1%}
-Buy Polymarket @ ${poly_buy_price:.3f} (+ 2% fees = ${poly_cost:.3f})
+Buy Polymarket @ ${poly_buy_price:.3f} (+ fee ${pm_fee:.4f} = ${poly_cost:.3f})
 Sell Kalshi @ ${kalshi_sell_price:.3f}
 Net Profit Margin: {profit_margin:.2%}
 Profit per $1000: ${profit_margin * 1000:.2f}
