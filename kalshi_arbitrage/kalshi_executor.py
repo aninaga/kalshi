@@ -56,6 +56,7 @@ def kalshi_auth_headers(method: str, path: str) -> Dict[str, str]:
         )
         return {
             'Content-Type': 'application/json',
+            'User-Agent': Config.HTTP_USER_AGENT,
             'KALSHI-ACCESS-KEY': api_key,
             'KALSHI-ACCESS-SIGNATURE': base64.b64encode(signature).decode('utf-8'),
             'KALSHI-ACCESS-TIMESTAMP': timestamp,
@@ -75,7 +76,7 @@ class KalshiOrderClient:
 
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
-            self._session = aiohttp.ClientSession()
+            self._session = aiohttp.ClientSession(headers=Config.default_headers())
         return self._session
 
     async def close(self) -> None:
@@ -135,6 +136,7 @@ class KalshiOrderClient:
         count: int,
         price_cents: int,
         ttl_seconds: int = 0,
+        client_order_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Place a limit order on Kalshi.
 
@@ -171,6 +173,11 @@ class KalshiOrderClient:
         # Expiration for pseudo-IOC behavior
         if ttl_seconds > 0:
             body['expiration_ts'] = int(time.time()) + ttl_seconds
+
+        # Idempotency: a deterministic client order id lets a retry reuse the
+        # same id so the exchange de-dupes instead of creating a duplicate.
+        if client_order_id:
+            body['client_order_id'] = client_order_id
 
         logger.info(f"Kalshi place_order: {action} {count}x {side} @ {price_cents}c on {ticker}")
         result = await self._request('POST', '/portfolio/orders', body)

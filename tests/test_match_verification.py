@@ -1,0 +1,211 @@
+"""Phase A: cross-venue match verification tests."""
+
+import re
+from pathlib import Path
+
+import pytest
+
+from kalshi_arbitrage.matching import (
+    ALIGNED,
+    INVERTED,
+    UNKNOWN,
+    AllowlistVerifier,
+    CompositeVerifier,
+    OutcomePolarityVerifier,
+    ResolutionCriteriaVerifier,
+)
+
+
+def _mkt(title, close_time=None, rules="", market_id="m"):
+    return {
+        "id": market_id,
+        "title": title,
+        "clean_title": "",
+        "close_time": close_time,
+        "raw_data": {"rules_primary": rules, "description": rules},
+    }
+
+
+# --- OutcomePolarityVerifier ------------------------------------------------ #
+
+def test_polarity_negation_flip_is_inverted():
+    v = OutcomePolarityVerifier()
+    verdict = v.verify(
+        _mkt("Will Trump win the 2028 election"),
+        _mkt("Will Trump NOT win the 2028 election"),
+    )
+    assert verdict.polarity == INVERTED
+
+
+def test_polarity_threshold_direction_flip_is_inverted():
+    v = OutcomePolarityVerifier()
+    verdict = v.verify(
+        _mkt("Will CPI be over 3%"),
+        _mkt("Will CPI be under 3%"),
+    )
+    assert verdict.polarity == INVERTED
+
+
+def test_polarity_same_direction_is_aligned():
+    v = OutcomePolarityVerifier()
+    verdict = v.verify(
+        _mkt("Will CPI be above 3%"),
+        _mkt("Will CPI be above 3%"),
+    )
+    assert verdict.polarity == ALIGNED
+
+
+def test_polarity_plain_identical_is_aligned():
+    v = OutcomePolarityVerifier()
+    verdict = v.verify(_mkt("Will it rain in NYC tomorrow"), _mkt("Will it rain in NYC tomorrow"))
+    assert verdict.polarity == ALIGNED
+
+
+# --- ResolutionCriteriaVerifier --------------------------------------------- #
+
+def test_resolution_does_not_reject_on_close_time_alone():
+    # Close-time is informational only — the two venues legitimately list very
+    # different close dates for the SAME event (election day vs certification,
+    # and Kalshi often certifies in the NEXT calendar year). A 16k-candidate
+    # audit showed close-time rejection destroyed recall on identical-title
+    # pairs, so ResolutionCriteriaVerifier never rejects on close-time; the
+    # authoritative date signal is the YEAR token in the title (numeric veto).
+    v = ResolutionCriteriaVerifier()
+    assert v.verify(
+        _mkt("X happens", close_time="2026-01-01T00:00:00"),
+        _mkt("X happens", close_time="2026-06-01T00:00:00"),
+    ).passed
+    assert v.verify(
+        _mkt("X happens", close_time="2026-12-01T00:00:00"),
+        _mkt("X happens", close_time="2027-02-01T00:00:00"),  # certification spillover
+    ).passed
+
+
+def test_resolution_rejects_threshold_mismatch():
+    v = ResolutionCriteriaVerifier()
+    # Player prop: 8+ (=>7.5) vs O/U 4.5 differ by >1.0 → incompatible
+    verdict = v.verify(
+        _mkt("LeBron James points 8+"),
+        _mkt("LeBron James points O/U 4.5"),
+    )
+    assert not verdict.passed
+
+
+# --- AllowlistVerifier ------------------------------------------------------ #
+
+def test_allowlist_denied_fails(tmp_path):
+    f = tmp_path / "allow.json"
+    f.write_text('{"approved": [], "denied": [{"kalshi": "K1", "polymarket": "P1"}]}')
+    v = AllowlistVerifier(path=str(f))
+    verdict = v.verify(_mkt("a", market_id="K1"), _mkt("a", market_id="P1"))
+    assert not verdict.passed
+
+
+def test_allowlist_approved_passes_with_polarity(tmp_path):
+    f = tmp_path / "allow.json"
+    f.write_text(
+        '{"approved": [{"kalshi": "K1", "polymarket": "P1", "polarity": "inverted"}], "denied": []}'
+    )
+    v = AllowlistVerifier(path=str(f))
+    verdict = v.verify(_mkt("a", market_id="K1"), _mkt("a", market_id="P1"))
+    assert verdict.passed and verdict.polarity == INVERTED
+
+
+def test_allowlist_unknown_pair_flagged_not_allowlisted(tmp_path):
+    f = tmp_path / "allow.json"
+    f.write_text('{"approved": [], "denied": []}')
+    v = AllowlistVerifier(path=str(f))
+    verdict = v.verify(_mkt("a", market_id="K9"), _mkt("a", market_id="P9"))
+    assert verdict.passed and "not_allowlisted" in verdict.reasons
+
+
+# --- CompositeVerifier ------------------------------------------------------ #
+
+def test_composite_fails_when_any_verifier_fails():
+    # A scope mismatch (one names a state the other doesn't) must fail the chain.
+    c = CompositeVerifier()
+    verdict = c.verify(
+        _mkt("Will the Republicans win the Senate in 2026"),
+        _mkt("Will the Republicans win the Montana Senate race in 2026"),
+    )
+    assert not verdict.passed
+
+
+def test_composite_require_allowlist_blocks_unlisted(tmp_path):
+    f = tmp_path / "allow.json"
+    f.write_text('{"approved": [], "denied": []}')
+    c = CompositeVerifier(verifiers=[AllowlistVerifier(path=str(f)), OutcomePolarityVerifier()],
+                          require_allowlist=True)
+    verdict = c.verify(_mkt("rain", market_id="K1"), _mkt("rain", market_id="P1"))
+    assert not verdict.passed
+
+
+def test_composite_rejects_superlative_proposition_mismatch():
+    # "score the MOST goals" (a ranking) is not "score A goal" (an occurrence) —
+    # a real live 64% phantom "edge". Both sides share "World Cup" so the ONLY
+    # distinguisher is the superlative — guards that the veto reads the RAW title
+    # ("most" is boilerplate and is stripped from the entity-token sets).
+    c = CompositeVerifier()
+    assert not c.verify(
+        _mkt("Will Christian Pulisic score the most goals at the 2026 World Cup"),
+        _mkt("Will Christian Pulisic score a goal at the World Cup"),
+    ).passed
+
+
+def test_composite_rejects_partial_scope_proposition():
+    # "win ANY county" (carry >=1 sub-unit) is a far weaker proposition than
+    # "win the [statewide] primary" (the aggregate) — a 27% live phantom "edge".
+    c = CompositeVerifier()
+    assert not c.verify(
+        _mkt("Will Xavier Becerra win any county in the 2026 California gubernatorial primary"),
+        _mkt("Will Xavier Becerra win the 2026 California gubernatorial primary"),
+    ).passed
+
+
+def test_partial_scope_does_not_overfire():
+    # "another country leave OPEC" must NOT trip the partial-scope veto (different
+    # verb/noun); a plain state-race match is unaffected.
+    c = CompositeVerifier()
+    assert c.verify(
+        _mkt("Will another country leave OPEC in 2026"),
+        _mkt("Will another country leave OPEC in 2026"),
+    ).passed
+
+
+def test_superlative_veto_only_on_shared_noun():
+    # "win the most SEATS" vs "win the ELECTION" ranks a noun the other side
+    # doesn't contest (parliamentary-equivalent) — must NOT be split, or recall
+    # drops. Contrast with the shared-noun goals case above which IS split.
+    c = CompositeVerifier()
+    assert c.verify(
+        _mkt("Will SPD win the 2026 Berlin state election"),
+        _mkt("Will SPD win the most seats in the 2026 Berlin state elections"),
+    ).passed
+
+
+def test_composite_keeps_at_least_threshold_pairs():
+    # "at least N" is a threshold phrasing (== "more than N"), NOT a superlative —
+    # must NOT be split by the qualifier veto.
+    c = CompositeVerifier()
+    assert c.verify(
+        _mkt("Will there be more than 4000 measles cases in 2026"),
+        _mkt("Will there be at least 4000 measles cases in 2026"),
+    ).passed
+
+
+def test_composite_carries_inverted_polarity_through():
+    c = CompositeVerifier()
+    verdict = c.verify(
+        _mkt("Will the Lakers win tonight"),
+        _mkt("Will the Lakers NOT win tonight"),
+    )
+    assert verdict.passed and verdict.polarity == INVERTED
+
+
+# --- No hardcoded special-cases regression ---------------------------------- #
+
+def test_no_hardcoded_subject_strings_in_utils():
+    """Phase A removed brittle whack-a-mole special-cases from utils.py."""
+    src = Path("kalshi_arbitrage/utils.py").read_text().lower()
+    for banned in ("powell", "leavepowell", "'fed'", "'chair'", "'admin'"):
+        assert banned not in src, f"hardcoded special-case {banned!r} still present in utils.py"

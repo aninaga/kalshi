@@ -195,6 +195,18 @@ class ArbitrageAnalysisSystem:
             synthetic_count = int(scan_report.get('synthetic_orderbook_opportunities', 0))
             real_count = int(scan_report.get('real_orderbook_opportunities', 0))
             print(f"Orderbook Quality: real={real_count}, synthetic={synthetic_count}")
+        ob = scan_report.get('orderbook_availability', {})
+        if isinstance(ob, dict) and (ob.get('kalshi_hits') or ob.get('polymarket_hits')):
+            kh, ke = ob.get('kalshi_hits', 0), ob.get('kalshi_empty', 0)
+            ph, pe = ob.get('polymarket_hits', 0), ob.get('polymarket_empty', 0)
+            print(f"Live Liquidity: Kalshi {kh-ke}/{kh} books with depth, "
+                  f"Polymarket {ph-pe}/{ph} books with depth")
+            if kh and ke == kh:
+                print("  ⚠️  All Kalshi books are EMPTY — detection starved on the "
+                      "Kalshi side (0 opps = no liquidity, not an efficient market).")
+            if ph and pe == ph:
+                print("  ⚠️  All Polymarket books are EMPTY — detection starved on "
+                      "the Polymarket side.")
         data_quality = scan_report.get('data_quality', {})
         if isinstance(data_quality, dict):
             pm_ws = data_quality.get('polymarket_websocket') or {}
@@ -400,9 +412,10 @@ def main():
     Config.REQUIRE_REAL_ORDERBOOKS_FOR_ESTIMATED = not args.allow_synthetic_orderbooks
     Config.CONFIRMED_PNL_INCLUDE_SIMULATION = args.count_simulated_as_confirmed
 
-    # WebSocket-only mode is always enabled - remove REST fallback option
+    # WebSocket-only mode is always enabled for live streaming, but keep REST
+    # orderbook fallback ON: a batch scan barely warms the WS feed, so WS-only
+    # would starve single scans of books (see Config.STREAM_FALLBACK_TO_REST).
     Config.REALTIME_ENABLED = True
-    Config.STREAM_FALLBACK_TO_REST = False
     
     # Ensure WebSocket connections are enabled (can be controlled via CLI)
     if args.realtime or not hasattr(args, 'realtime'):

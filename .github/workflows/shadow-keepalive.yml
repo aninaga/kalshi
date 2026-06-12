@@ -1,0 +1,71 @@
+name: shadow-keepalive
+# Keeps the shadow capture running without a live Claude session or EC2 box:
+# every 6 hours, restore the ledger from data_backups/, run the monitor for
+# ~5.5h (GitHub-hosted job ceiling is 6h), then commit the updated ledger
+# back to the branch. Concurrency group prevents overlapping runs.
+#
+# NOTE: this is detection/recording only — no credentials, no orders. It is
+# a stopgap for 24/7 capture until the EC2 deploy (deploy/README.md); on a
+# private repo it consumes ~720 runner-hours/month beyond the free tier.
+
+on:
+  schedule:
+    - cron: "15 */6 * * *"
+  workflow_dispatch: {}
+
+concurrency:
+  group: shadow-keepalive
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  shadow:
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: claude/codebase-overview-QycoJ
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install
+        run: pip install -e . --quiet
+
+      - name: Restore ledger from backups
+        run: |
+          mkdir -p market_data/shadow
+          cp data_backups/shadow/ledger.jsonl market_data/shadow/ 2>/dev/null || true
+          cp data_backups/shadow/watchlist.json market_data/shadow/ 2>/dev/null || true
+
+      - name: Run shadow monitor (~5.4h)
+        env:
+          EXECUTION_MODE: paper
+          PYTHONUNBUFFERED: "1"
+        run: |
+          python -m tools.monitor_arb \
+            --interval 20 --snapshot-every 60 --min-net-edge 0.003 \
+            --ledger market_data/shadow/ledger.jsonl \
+            --watchlist-cache market_data/shadow/watchlist.json \
+            --duration 19400
+
+      - name: Commit updated ledger
+        if: always()
+        run: |
+          cp market_data/shadow/ledger.jsonl data_backups/shadow/ 2>/dev/null || true
+          cp market_data/shadow/watchlist.json data_backups/shadow/ 2>/dev/null || true
+          git config user.name "shadow-keepalive[bot]"
+          git config user.email "actions@users.noreply.github.com"
+          git add data_backups/shadow/
+          git diff --cached --quiet && exit 0
+          git commit -m "shadow-keepalive: ledger snapshot $(date -u +%Y-%m-%dT%H:%MZ) [skip ci]"
+          # Rebase in case a live session pushed while this job ran.
+          for i in 1 2 3; do
+            git pull --rebase origin claude/codebase-overview-QycoJ && \
+            git push origin HEAD:claude/codebase-overview-QycoJ && break
+            sleep $((i*5))
+          done

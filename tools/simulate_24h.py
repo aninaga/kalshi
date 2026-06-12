@@ -61,15 +61,18 @@ def kalshi_taker_fee(price: float, size: float) -> float:
 
 
 def polymarket_taker_fee(price: float, size: float, fee_rate_bps: int = 200) -> float:
-    """Polymarket quadratic fee model."""
+    """Official Polymarket parabolic taker fee: C × (bps/10000) × p × (1−p).
+
+    Matches FeeModel.polymarket_taker_fee / the research harness (verified
+    against docs.polymarket.com/trading/fees, 2026-06-09).
+    """
     if fee_rate_bps <= 0:
         return 0.0
     p = Decimal(str(price))
     c = Decimal(str(size))
-    trade_value = p * c
-    fee_rate = Decimal(fee_rate_bps) / Decimal('4000')
-    fee = trade_value * fee_rate * (p * (Decimal('1') - p)) ** Decimal('2')
-    fee = fee.quantize(Decimal('0.0001'), rounding=ROUND_HALF_UP)
+    fee_rate = Decimal(fee_rate_bps) / Decimal('10000')
+    fee = c * fee_rate * p * (Decimal('1') - p)
+    fee = fee.quantize(Decimal('0.00001'), rounding=ROUND_HALF_UP)
     return float(fee)
 
 

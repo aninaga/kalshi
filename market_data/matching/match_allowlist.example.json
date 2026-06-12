@@ -1,0 +1,19 @@
+{
+  "_comment": "Operator allow/deny list of verified cross-venue pairs. Copy to match_allowlist.json and edit. In live mode (MATCH_REQUIRE_ALLOWLIST_FOR_LIVE=true) only 'approved' pairs are tradeable. 'polarity' is aligned (Kalshi-YES == PM YES token) or inverted (Kalshi-YES == PM NO token).",
+  "approved": [
+    {
+      "kalshi": "EXAMPLE-KALSHI-TICKER",
+      "polymarket": "0xexample_polymarket_token_id",
+      "polarity": "aligned",
+      "verified_by": "operator@example.com",
+      "note": "manually confirmed same resolution criteria + close date"
+    }
+  ],
+  "denied": [
+    {
+      "kalshi": "BAD-PAIR-TICKER",
+      "polymarket": "0xbad_token_id",
+      "note": "different resolution source — never trade"
+    }
+  ]
+}

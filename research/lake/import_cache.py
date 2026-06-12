@@ -45,7 +45,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from nba_odds_study import kalshi_hist, polymarket_hist  # noqa: E402
+from research.nba_odds_study import kalshi_hist, polymarket_hist  # noqa: E402
 
 from research.cache_io import list_cache, PARQUET_DIR  # noqa: E402
 from research.lake.schema import (  # noqa: E402

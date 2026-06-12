@@ -46,9 +46,33 @@ class KalshiClient:
             return float(value)
         except (TypeError, ValueError):
             return None
-    
-    def _normalize_kalshi_levels(self, levels: List[Any]) -> List[Dict[str, float]]:
-        """Normalize Kalshi orderbook levels to {price, size} in dollars."""
+
+    @staticmethod
+    def _fp(market: Dict[str, Any], base: str, default: float = 0.0) -> float:
+        """Read a Kalshi field that migrated to '<base>_fp' / '<base>_dollars'.
+
+        Kalshi deprecated the flat names (volume, yes_bid, last_price, ...) to
+        return null and moved the values to fixed-point ('<base>_fp', whole
+        counts as strings) and dollar ('<base>_dollars', already 0..1 as strings)
+        fields. Tries new names first, falls back to the legacy name, parses
+        strings to float, never raises.
+        """
+        for key in (f"{base}_fp", f"{base}_dollars", base):
+            if market.get(key) is not None:
+                try:
+                    return float(market[key])
+                except (TypeError, ValueError):
+                    continue
+        return default
+
+    def _normalize_kalshi_levels(self, levels: List[Any],
+                                 already_dollars: bool = False) -> List[Dict[str, float]]:
+        """Normalize Kalshi orderbook levels to {price, size} in dollars.
+
+        ``already_dollars=True`` for the migrated ``orderbook_fp`` arrays whose
+        prices are already in dollars (0..1); the legacy flat ``yes``/``no``
+        arrays were in cents and still get converted.
+        """
         normalized = []
         if not levels:
             return normalized
@@ -65,7 +89,8 @@ class KalshiClient:
                 size = float(size)
             except (TypeError, ValueError):
                 continue
-            price = self._cents_to_dollars(price, default=0.0)
+            if not already_dollars:
+                price = self._cents_to_dollars(price, default=0.0)
             normalized.append({'price': price, 'size': size})
         return normalized
         
@@ -168,7 +193,7 @@ class KalshiClient:
         import aiohttp
         
         try:
-            async with aiohttp.ClientSession() as session:
+            async with aiohttp.ClientSession(headers=Config.default_headers()) as session:
                 # Get all events first
                 events_url = f"{Config.KALSHI_API_BASE}/events"
                 async with session.get(events_url) as response:
@@ -187,7 +212,9 @@ class KalshiClient:
                 # Paginate through markets with reasonable limit for performance
                 cursor = None
                 page_count = 0
-                max_pages = 50  # Reasonable limit: 50 pages * 200 = 10,000 markets max
+                # Loop until the cursor is exhausted; the cap is just a safety
+                # bound so a runaway cursor can't spin forever.
+                max_pages = Config.KALSHI_MAX_DISCOVERY_PAGES
                 rate_limit_retries = 0
                 max_rate_limit_retries = 8
                 timeout = aiohttp.ClientTimeout(total=15)  # 15 second timeout per request
@@ -314,18 +341,24 @@ class KalshiClient:
         """
         import aiohttp
 
+        if not Config.KALSHI_EVENT_DISCOVERY_ENABLED:
+            return
+
         try:
-            # Step 1: Fetch all open events (paginated)
+            # Step 1: Fetch open events (paginated to completion).
             all_events = []
             cursor = None
             timeout = aiohttp.ClientTimeout(total=15)
-            for _ in range(10):
+            for _ in range(Config.KALSHI_MAX_EVENT_PAGES):
                 params = {'limit': 200, 'status': 'open'}
                 if cursor:
                     params['cursor'] = cursor
                 async with session.get(
                     f"{Config.KALSHI_API_BASE}/events", params=params, timeout=timeout
                 ) as resp:
+                    if resp.status == 429:
+                        await asyncio.sleep(2)
+                        continue
                     if resp.status != 200:
                         break
                     data = await resp.json()
@@ -345,57 +378,70 @@ class KalshiClient:
                 et = e.get('event_ticker', '')
                 if not et or 'MULTIGAME' in et.upper():
                     continue
-                series_prefix = et.split('-')[0]
-                series_set.add(series_prefix)
+                series_set.add(et.split('-')[0])
 
             logger.info(f"Event-based discovery: {len(series_set)} unique series to query")
 
-            # Step 3: For each series, fetch one page of markets (limit=200)
+            # Step 3: Fetch markets per series with BOUNDED CONCURRENCY (the old
+            # sequential 0.3s-per-series loop took ~2min for ~370 series and was
+            # the matching bottleneck). A semaphore keeps us under Kalshi's rate
+            # limit while running several series in flight.
+            sem = asyncio.Semaphore(Config.KALSHI_EVENT_SERIES_CONCURRENCY)
             new_count = 0
-            rate_limit_backoff = 0.3  # seconds between requests
-            for series in sorted(series_set):
-                try:
-                    params = {'limit': 200, 'series_ticker': series}
-                    async with session.get(
-                        f"{Config.KALSHI_API_BASE}/markets",
-                        params=params, timeout=timeout,
-                    ) as resp:
-                        if resp.status == 429:
-                            await asyncio.sleep(2)
+            sweep_deadline = time.monotonic() + Config.KALSHI_EVENT_DISCOVERY_BUDGET_SECONDS
+
+            async def _fetch_series(series):
+                nonlocal new_count
+                if time.monotonic() > sweep_deadline:
+                    return  # time-boxed: don't blow the scan budget
+                async with sem:
+                    if time.monotonic() > sweep_deadline:
+                        return
+                    for attempt in range(4):
+                        try:
+                            params = {'limit': 200, 'series_ticker': series}
+                            async with session.get(
+                                f"{Config.KALSHI_API_BASE}/markets",
+                                params=params, timeout=timeout,
+                            ) as resp:
+                                if resp.status == 429:
+                                    await asyncio.sleep(1.5 * (attempt + 1))
+                                    continue
+                                if resp.status != 200:
+                                    return
+                                data = await resp.json()
+                                break
+                        except asyncio.TimeoutError:
+                            return
+                        except Exception as e:
+                            logger.debug(f"Error fetching series {series}: {e}")
+                            return
+                    else:
+                        return  # exhausted retries (kept getting 429)
+
+                    for market in data.get('markets', []):
+                        ticker = market.get('ticker', '')
+                        if not ticker or 'MULTIGAME' in ticker.upper():
                             continue
-                        if resp.status != 200:
+                        if ticker in self.markets_cache:
                             continue
-                        data = await resp.json()
-                        markets = data.get('markets', [])
-                        for market in markets:
-                            ticker = market.get('ticker', '')
-                            if not ticker or 'MULTIGAME' in ticker.upper():
-                                continue
-                            if ticker in self.markets_cache:
-                                continue  # already have it
-                            self.discovered_tickers.append(ticker)
-                            self._rest_discovered_tickers.add(ticker)
-                            self.markets_cache[ticker] = {
-                                'id': market.get('id'),
-                                'ticker': ticker,
-                                'title': market.get('title', ticker),
-                                'platform': 'kalshi',
-                                'status': market.get('status', 'active'),
-                                'close_time': market.get('close_time'),
-                                'clean_title': self._clean_title(
-                                    market.get('title', ticker)
-                                ),
-                                'raw_data': market,
-                                'source': 'rest_event',
-                                'last_updated': time.time(),
-                            }
-                            new_count += 1
-                except asyncio.TimeoutError:
-                    continue
-                except Exception as e:
-                    logger.debug(f"Error fetching series {series}: {e}")
-                    continue
-                await asyncio.sleep(rate_limit_backoff)
+                        self.discovered_tickers.append(ticker)
+                        self._rest_discovered_tickers.add(ticker)
+                        self.markets_cache[ticker] = {
+                            'id': market.get('id'),
+                            'ticker': ticker,
+                            'title': market.get('title', ticker),
+                            'platform': 'kalshi',
+                            'status': market.get('status', 'active'),
+                            'close_time': market.get('close_time'),
+                            'clean_title': self._clean_title(market.get('title', ticker)),
+                            'raw_data': market,
+                            'source': 'rest_event',
+                            'last_updated': time.time(),
+                        }
+                        new_count += 1
+
+            await asyncio.gather(*(_fetch_series(s) for s in sorted(series_set)))
 
             logger.info(
                 f"Event-based discovery added {new_count} individual markets "
@@ -455,7 +501,7 @@ class KalshiClient:
             if not market:
                 return None
 
-            async with aiohttp.ClientSession() as session:
+            async with aiohttp.ClientSession(headers=Config.default_headers()) as session:
                 # Kalshi addresses markets by TICKER (our cache key), not the
                 # internal numeric id — mirror the orderbook REST fallback below.
                 # Using market.get('id') previously suppressed this fallback
@@ -465,16 +511,23 @@ class KalshiClient:
                     if response.status == 200:
                         data = await response.json()
                         market_data = data.get('market', {})
-                        
-                        # Extract price information
-                        yes_bid = market_data.get('yes_bid', 0)
-                        yes_ask = market_data.get('yes_ask', 0) 
-                        
+
+                        # Migrated field names: yes_bid_dollars / yes_ask_dollars
+                        # are ALREADY in dollars (0..1) — do NOT divide by 100. The
+                        # _fp helper falls back to legacy cents names, which the
+                        # >1 guard below normalizes.
+                        yes_bid = self._fp(market_data, 'yes_bid', default=0.0)
+                        yes_ask = self._fp(market_data, 'yes_ask', default=0.0)
+                        if yes_bid > 1:
+                            yes_bid = yes_bid / 100.0
+                        if yes_ask > 1:
+                            yes_ask = yes_ask / 100.0
+
                         prices = {
-                            'yes_price': yes_bid / 100.0 if yes_bid else 0.5,
-                            'no_price': (100 - yes_ask) / 100.0 if yes_ask else 0.5,
-                            'yes_ask': yes_ask / 100.0 if yes_ask else 0.5,
-                            'yes_bid': yes_bid / 100.0 if yes_bid else 0.5,
+                            'yes_price': yes_bid if yes_bid else 0.5,
+                            'no_price': (1.0 - yes_ask) if yes_ask else 0.5,
+                            'yes_ask': yes_ask if yes_ask else 0.5,
+                            'yes_bid': yes_bid if yes_bid else 0.5,
                             'timestamp': time.time(),
                             'source': 'rest_fallback'
                         }
@@ -488,16 +541,28 @@ class KalshiClient:
         
         return None
     
+    def _book_is_fresh(self, book) -> bool:
+        """Reuse a cached book only if recent enough (see PolymarketClient)."""
+        if not isinstance(book, dict):
+            return False
+        ts = book.get('timestamp')
+        if ts is None:
+            return True
+        max_age = getattr(Config, 'ESTIMATED_MAX_ORDERBOOK_AGE_SECONDS', 30)
+        return (time.time() - float(ts)) <= max_age
+
     async def get_market_orderbook(self, market_ticker: str) -> Optional[Dict[str, Any]]:
         """Get market orderbook from cache, with REST fallback."""
         result = self.orderbook_cache.get(market_ticker)
-        if result is not None:
+        if result is not None and self._book_is_fresh(result):
             return result
-        # REST fallback (budget-limited to avoid rate limits)
+        # Cache miss or STALE cached book → fetch fresh (budget-limited).
         if Config.ORDERBOOK_REST_FALLBACK and self._orderbook_rest_budget > 0:
             self._orderbook_rest_budget -= 1
-            return await self._fetch_orderbook_rest(market_ticker)
-        return None
+            fresh = await self._fetch_orderbook_rest(market_ticker)
+            if fresh is not None:
+                return fresh
+        return result  # fall back to stale rather than nothing
 
     async def _fetch_orderbook_rest(self, market_ticker: str) -> Optional[Dict[str, Any]]:
         """Fetch orderbook via REST API as fallback when WebSocket cache misses."""
@@ -512,37 +577,11 @@ class KalshiClient:
 
                 url = f"{Config.KALSHI_API_BASE}/markets/{market_ticker}/orderbook"
                 if self._orderbook_rest_session is None or self._orderbook_rest_session.closed:
-                    self._orderbook_rest_session = aiohttp.ClientSession()
+                    self._orderbook_rest_session = aiohttp.ClientSession(headers=Config.default_headers())
                 async with self._orderbook_rest_session.get(url) as resp:
                         if resp.status == 200:
                             data = await resp.json()
-                            orderbook = data.get('orderbook', data)
-                            # Kalshi REST format: yes/no are flat arrays [[price_cents, qty], ...]
-                            # yes = resting bids for YES (ascending price)
-                            # no  = resting bids for NO  (ascending price)
-                            # A NO bid at X cents == YES ask at (100-X) cents
-                            yes_raw = orderbook.get('yes')  # may be list or None
-                            no_raw = orderbook.get('no')    # may be list or None
-
-                            yes_bids = self._normalize_kalshi_levels(yes_raw if isinstance(yes_raw, list) else [])
-                            no_bids = self._normalize_kalshi_levels(no_raw if isinstance(no_raw, list) else [])
-
-                            # Derive YES asks from NO bids: NO bid at X → YES ask at (1-X)
-                            yes_asks = [{'price': round(1.0 - lvl['price'], 4), 'size': lvl['size']}
-                                        for lvl in no_bids if lvl['price'] > 0.0]
-
-                            # Derive NO asks from YES bids: YES bid at X → NO ask at (1-X)
-                            no_asks = [{'price': round(1.0 - lvl['price'], 4), 'size': lvl['size']}
-                                       for lvl in yes_bids if lvl['price'] > 0.0]
-
-                            normalized = {
-                                'yes_asks': yes_asks,
-                                'yes_bids': yes_bids,
-                                'no_asks': no_asks,
-                                'no_bids': no_bids,
-                                'timestamp': time.time(),
-                                'source': 'rest_fallback'
-                            }
+                            normalized = self._parse_orderbook_payload(data)
                             self.orderbook_cache[market_ticker] = normalized
                             return normalized
                         else:
@@ -551,6 +590,49 @@ class KalshiClient:
         except Exception as e:
             logger.debug(f"REST orderbook fetch error for {market_ticker}: {e}")
             return None
+
+    def _parse_orderbook_payload(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Parse a Kalshi REST orderbook response into yes/no asks+bids (dollars).
+
+        Kalshi migrated the structure to nested fixed-point/dollars:
+            data['orderbook']['orderbook_fp'] = {
+              'yes_dollars': [[price_dollars_str, size_str], ...],  # YES bids
+              'no_dollars':  [[price_dollars_str, size_str], ...],  # NO  bids
+            }
+        Prices are ALREADY in dollars (0..1) — no /100. A NO bid at X == a YES
+        ask at (1-X). Falls back to the legacy flat 'yes'/'no' cents arrays only
+        when the new structure is absent (graceful, never crashes).
+        """
+        orderbook = data.get('orderbook', data) or {}
+        ob_fp = orderbook.get('orderbook_fp') or {}
+        yes_raw = ob_fp.get('yes_dollars')
+        no_raw = ob_fp.get('no_dollars')
+        legacy = yes_raw is None and no_raw is None
+        if legacy:
+            # Pre-migration shape: flat 'yes'/'no' arrays in cents.
+            yes_raw = orderbook.get('yes')
+            no_raw = orderbook.get('no')
+
+        yes_bids = self._normalize_kalshi_levels(
+            yes_raw if isinstance(yes_raw, list) else [], already_dollars=not legacy)
+        no_bids = self._normalize_kalshi_levels(
+            no_raw if isinstance(no_raw, list) else [], already_dollars=not legacy)
+
+        # Derive YES asks from NO bids: NO bid at X → YES ask at (1-X)
+        yes_asks = [{'price': round(1.0 - lvl['price'], 4), 'size': lvl['size']}
+                    for lvl in no_bids if lvl['price'] > 0.0]
+        # Derive NO asks from YES bids: YES bid at X → NO ask at (1-X)
+        no_asks = [{'price': round(1.0 - lvl['price'], 4), 'size': lvl['size']}
+                   for lvl in yes_bids if lvl['price'] > 0.0]
+
+        return {
+            'yes_asks': yes_asks,
+            'yes_bids': yes_bids,
+            'no_asks': no_asks,
+            'no_bids': no_bids,
+            'timestamp': time.time(),
+            'source': 'rest_fallback',
+        }
 
 class PolymarketClient:
     """Hybrid Polymarket client: REST bootstrap + WebSocket real-time data."""
@@ -568,6 +650,7 @@ class PolymarketClient:
         self._orderbook_rest_last_call = 0.0
         self._orderbook_rest_session = None
         self._orderbook_rest_budget = Config.ORDERBOOK_REST_BUDGET_PER_SCAN
+        self.catalog_truncated = False  # set True if REST discovery is incomplete
         self.stream_quality_stats = {
             'price_updates_received': 0,
             'price_updates_accepted': 0,
@@ -660,123 +743,154 @@ class PolymarketClient:
             return False
     
     async def _bootstrap_markets_via_rest(self):
-        """Bootstrap market discovery using REST API with full pagination."""
+        """Bootstrap market discovery via the CLOB sampling-markets endpoint.
+
+        We use CLOB ``/sampling-markets`` (cursor-paginated) rather than the
+        Gamma ``/markets`` endpoint because:
+          * Gamma caps ``limit`` at 100 and 422s on deep ``offset`` pagination,
+            so it could only ever surface ~100 markets — the root cause of the
+            bot seeing 100 markets and finding 0 arbs.
+          * sampling-markets returns ONLY active, order-book-enabled markets —
+            i.e. the actually-tradeable arbitrage universe (~5,600) — with the
+            ``question``/``description``/``end_date_iso``/``tokens`` fields the
+            matcher, verifier, and executor all need, in ~1.5s.
+        """
         import aiohttp
-        import json
-        
+
         try:
-            # Use Polymarket Gamma API to discover markets with pagination
-            url = f"{Config.POLYMARKET_GAMMA_BASE}/markets"
+            url = f"{Config.POLYMARKET_CLOB_BASE}/sampling-markets"
             all_markets = []
-            offset = 0
-            limit = 500  # Max limit per request
-            
+            cursor = ""
+            page = 0
+            max_pages = Config.POLYMARKET_MAX_DISCOVERY_PAGES
+
             timeout = aiohttp.ClientTimeout(total=30)
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                while True:
-                    params = {
-                        "active": "true",
-                        "closed": "false", 
-                        "limit": limit,
-                        "offset": offset
-                    }
-                    
-                    try:
-                        async with session.get(url, params=params) as response:
-                            response.raise_for_status()
-                            markets_data = await response.json()
-                        
-                        if not markets_data or not isinstance(markets_data, list) or len(markets_data) == 0:
+            async with aiohttp.ClientSession(timeout=timeout, headers=Config.default_headers()) as session:
+                while page < max_pages:
+                    params = {"next_cursor": cursor} if cursor else {}
+
+                    # Retry/backoff per page; fail LOUD on exhaustion rather than
+                    # silently returning a partial catalog as "end of data".
+                    payload = None
+                    last_err = None
+                    for attempt in range(Config.DISCOVERY_FETCH_RETRIES):
+                        try:
+                            async with session.get(url, params=params) as response:
+                                if response.status == 403:
+                                    raise RuntimeError(
+                                        "Polymarket CLOB 403 (Cloudflare) — check User-Agent header"
+                                    )
+                                response.raise_for_status()
+                                payload = await response.json()
                             break
-                        
-                        all_markets.extend(markets_data)
-                        logger.info(f"Fetched {len(markets_data)} markets at offset {offset}, total: {len(all_markets)}")
-                        
-                        # If we got fewer than the limit, we've reached the end
-                        if len(markets_data) < limit:
-                            break
-                            
-                        offset += limit
-                        
-                    except Exception as e:
-                        logger.warning(f"Error fetching markets at offset {offset}: {e}")
+                        except Exception as e:
+                            last_err = e
+                            backoff = 2 ** attempt
+                            logger.warning(
+                                "Polymarket discovery page=%d attempt %d/%d failed: %s; retrying in %ds",
+                                page, attempt + 1, Config.DISCOVERY_FETCH_RETRIES, e, backoff,
+                            )
+                            await asyncio.sleep(backoff)
+
+                    if payload is None:
+                        logger.error(
+                            "Polymarket discovery FAILED at page=%d after %d retries: %s. "
+                            "Catalog INCOMPLETE (%d markets so far).",
+                            page, Config.DISCOVERY_FETCH_RETRIES, last_err, len(all_markets),
+                        )
+                        self.catalog_truncated = True
                         break
-            
+
+                    rows = payload.get("data", []) if isinstance(payload, dict) else []
+                    if not rows:
+                        break
+                    all_markets.extend(rows)
+                    page += 1
+                    cursor = payload.get("next_cursor", "") if isinstance(payload, dict) else ""
+                    # 'LTE=' is CLOB's base64 end-of-list sentinel.
+                    if not cursor or cursor == "LTE=":
+                        break
+
+                if page >= max_pages:
+                    logger.warning(
+                        "Polymarket discovery hit the %d-page cap (%d markets); "
+                        "raise POLYMARKET_MAX_DISCOVERY_PAGES if the catalog is larger.",
+                        max_pages, len(all_markets),
+                    )
+
             if not all_markets:
-                logger.warning("No markets returned from Polymarket REST API")
+                logger.error(
+                    "No markets from Polymarket CLOB API — discovery failed; matching "
+                    "will have nothing to compare against."
+                )
                 return
-            
-            markets_data = all_markets
-            
-            # Process and cache markets
-            for market in markets_data:
+
+            logger.info("Polymarket REST discovery complete: %d markets", len(all_markets))
+
+            # Process and cache markets (CLOB sampling-markets schema).
+            for market in all_markets:
                 try:
-                    # Parse market data
-                    market_id = market.get('id')
-                    question = market.get('question', '')
-                    outcomes = market.get('outcomes', '[]')
-                    clob_token_ids = market.get('clobTokenIds', '[]')
-                    outcome_prices = market.get('outcomePrices', '[]')
-                    
-                    # Parse JSON strings if needed
-                    if isinstance(outcomes, str):
-                        outcomes = json.loads(outcomes)
-                    if isinstance(clob_token_ids, str):
-                        clob_token_ids = json.loads(clob_token_ids)
-                    if isinstance(outcome_prices, str):
-                        outcome_prices = json.loads(outcome_prices)
-                    
-                    if not all([market_id, question, outcomes, clob_token_ids]):
+                    if not market.get("enable_order_book") or market.get("closed"):
                         continue
-                    
-                    # Store market data
+                    market_id = market.get("condition_id")
+                    question = market.get("question", "")
+                    tokens = market.get("tokens", []) or []
+                    if not market_id or not question or not tokens:
+                        continue
+
+                    outcomes = [t.get("outcome") for t in tokens]
+                    clob_token_ids = [t.get("token_id") for t in tokens]
+
                     self.markets_cache[market_id] = {
-                        'id': market_id,
-                        'title': question,
-                        'clean_title': self._clean_title(question),
-                        'platform': 'polymarket',
-                        'status': 'active',
-                        'active': True,  # Explicitly set as active since we filter for active markets
-                        'outcomes': outcomes,
-                        'clob_token_ids': clob_token_ids,
-                        'outcome_prices': outcome_prices,
-                        'raw_data': market
+                        "id": market_id,
+                        "title": question,
+                        "clean_title": self._clean_title(question),
+                        "platform": "polymarket",
+                        "status": "active",
+                        "active": True,
+                        "outcomes": outcomes,
+                        "clob_token_ids": clob_token_ids,
+                        # CLOB exposes resolution rules in 'description' and the
+                        # close date in 'end_date_iso' — feed both through so the
+                        # ResolutionCriteriaVerifier can use them.
+                        "description": market.get("description", ""),
+                        "endDate": market.get("end_date_iso"),
+                        "raw_data": market,
                     }
-                    
-                    # Store asset IDs for WebSocket subscription
+
                     self.asset_ids.extend(clob_token_ids)
-                    
-                    # Store initial price data
-                    for i, (outcome, price_str, token_id) in enumerate(zip(outcomes, outcome_prices, clob_token_ids)):
-                        if market_id not in self.price_cache:
-                            self.price_cache[market_id] = {}
-                        
-                        price = self._safe_float(price_str)
-                        if not self._is_valid_probability(price):
+
+                    for token in tokens:
+                        token_id = token.get("token_id")
+                        outcome = token.get("outcome")
+                        if not token_id:
                             continue
-                        # (B11) outcomePrices is a single last/mid price, NOT an
-                        # executable bid/ask. Flag executable=False so nothing
-                        # mistakes buy_price==sell_price for a real spread.
-                        self.price_cache[market_id][token_id] = {
-                            'outcome': outcome,
-                            'buy_price': price,
-                            'sell_price': price,
-                            'mid_price': price,
-                            'last_price': price,
-                            'executable': False,
-                            'timestamp': time.time()
-                        }
+                        price = self._safe_float(token.get("price"))
                         self.token_to_market[token_id] = market_id
                         self.token_outcome_map[token_id] = outcome
-                
+                        if not self._is_valid_probability(price):
+                            continue
+                        # The token 'price' is a last/mid price, NOT an executable
+                        # bid/ask — flag executable=False so nothing mistakes
+                        # buy==sell for a real spread (real books come from WS/REST).
+                        self.price_cache.setdefault(market_id, {})[token_id] = {
+                            "outcome": outcome,
+                            "buy_price": price,
+                            "sell_price": price,
+                            "mid_price": price,
+                            "last_price": price,
+                            "executable": False,
+                            "timestamp": time.time(),
+                        }
+
                 except Exception as e:
                     logger.debug(f"Error processing Polymarket market: {e}")
                     continue
-            
+
             self.asset_ids = list(dict.fromkeys(asset_id for asset_id in self.asset_ids if asset_id))
             logger.info(f"Bootstrapped {len(self.markets_cache)} Polymarket markets via REST API")
             logger.info(f"Collected {len(self.asset_ids)} unique asset IDs for WebSocket subscription")
-            
+
         except Exception as e:
             logger.error(f"Failed to bootstrap Polymarket markets: {e}")
     
@@ -863,77 +977,82 @@ class PolymarketClient:
         return self.price_cache.get(market_id, {})
     
     async def refresh_markets(self):
-        """Re-fetch markets from REST API, merging new ones into existing cache."""
+        """Re-fetch the CLOB sampling-markets catalog, upserting into the cache.
+
+        Uses the same CLOB cursor source as the bootstrap (NOT Gamma — which
+        caps at 100 and would falsely tombstone the other ~5,500 markets).
+        Snapshots the cache before fetching so it can tombstone markets that
+        dropped out of the active set, but only after a COMPLETE sweep.
+        """
         import aiohttp
-        import json as _json
         try:
-            logger.info("Refreshing Polymarket markets from REST API...")
-            url = f"{Config.POLYMARKET_GAMMA_BASE}/markets"
-            added = 0
-            offset = 0
-            limit = 500
+            logger.info("Refreshing Polymarket markets from CLOB sampling-markets...")
+            url = f"{Config.POLYMARKET_CLOB_BASE}/sampling-markets"
+            cursor = ""
+            page = 0
+            max_pages = Config.POLYMARKET_MAX_DISCOVERY_PAGES
+            added = updated = 0
+            seen_ids = set()
+            sweep_complete = False
             refresh_start = time.monotonic()
-            max_refresh_seconds = 120  # 2 minute hard cap
+            max_refresh_seconds = 120
+
             timeout = aiohttp.ClientTimeout(total=30)
-            seen_ids = set()        # (B7) for tombstoning markets no longer returned
-            updated = 0
-            sweep_complete = False  # only tombstone after a FULL successful sweep
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                while True:
+            async with aiohttp.ClientSession(timeout=timeout, headers=Config.default_headers()) as session:
+                while page < max_pages:
                     if time.monotonic() - refresh_start > max_refresh_seconds:
-                        logger.warning(f"Polymarket refresh timed out after {max_refresh_seconds}s at offset {offset}")
+                        logger.warning(f"Polymarket refresh timed out after {max_refresh_seconds}s")
                         break
-                    params = {"active": "true", "closed": "false", "limit": limit, "offset": offset}
+                    params = {"next_cursor": cursor} if cursor else {}
                     try:
                         async with session.get(url, params=params) as response:
                             response.raise_for_status()
-                            markets_data = await response.json()
-                        if not markets_data or not isinstance(markets_data, list) or len(markets_data) == 0:
-                            break
-                        for market in markets_data:
-                            market_id = market.get('id')
-                            if not market_id:
-                                continue
-                            question = market.get('question', '')
-                            outcomes = market.get('outcomes', '[]')
-                            clob_token_ids = market.get('clobTokenIds', '[]')
-                            outcome_prices = market.get('outcomePrices', '[]')
-                            if isinstance(outcomes, str):
-                                outcomes = _json.loads(outcomes)
-                            if isinstance(clob_token_ids, str):
-                                clob_token_ids = _json.loads(clob_token_ids)
-                            if isinstance(outcome_prices, str):
-                                outcome_prices = _json.loads(outcome_prices)
-                            if not all([market_id, question, outcomes, clob_token_ids]):
-                                continue
-                            seen_ids.add(market_id)
-                            is_new = market_id not in self.markets_cache
-                            # (B7) Upsert — refresh mutable fields for EXISTING markets
-                            # too (prices/outcomes/tokens/raw), not just insert-if-absent.
-                            self.markets_cache[market_id] = {
-                                'id': market_id, 'title': question,
-                                'clean_title': self._clean_title(question),
-                                'platform': 'polymarket', 'status': 'active', 'active': True,
-                                'outcomes': outcomes, 'clob_token_ids': clob_token_ids,
-                                'outcome_prices': outcome_prices, 'raw_data': market
-                            }
-                            for outcome, price_str, token_id in zip(outcomes, outcome_prices, clob_token_ids):
-                                self.token_to_market[token_id] = market_id
-                                self.token_outcome_map[token_id] = outcome
-                            if is_new:
-                                added += 1
-                            else:
-                                updated += 1
-                        if len(markets_data) < limit:
-                            sweep_complete = True
-                            break
-                        offset += limit
+                            payload = await response.json()
                     except Exception as e:
-                        logger.warning(f"Error during Polymarket refresh at offset {offset}: {e}")
+                        logger.warning(f"Error during Polymarket refresh page {page}: {e}")
                         break
-            # (B7) Tombstone: after a COMPLETE sweep, mark cached PM markets not
-            # seen this pass as inactive (closed/resolved). Skip on a partial
-            # sweep (timeout/error) to avoid mass false tombstoning.
+
+                    rows = payload.get("data", []) if isinstance(payload, dict) else []
+                    if not rows:
+                        sweep_complete = True
+                        break
+                    for market in rows:
+                        if not market.get("enable_order_book") or market.get("closed"):
+                            continue
+                        market_id = market.get("condition_id")
+                        question = market.get("question", "")
+                        tokens = market.get("tokens", []) or []
+                        if not market_id or not question or not tokens:
+                            continue
+                        seen_ids.add(market_id)
+                        is_new = market_id not in self.markets_cache
+                        outcomes = [t.get("outcome") for t in tokens]
+                        clob_token_ids = [t.get("token_id") for t in tokens]
+                        self.markets_cache[market_id] = {
+                            "id": market_id, "title": question,
+                            "clean_title": self._clean_title(question),
+                            "platform": "polymarket", "status": "active", "active": True,
+                            "outcomes": outcomes, "clob_token_ids": clob_token_ids,
+                            "description": market.get("description", ""),
+                            "endDate": market.get("end_date_iso"),
+                            "raw_data": market,
+                        }
+                        for token in tokens:
+                            tid = token.get("token_id")
+                            if tid:
+                                self.token_to_market[tid] = market_id
+                                self.token_outcome_map[tid] = token.get("outcome")
+                        added += int(is_new)
+                        updated += int(not is_new)
+
+                    page += 1
+                    cursor = payload.get("next_cursor", "") if isinstance(payload, dict) else ""
+                    if not cursor or cursor == "LTE=":
+                        sweep_complete = True
+                        break
+
+            # Tombstone markets that dropped out of the active set — only after a
+            # complete sweep, to avoid mass false tombstoning on a partial fetch.
             tombstoned = 0
             if sweep_complete:
                 for _mid, _m in self.markets_cache.items():
@@ -950,18 +1069,36 @@ class PolymarketClient:
         except Exception as e:
             logger.error(f"Failed to refresh Polymarket markets: {e}")
 
+    def _book_is_fresh(self, book) -> bool:
+        """A cached book is reusable only if recent enough for the estimated path.
+
+        Without this, a book cached early in a scan goes stale (>max age) but is
+        still RETURNED from cache here, then rejected by the caller's freshness
+        gate — yielding None and a phantom 'no orderbook'. Treating a stale
+        cached book as a miss forces a fresh REST re-fetch instead.
+        """
+        if not isinstance(book, dict):
+            return False
+        ts = book.get('timestamp')
+        if ts is None:
+            return True
+        max_age = getattr(Config, 'ESTIMATED_MAX_ORDERBOOK_AGE_SECONDS', 30)
+        return (time.time() - float(ts)) <= max_age
+
     async def get_market_orderbook(self, market_id: str, token_id: str = None) -> Optional[Dict[str, Any]]:
         """Get market orderbook from cache, with REST fallback."""
         market_orderbooks = self.orderbook_cache.get(market_id, {})
         if token_id:
             result = market_orderbooks.get(token_id) or market_orderbooks.get(self.token_outcome_map.get(token_id))
-            if result is not None:
+            if result is not None and self._book_is_fresh(result):
                 return result
-            # REST fallback (budget-limited)
+            # Cache miss or STALE cached book → fetch fresh (budget-limited).
             if Config.ORDERBOOK_REST_FALLBACK and self._orderbook_rest_budget > 0:
                 self._orderbook_rest_budget -= 1
-                return await self._fetch_orderbook_rest(token_id)
-            return None
+                fresh = await self._fetch_orderbook_rest(token_id)
+                if fresh is not None:
+                    return fresh
+            return result  # fall back to the stale book rather than nothing
         if market_orderbooks:
             return market_orderbooks
         # REST fallback for first token if available
@@ -987,7 +1124,7 @@ class PolymarketClient:
                 url = f"{Config.POLYMARKET_CLOB_BASE}/book"
                 params = {"token_id": token_id}
                 if self._orderbook_rest_session is None or self._orderbook_rest_session.closed:
-                    self._orderbook_rest_session = aiohttp.ClientSession()
+                    self._orderbook_rest_session = aiohttp.ClientSession(headers=Config.default_headers())
                 async with self._orderbook_rest_session.get(url, params=params) as resp:
                         if resp.status == 200:
                             data = await resp.json()

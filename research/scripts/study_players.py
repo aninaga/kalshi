@@ -15,7 +15,7 @@ Examples:
 import argparse
 import os
 
-from nba_odds_study import batch, player_study, schedule
+from research.nba_odds_study import batch, player_study, schedule
 
 
 def print_summary(s: dict, outdir: str) -> None:

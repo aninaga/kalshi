@@ -83,20 +83,27 @@ class TestKalshiFee(unittest.TestCase):
 
 class TestPolymarketFee(unittest.TestCase):
     def test_polymarket_fee_at_mid_size_100_price_065_1000bps(self):
-        """PM full taker fee = curve-piece + 2%-flat-on-notional.
+        """PM full taker fee = official parabolic + profile flat knob.
 
-        - curve = (1000/4000) * 100 * 0.65 * (0.65*0.35)**2
-                = 0.25 * 100 * 0.65 * 0.207025**0.5 mistakenly? no:
-                = 0.25 * 65 * 0.0517... = 0.8409  (4-dp rounded -> 0.8410)
-                actual: 0.25 * 100 * 0.65 * (0.2275)**2
-                = 16.25 * 0.05175625 ~= 0.84105...  -> 0.8410 after rounding
-                  (mock_execution returns 0.841 with 4dp ROUND_HALF_UP)
-        - flat  = 0.02 * 100 * 0.65 = 1.30
-        - total = 2.141
+        Under the default PESSIMISTIC profile (flat 0.02 kept as a legacy
+        conservatism knob):
+
+        - parabolic = 100 * (1000/10000) * 0.65 * 0.35 = 2.275
+          (official schedule, docs.polymarket.com/trading/fees, 2026-06-09)
+        - flat      = 0.02 * 100 * 0.65 = 1.30
+        - total     = 3.575
         """
         fee = _polymarket_taker_fee(0.65, 100, fee_rate_bps=1000)
         # Document the exact number our formula returns.
-        self.assertAlmostEqual(fee, 0.841 + 1.30, places=3)
+        self.assertAlmostEqual(fee, 2.275 + 1.30, places=3)
+
+    def test_polymarket_fee_official_profile_no_flat_piece(self):
+        """OFFICIAL_2026 charges ONLY the parabolic: 100*0.05*0.65*0.35 = 1.1375."""
+        from research.harness.cost_profile import OFFICIAL_2026, use_profile
+
+        with use_profile(OFFICIAL_2026):
+            fee = _polymarket_taker_fee(0.65, 100)
+        self.assertAlmostEqual(fee, 1.1375, places=4)
 
 
 class TestRoundTripCost(unittest.TestCase):

@@ -1,0 +1,1355 @@
+"""Cross-venue match verification (Phase A).
+
+Lexical similarity (``utils.get_similarity_score``) tells us two market titles
+*look* alike. That is necessary but nowhere near sufficient to trade on: for
+arbitrage the only thing that matters is whether the two contracts resolve to
+the *same real-world outcome*. A false positive in the execution path fires two
+legs believing they hedge when they don't, leaving an un-hedged directional
+position — the opposite of risk-free arbitrage.
+
+This module adds a pluggable verification layer that runs *after* the
+similarity threshold passes:
+
+  * ``OutcomePolarityVerifier``     — does Kalshi-YES mean the same event as the
+                                      Polymarket YES token, or its complement?
+  * ``ResolutionCriteriaVerifier``  — do close dates / thresholds / rules agree?
+  * ``AllowlistVerifier``           — operator allow/deny override (Phase D gate)
+  * ``CompositeVerifier``           — runs all; a match passes only if none fail.
+
+Each verifier consumes the *processed market dicts* produced by
+``MarketAnalyzer._process_*_markets`` (keys: ``title``, ``clean_title``,
+``close_time``, ``raw_data``) and returns a :class:`MatchVerdict`.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import os
+import re
+from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Dict, List, Optional, Protocol, Sequence
+
+from ..config import Config
+from ..utils import (
+    _BOILERPLATE,
+    clean_title,
+    extract_prop_threshold,
+    get_similarity_score,
+    thresholds_compatible,
+)
+from .gazetteer import extract_scope_entities, is_national_scope
+
+logger = logging.getLogger(__name__)
+
+# Polarity labels.
+ALIGNED = "aligned"      # Kalshi YES  ==  Polymarket YES token
+INVERTED = "inverted"    # Kalshi YES  ==  Polymarket NO token
+UNKNOWN = "unknown"      # could not resolve
+
+# Words that flip the meaning of an otherwise-identical proposition.
+_NEGATION_TOKENS = frozenset({
+    "not", "no", "never", "without", "fail", "fails", "failed",
+    "miss", "misses", "missed", "lose", "loses", "lost",
+    "negative", "decline", "decrease", "down",
+})
+
+# Direction words for threshold markets (over/under, above/below).
+_OVER_TOKENS = frozenset({"over", "above", "more", "greater", "exceed", "exceeds", "least", "higher", "up"})
+_UNDER_TOKENS = frozenset({"under", "below", "less", "fewer", "lower", "most", "down", "beneath"})
+
+
+@dataclass(frozen=True)
+class MatchVerdict:
+    """Outcome of verifying a single candidate (Kalshi, Polymarket) pair."""
+
+    passed: bool
+    polarity: str = UNKNOWN          # ALIGNED | INVERTED | UNKNOWN
+    confidence: float = 0.0          # 0..1 — how sure the verifier is
+    reasons: tuple = field(default_factory=tuple)  # human-readable explanations
+    verifier: str = ""               # which verifier produced this verdict
+    # The deterministic rules let this PASS, but it sits in the genuinely
+    # ambiguous residue (e.g. asymmetric time anchor) where a title rule can't
+    # separate true matches from false ones without hurting recall. An optional
+    # LLM tiebreaker resolves these; absent a tiebreaker the pass stands.
+    uncertain: bool = False
+
+    def to_dict(self) -> Dict:
+        return {
+            "passed": self.passed,
+            "polarity": self.polarity,
+            "confidence": round(self.confidence, 4),
+            "reasons": list(self.reasons),
+            "verifier": self.verifier,
+            "uncertain": self.uncertain,
+        }
+
+
+class MatchVerifier(Protocol):
+    """Anything that can adjudicate a candidate match."""
+
+    def verify(self, kalshi_market: Dict, polymarket_market: Dict) -> MatchVerdict:  # pragma: no cover - protocol
+        ...
+
+
+# --------------------------------------------------------------------------- #
+#  Helpers                                                                      #
+# --------------------------------------------------------------------------- #
+
+def _tokens(market: Dict) -> set:
+    """Distinguishing (non-boilerplate) tokens of a market's clean title."""
+    text = clean_title(market.get("title") or market.get("clean_title") or "")
+    return set(text.split()) - _BOILERPLATE
+
+
+def _direction(text: str) -> Optional[str]:
+    """Return 'over' / 'under' if the title expresses a threshold direction."""
+    words = set(text.lower().split())
+    over = bool(words & _OVER_TOKENS) or "+" in text
+    under = bool(words & _UNDER_TOKENS)
+    if over and not under:
+        return "over"
+    if under and not over:
+        return "under"
+    return None
+
+
+def _negation_parity(text: str) -> bool:
+    """True if the title contains an odd number of negations (meaning flipped)."""
+    words = text.lower().split()
+    neg = sum(1 for w in words if w in _NEGATION_TOKENS)
+    # treat "won't" / "wont" style contractions
+    neg += len(re.findall(r"\bwon'?t\b|\bcan'?t\b|\bdoesn'?t\b", text.lower()))
+    return (neg % 2) == 1
+
+
+def _parse_time(value) -> Optional[datetime]:
+    if not value:
+        return None
+    if isinstance(value, (int, float)):
+        try:
+            return datetime.utcfromtimestamp(float(value))
+        except (ValueError, OSError, OverflowError):
+            return None
+    s = str(value).strip().replace("Z", "+00:00")
+    for parse in (datetime.fromisoformat,):
+        try:
+            dt = parse(s)
+            return dt.replace(tzinfo=None)
+        except ValueError:
+            continue
+    return None
+
+
+_MONTH_NUM = {
+    "january": 1, "jan": 1, "february": 2, "feb": 2, "march": 3, "mar": 3,
+    "april": 4, "apr": 4, "may": 5, "june": 6, "jun": 6, "july": 7, "jul": 7,
+    "august": 8, "aug": 8, "september": 9, "sep": 9, "sept": 9, "october": 10,
+    "oct": 10, "november": 11, "nov": 11, "december": 12, "dec": 12,
+}
+# A deadline is governed by these lead-ins; a bare date elsewhere is ignored.
+_DEADLINE_LEAD = r"(?:by|before|until|through|on or before|no later than|end of)"
+_DL_MONTH_DAY = re.compile(
+    rf"\b{_DEADLINE_LEAD}\s+([A-Za-z]+)\.?\s+(\d{{1,2}})(?:st|nd|rd|th)?,?\s+(\d{{4}})",
+    re.IGNORECASE,
+)
+_DL_MONTH_YEAR = re.compile(
+    rf"\b{_DEADLINE_LEAD}\s+([A-Za-z]+)\.?\s+(\d{{4}})", re.IGNORECASE
+)
+_DL_YEAR = re.compile(rf"\b{_DEADLINE_LEAD}\s+(\d{{4}})\b", re.IGNORECASE)
+_IN_YEAR = re.compile(r"\bin\s+(20\d\d)\b", re.IGNORECASE)
+_BARE_YEAR = re.compile(r"\b(20\d\d)\b")
+
+
+def _raw_rules(market: Dict) -> str:
+    """Raw (uncleaned) title + resolution-criteria text — keeps dates intact."""
+    raw = market.get("raw_data", {}) or {}
+    parts = [str(market.get("title") or "")]
+    for key in ("rules_primary", "rules_secondary", "description", "subtitle"):
+        val = raw.get(key)
+        if isinstance(val, str) and val.strip():
+            parts.append(val)
+    return " ".join(parts)
+
+
+# An explicit carve-out clause: one venue enumerates scenarios that do NOT
+# resolve YES (e.g. Polymarket's arrest rules exclude "named in an indictment
+# without arrest" and count "house arrest", which Kalshi's one-line rule does
+# not). When one side has such a clause and the other does not, the resolution
+# FUNCTIONS differ even at the same deadline — definitional basis risk.
+_EXCLUSION_RE = re.compile(
+    r"\b(?:will not qualify|does not qualify|do not qualify|"
+    r"will not count|does not count|does not include|not be considered|"
+    r"following scenarios will not|excluded?:|exception)\b",
+    re.IGNORECASE,
+)
+
+
+def _has_exclusion_clause(market: Dict) -> bool:
+    raw = market.get("raw_data", {}) or {}
+    text = " ".join(
+        str(raw.get(k, "")) for k in ("rules_primary", "rules_secondary", "description")
+    )
+    return len(text) >= 120 and bool(_EXCLUSION_RE.search(text))
+
+
+# Numeric-threshold comparator semantics. "More than $1 trillion" (strict >) and
+# "reaches or exceeds $1 trillion" (inclusive >=) resolve DIFFERENTLY when the
+# measured value lands exactly on the threshold — found live on the
+# Musk-trillionaire pair (Kalshi "more than $1 trillion" vs Polymarket "reaches
+# or exceeds $1 trillion ... as listed on the Bloomberg Billionaires Index").
+# Same subject, same deadline, different resolution FUNCTION at the boundary →
+# basis risk. The inclusive pattern is checked first because inclusive phrasings
+# often embed a strict verb ("reaches or EXCEEDS").
+_INCLUSIVE_CMP_RE = re.compile(
+    r"\b(?:reach(?:es)? or exceed(?:s)?|at least \$?\s*[\d,.]+|"
+    r"[\d,.]+\s*(?:%|percent|trillion|billion|million)?\s+or (?:more|higher|above|greater)|"
+    r"equal(?:s)? to or (?:exceed|more|great|high)|no (?:fewer|less) than)\b",
+    re.IGNORECASE,
+)
+_STRICT_CMP_RE = re.compile(
+    r"\b(?:more than|greater than|above|over|exceed(?:s|ed)?|surpass(?:es|ed)?)\s+"
+    r"\$?\s*[\d,.]*\d",
+    re.IGNORECASE,
+)
+
+
+def _threshold_comparator(market: Dict) -> Optional[str]:
+    """'inclusive' (>=), 'strict' (>), or None if no numeric-threshold language."""
+    raw = market.get("raw_data", {}) or {}
+    text = str(market.get("title") or "") + " " + " ".join(
+        str(raw.get(k, "")) for k in ("rules_primary", "rules_secondary", "description")
+    )
+    if _INCLUSIVE_CMP_RE.search(text):
+        return "inclusive"
+    if _STRICT_CMP_RE.search(text):
+        return "strict"
+    return None
+
+
+# Resolution-authority pinning. "The WHO declares a pandemic" and "any disease
+# becomes a pandemic" are DIFFERENT resolution functions: when a named authority
+# defines the term, that authority's judgment (or silence) IS the market. Found
+# live on the pandemic pair (Polymarket pins "official announcements from the
+# World Health Organization"; Kalshi's rules name no source — and the WHO has no
+# formal pandemic-declaration mechanism, so "colloquial pandemic, no WHO
+# declaration" splits the venues). The same pattern underlies the Musk pair's
+# Bloomberg-Billionaires-Index pin. The list is a deliberately short, curated
+# set of *definitional* authorities; generic "official results/announcements"
+# phrasing must NOT trip it (elections/sports pairs stay clean). Acronyms are
+# matched case-sensitively so "Who will win" / "above" prose can't fire them.
+_AUTHORITY_PATTERNS = (
+    ("WHO", re.compile(r"\bworld health organi[sz]ation\b", re.IGNORECASE)),
+    ("WHO", re.compile(r"\bWHO\b")),
+    ("CDC", re.compile(r"\bcenters? for disease control\b", re.IGNORECASE)),
+    ("CDC", re.compile(r"\bCDC\b")),
+    ("BLOOMBERG", re.compile(r"\bbloomberg\b", re.IGNORECASE)),
+    ("FORBES", re.compile(r"\bforbes\b", re.IGNORECASE)),
+    ("BLS", re.compile(r"\bbureau of labor statistics\b", re.IGNORECASE)),
+    ("BLS", re.compile(r"\bBLS\b")),
+    ("NOAA", re.compile(r"\bNOAA\b")),
+    ("NWS", re.compile(r"\bnational weather service\b", re.IGNORECASE)),
+    ("FBI", re.compile(r"\bFBI\b")),
+    ("FED", re.compile(r"\bfederal reserve\b", re.IGNORECASE)),
+    ("IMF", re.compile(r"\bIMF\b")),
+    ("AP", re.compile(r"\bassociated press\b", re.IGNORECASE)),
+    ("UN", re.compile(r"\bunited nations\b", re.IGNORECASE)),
+    ("NASA", re.compile(r"\bNASA\b")),
+    ("USGS", re.compile(r"\bUSGS\b")),
+    ("WORLD_BANK", re.compile(r"\bworld bank\b", re.IGNORECASE)),
+)
+
+
+def _named_authorities(market: Dict) -> tuple:
+    """(frozenset of authority tags named in the rules text, has_rules_text).
+
+    ``has_rules_text`` guards the asymmetry gate: a side with no/trivial rules
+    (e.g. a transient catalog-backfill failure) cannot be said to "omit" an
+    authority — the gate only fires when BOTH sides actually expose rules text.
+    """
+    raw = market.get("raw_data", {}) or {}
+    text = " ".join(
+        str(raw.get(k, "")) for k in ("rules_primary", "rules_secondary", "description")
+    )
+    found = frozenset(tag for tag, rx in _AUTHORITY_PATTERNS if rx.search(text))
+    return found, len(text.strip()) >= 20
+
+
+# Sub-competition qualifiers (league / conference / playoff round). A tier term
+# on ONE side only means the two markets sit at different rungs of the same
+# tournament ladder — e.g. the AL pennant is not the World Series, even though
+# every World Series participant first wins a pennant. Full phrases are
+# case-insensitive; bare acronyms are case-sensitive ("AL"/"NL" must be caps so
+# "Al Gore" can never fire). Deliberately EXCLUDES top-tier names ("World
+# Series", "Super Bowl"): Kalshi paraphrases those ("Pro Baseball/Football
+# Championship"), and an unqualified championship on both sides is the top tier
+# by default — only a sub-tier qualifier creates the asymmetry that matters.
+_TIER_PATTERNS: tuple = tuple(
+    (tag, re.compile(pat, flags))
+    for tag, pat, flags in (
+        ("american_league", r"\bAmerican League\b", re.IGNORECASE),
+        ("american_league", r"\bALCS\b", 0),
+        ("american_league", r"\bAL\b", 0),
+        ("national_league", r"\bNational League\b", re.IGNORECASE),
+        ("national_league", r"\bNLCS\b", 0),
+        ("national_league", r"\bNL\b", 0),
+        ("afc", r"\bAFC\b", 0),
+        ("nfc", r"\bNFC\b", 0),
+        ("eastern_conference", r"\bEastern Conference\b", re.IGNORECASE),
+        ("western_conference", r"\bWestern Conference\b", re.IGNORECASE),
+        ("wild_card", r"\bwild card\b", re.IGNORECASE),
+        ("division_series", r"\bDivision Series\b", re.IGNORECASE),
+        ("play_in", r"\bplay-in\b", re.IGNORECASE),
+    )
+)
+
+# Manner-of-outcome qualifiers (same gate logic, different dimension): "win by
+# KO" is a SUBSET of "win" — live false positive 2026-06-10 when Kalshi's
+# Pereira-wins market matched Polymarket-US's method-of-victory markets as
+# clean. Checked on the TITLE ONLY: rules text routinely enumerates methods
+# incidentally while *defining* a win ("wins by KO, TKO, submission, or
+# decision..."), which made a rules-level comparison read symmetric on the
+# very pair that motivated the gate. The title is the proposition.
+_METHOD_TITLE_PATTERNS: tuple = tuple(
+    (tag, re.compile(pat, re.IGNORECASE))
+    for tag, pat in (
+        ("method_ko", r"\bby (ko|tko|knockout|stoppage)\b"),
+        ("method_sub", r"\bby submission\b"),
+        ("method_dec", r"\bby (unanimous |split |majority )?decision\b"),
+        ("method_dq", r"\bby (dq|disqualification)\b"),
+        ("method_points", r"\bon points\b"),
+        ("period_qual", r"\bin (round \d+|overtime|extra time|regulation|"
+                        r"the first (half|quarter|period|inning))\b"),
+        # Subject-scope qualifier: "either competitor wins by X" covers BOTH
+        # fighters — a SUPERSET of "<specific fighter> wins by X" (live find
+        # 2026-06-10: if the other fighter wins by that method, both legs of
+        # the would-be hedge lose).
+        ("either_scope", r"\b(either|any) (competitor|fighter|team|player|side)\b"),
+    )
+)
+
+
+def _competition_tiers(market: Dict) -> frozenset:
+    """Sub-competition tier qualifiers (title + rules) plus manner-of-outcome
+    qualifiers (title only — see _METHOD_TITLE_PATTERNS)."""
+    text = _raw_rules(market)
+    found = {tag for tag, rx in _TIER_PATTERNS if rx.search(text)}
+    title = str(market.get("title") or "")
+    found |= {tag for tag, rx in _METHOD_TITLE_PATTERNS if rx.search(title)}
+    return frozenset(found)
+
+
+# "Wins the most seats" — the plurality-of-seats criterion used for
+# parliamentary elections, where it genuinely diverges from "wins the
+# election" (coalition government). Kept narrow (seats only) so plain
+# vote-plurality races are untouched.
+_SEATS_PLURALITY_RX = re.compile(
+    r"\b(?:(?:most|greatest number of|plurality of(?: the)?|highest number of)"
+    r"\s+seats?|seats?\s+plurality)\b",
+    re.IGNORECASE,
+)
+_SEAT_WORD_RX = re.compile(r"\bseats?\b", re.IGNORECASE)
+
+
+def _extract_deadline(text: str) -> Optional[int]:
+    """Return the governing resolution-deadline as a date ordinal, or None.
+
+    Normalizes the many phrasings of the SAME cutoff to a comparable date so
+    "before Jan 1, 2027", "by December 31, 2026", and "in 2026" all collapse to
+    ~the same ordinal (within a day), while genuinely different deadlines
+    ("before Sep 1, 2026" vs "by December 31, 2026") stay far apart. Prefers an
+    explicit ``<lead-in> <Month> <day>, <year>`` deadline; falls back to
+    month-year, then year, then a bare/`in <year>` (treated as that year-end).
+    """
+    from datetime import date
+    m = _DL_MONTH_DAY.search(text)
+    if m:
+        mon = _MONTH_NUM.get(m.group(1).lower())
+        if mon:
+            try:
+                return date(int(m.group(3)), mon, int(m.group(2))).toordinal()
+            except ValueError:
+                pass
+    m = _DL_MONTH_YEAR.search(text)
+    if m:
+        mon = _MONTH_NUM.get(m.group(1).lower())
+        if mon:
+            # "before <Month> <year>" → first of that month (exclusive cutoff).
+            return date(int(m.group(2)), mon, 1).toordinal()
+    m = _DL_YEAR.search(text)
+    if m:
+        # "before/by <year>" means before that year BEGINS — i.e. the boundary
+        # Jan 1 of <year> (== end of <year>-1). This makes "before 2027" line up
+        # with "before Jan 1, 2027" and "by December 31, 2026" (all ~1 day apart)
+        # rather than landing a full year late.
+        return date(int(m.group(1)), 1, 1).toordinal()
+    m = _IN_YEAR.search(text) or _BARE_YEAR.search(text)
+    if m:
+        # "in <year>" / a bare "<year> election" can resolve anytime within the
+        # year → end-of-year cutoff.
+        return date(int(m.group(1)), 12, 31).toordinal()
+    return None
+
+
+def _rules_text(market: Dict) -> str:
+    """Best-effort resolution-criteria text for a market."""
+    raw = market.get("raw_data", {}) or {}
+    parts: List[str] = []
+    for key in ("rules_primary", "rules_secondary", "description", "subtitle"):
+        val = raw.get(key)
+        if isinstance(val, str) and val.strip():
+            parts.append(val)
+    return clean_title(" ".join(parts)) if parts else ""
+
+
+def _clean(market: Dict) -> str:
+    """Canonically-cleaned title for a market.
+
+    Always re-normalize the raw title with utils.clean_title rather than trust
+    the venue's pre-set clean_title — the per-venue cleaners differ (one keeps
+    hyphens/'?', e.g. "second-hottest", "record?"), which would corrupt the
+    token sets the entity/qualifier checks rely on.
+    """
+    return clean_title(market.get("title") or market.get("clean_title") or "")
+
+
+def _scope_text(market: Dict) -> str:
+    """Cleaned title PLUS the Kalshi scope subtitles, for geography extraction.
+
+    A state-race Kalshi market often carries the state only in its
+    yes_sub_title / title; fold those in so the gazetteer sees them.
+    """
+    raw = market.get("raw_data", {}) or {}
+    extra = " ".join(
+        str(raw.get(k, "")) for k in ("yes_sub_title", "no_sub_title", "subtitle")
+        if raw.get(k)
+    )
+    base = _clean(market)
+    return f"{base} {clean_title(extra)}".strip() if extra else base
+
+
+def _token_matches(word: str, larger: set) -> bool:
+    """Does ``word`` refer to the SAME entity as some token in ``larger``?
+
+    Tolerant of spelling/punctuation variants (republican/republicans,
+    jaemyung/myung) without relaxing into different entities:
+      - exact match
+      - shared 4+ char prefix (either direction)
+      - one token is a substring of the other (>=4 chars) — handles concatenated
+        multi-word names like "jaemyung" containing "myung"
+      - high-cutoff fuzzy ratio (>=0.9) for single-token spelling variants
+    """
+    if word in larger:
+        return True
+    if len(word) >= 4:
+        pre = word[:4]
+        for lw in larger:
+            if len(lw) >= 4 and (lw.startswith(pre) or word.startswith(lw[:4])):
+                # Shared 4-char prefix, BUT reject if one carries a negating/
+                # ordinal qualifier the other lacks (hottest vs secondhottest,
+                # which would otherwise match on substring) — handled by the
+                # length-ratio guard: a true variant is similar length.
+                if min(len(word), len(lw)) / max(len(word), len(lw)) >= 0.6:
+                    return True
+            # Substring only when the shorter token is itself >= 5 chars (a real
+            # name component like "myung" in "jaemyung"), not a short common word.
+            if len(lw) >= 5 and len(word) >= 5 and (word in lw or lw in word):
+                return True
+    for lw in larger:
+        if len(word) >= 4 and len(lw) >= 4 and _ratio(word, lw) >= 0.9:
+            return True
+    return False
+
+
+def _ratio(a: str, b: str) -> float:
+    """Pure-stdlib similarity ratio (no deps) for single-token spelling variants."""
+    from difflib import SequenceMatcher
+    return SequenceMatcher(None, a, b).ratio()
+
+
+# Words that, when present on only ONE side, change the PROPOSITION (not the
+# subject): ordinals/superlatives ranking, and outcome-stage verbs. Same subject
+# + a divergent qualifier here = different question (e.g. "hottest" vs
+# "second-hottest" year; "on the ballot" vs "win").
+_PREDICATE_QUALIFIERS = frozenset({
+    "hottest", "coldest", "highest", "lowest", "biggest", "largest", "smallest",
+    "secondhottest", "secondhighest", "secondlowest", "second", "third",
+    "ballot", "nominee", "nominated", "primary", "runoff", "reelection",
+    "impeached", "indicted", "convicted", "acquitted",
+    # Sub-event / stage qualifiers: "win the first ROUND" is not "win the
+    # election"; "qualify for PLAYOFFS" is not "qualify to STAGE 3"; appearing on
+    # only one side changes the proposition.
+    "round", "playoffs", "playoff", "stage", "semifinal", "semifinals",
+    "quarterfinal", "quarterfinals",
+    # "FINISH 1st" is a placement, not the same as "WIN".
+    "finish",
+})
+
+# Superlative ranking checked against the RAW title ("most" is boilerplate and
+# would never survive to the token-set qualifier veto). The decisive structure:
+# one side RANKS a noun ("score the MOST goals") that the other side mentions
+# PLAINLY ("score A goal") — ranking vs occurrence of the SAME thing → different
+# proposition. Excludes the "at most/least" threshold idiom (lookbehind). Fires
+# only when the ranked noun is SHARED, so "win the most SEATS" vs "win the
+# ELECTION" (different nouns, parliamentary-equivalent) is NOT split.
+_SUPERLATIVE_RE = re.compile(r"(?<!at )\b(most|fewest)\s+([a-z]+)", re.IGNORECASE)
+
+
+# Partial-scope quantifier: "win ANY county" (∃ — carry at least one sub-unit) is
+# a far weaker proposition than "win the [statewide] election" (the aggregate).
+# Present on one side only ⇒ different question. Observed live as "Becerra win
+# any county" vs "Becerra win the California primary" (27% phantom "edge").
+_PARTIAL_SCOPE_RE = re.compile(
+    r"\b(?:win|carry|take|flip|lead)\s+(?:any|at least one|a single|one)\s+"
+    r"(?:count(?:y|ies)|district|precinct|state|township|ward|parish|borough|municipalit(?:y|ies))\b",
+    re.IGNORECASE,
+)
+
+
+def _partial_scope_asymmetry(a: str, b: str) -> bool:
+    """A 'win any <sub-unit>' partial-scope claim on exactly one side."""
+    return bool(_PARTIAL_SCOPE_RE.search(a)) != bool(_PARTIAL_SCOPE_RE.search(b))
+
+
+def _superlative_asymmetry(a: str, b: str) -> Optional[str]:
+    al, bl = a.lower(), b.lower()
+    ra = _SUPERLATIVE_RE.search(al)
+    rb = _SUPERLATIVE_RE.search(bl)
+    if bool(ra) == bool(rb):  # neither, or both rank (symmetric) → same proposition
+        return None
+    word, noun = (ra or rb).group(1), (ra or rb).group(2)
+    other = bl if ra else al
+    stem = noun[:-1] if noun.endswith("s") else noun  # goals→goal
+    if re.search(rf"\b{re.escape(stem)}s?\b", other):  # other side names the ranked noun plainly
+        return word
+    return None
+
+# Generic event/structural words that recur across contests and are NOT the
+# distinguishing subject (the team/person/topic is). Removed before the
+# "distinct subjects" check so an event template ("qualify stage IEM Cologne
+# Major") doesn't mask a different competitor, and a lone leftover template word
+# ("Team", "Major", "MoM") doesn't falsely split a true match.
+_TEMPLATE_TOKENS = frozenset({
+    "team", "major", "minor", "cup", "open", "series", "match", "stage",
+    "tournament", "championship", "league", "qualify", "qualifier", "qualified",
+    "round", "final", "finals", "group", "playoffs", "playoff", "bracket",
+    "record", "edition", "tour", "event", "title", "medal", "award",
+    "rise", "rose", "fall", "fell", "mom", "yoy", "month", "monthly",
+    "core", "headline", "report", "data", "number", "level", "value",
+    # League/division tokens — the team/city is the subject, not the league.
+    "mlb", "nba", "nfl", "nhl", "al", "nl", "worldcup",
+})
+
+
+_MONTHS = frozenset({
+    "january", "february", "march", "april", "may", "june", "july", "august",
+    "september", "october", "november", "december",
+})
+
+
+_NAME_PAIR_SKIP = frozenset({
+    "will", "the", "grand", "final", "world", "cup", "iem", "pro", "national",
+    "american", "league", "stage", "major", "minor", "open", "series", "team",
+    "united", "states", "north", "south", "new", "saudi",
+})
+
+
+def _added_name_pair(my_title: str, other_title: str) -> Optional[str]:
+    """A full personal name (two consecutive Capitalized words) present in
+    ``my_title`` but absent from ``other_title`` — a DIFFERENT person/entity
+    that changes the event ("...fight Charles Oliveira" vs "...fight next").
+
+    Conservative by design: requires TWO consecutive capitalized name tokens so
+    it never fires on a lone capitalized common noun (Braves, September) — a
+    full-name addition is a reliable "different subject" signal, validated to
+    trigger on zero true matches in the labeled corpus.
+    """
+    other_l = other_title.lower()
+    words = my_title.split()
+    for i in range(len(words) - 1):
+        w1 = re.sub(r"[^a-zA-Z]", "", words[i])
+        w2 = re.sub(r"[^a-zA-Z]", "", words[i + 1])
+        if (len(w1) >= 3 and len(w2) >= 3 and w1[:1].isupper() and w2[:1].isupper()
+                and w1.lower() not in _NAME_PAIR_SKIP and w2.lower() not in _NAME_PAIR_SKIP
+                and w1.lower() not in other_l and w2.lower() not in other_l):
+            return f"{w1} {w2}"
+    return None
+
+
+def _month_period_scope(title: str) -> Optional[str]:
+    """Return a month if it SCOPES the event's period ("June 2026 hottest"),
+    distinguishing it from a deadline ("...join by June 30"). A period-scoping
+    month makes a single-month market a DIFFERENT event from a full-year one;
+    a deadline month does not. Returns None when the month is a deadline or
+    absent.
+    """
+    t = title.lower()
+    for m in _MONTHS:
+        if re.search(rf"\b(?:by|before|after|until) {m}\b", t):
+            return None  # deadline phrasing — not a period scope
+    for m in _MONTHS:
+        if re.search(rf"\b{m}\s+20\d\d\b", t) or re.search(rf"\b20\d\d\s+{m}\b", t):
+            return m
+    return None
+
+
+_YEAR_RE = re.compile(r"\b(?:19|20)\d\d\b")
+_DEADLINE_RE = re.compile(
+    r"\b(?:by|before|after|until)\s+("
+    + "|".join(sorted(_MONTHS))
+    + r")\b",
+    re.IGNORECASE,
+)
+_MONTH_RE = re.compile(r"\b(" + "|".join(sorted(_MONTHS)) + r")\b", re.IGNORECASE)
+
+
+def _time_anchor(title: str) -> tuple:
+    """A normalized (years, month-period) signature of a title's time scope.
+
+    ``years`` is the set of explicit 4-digit years; the second element folds any
+    month that scopes the event (a deadline "by September 30" or a bare month).
+    Two titles whose anchors are equal name the same period; when they differ
+    and the deterministic year-veto can't reject (it only fires when BOTH name
+    explicit, disjoint years), the pair is genuinely ambiguous.
+    """
+    years = frozenset(m.group(0) for m in _YEAR_RE.finditer(title))
+    months = frozenset(m.lower() for m in _DEADLINE_RE.findall(title))
+    if not months:
+        months = frozenset(m.group(1).lower() for m in _MONTH_RE.finditer(title))
+    return years, months
+
+
+def _time_anchors_uncertain(k_title: str, p_title: str) -> bool:
+    """True when the two titles' time anchors are NOT deterministically equal,
+    yet also NOT rejectable by the year-veto (which needs both sides to name
+    explicit, differing years). This is exactly the residue that produces the
+    irreducible false positives — "in 2028" vs "by September 30", "fight next"
+    vs "fight in 2026" — alongside the many true matches that legitimately state
+    the year on only one side. A deterministic rule can't separate the two, so
+    we flag it for the optional LLM tiebreaker rather than guess.
+    """
+    ky, km = _time_anchor(k_title)
+    py, pm = _time_anchor(p_title)
+    # Both name explicit years that disagree → the year-veto already rejects; not
+    # ambiguous (and never reaches here as a passing pair anyway).
+    if ky and py and not (ky & py):
+        return False
+    return (ky, km) != (py, pm)
+
+
+def _normalize_tokens(tokens: set) -> set:
+    """Canonicalize tokens so equivalent forms compare equal:
+      - congressional district codes: ma06 -> ma6 (strip zero-pad)
+      - league synonyms: 'mlb' <-> 'pro'+'baseball', 'nba' <-> 'pro'+'basketball'
+    """
+    from .gazetteer import _district_code
+    # Ordinal numeral <-> word (3rd<->third) so rank phrasing compares equal.
+    _ORD = {"1st": "first", "2nd": "second", "3rd": "third", "4th": "fourth",
+            "5th": "fifth"}
+    out = set()
+    for t in tokens:
+        d = _district_code(t)
+        if d:
+            out.add(d.replace("district_", ""))
+        else:
+            out.add(_ORD.get(t, t))
+    # Multi-word synonyms: collapse equivalent phrasings to one canonical token.
+    syn = {
+        frozenset({"pro", "baseball"}): "mlb",
+        frozenset({"major", "league", "baseball"}): "mlb",
+        frozenset({"pro", "basketball"}): "nba",
+        frozenset({"pro", "football"}): "nfl",
+        frozenset({"pro", "hockey"}): "nhl",
+        frozenset({"fifa", "world", "cup"}): "worldcup",
+        frozenset({"mens", "world", "cup"}): "worldcup",
+    }
+    for combo, canon in syn.items():
+        if combo <= out:
+            out -= combo
+            out.add(canon)
+    # Single-token synonyms (league/division abbreviations).
+    single = {"american": "al", "national": "nl", "americanleague": "al",
+              "nationalleague": "nl"}
+    out = {single.get(w, w) for w in out}
+    return out
+
+
+def _is_categorical(market: Dict) -> bool:
+    """True if the title poses a multi-outcome question ("Who will...", "Which
+    ...", "What will...") rather than a single-subject yes/no proposition.
+
+    Such a Kalshi market enumerates candidates as separate contracts and must
+    not pair with a specific-subject binary on the other venue.
+    """
+    title = (market.get("title") or "").strip().lower()
+    first = title.split()[0] if title.split() else ""
+    return first in {"who", "which"} or title.startswith("what will")
+
+
+# Elected offices / contest types. Stripped as boilerplate for the *entity*
+# overlap, but they DISTINGUISH the contest — an Attorney-General race is not a
+# Governor race even in the same state. Multi-word offices are canonical keys.
+_OFFICE_PHRASES = {
+    ("attorney", "general"): "attorney_general",
+    ("secretary", "of", "state"): "secretary_of_state",
+    ("lieutenant", "governor"): "lieutenant_governor",
+    ("lt", "gov"): "lieutenant_governor",
+    ("lt", "governor"): "lieutenant_governor",
+    ("lieutenant", "gov"): "lieutenant_governor",
+}
+_OFFICE_SINGLE = {
+    "governor": "governor", "governorship": "governor",
+    "senate": "senate", "senator": "senate",
+    "house": "house",
+    "mayor": "mayor", "mayoral": "mayor",
+    "president": "president", "presidency": "president", "presidential": "president",
+    "comptroller": "comptroller", "treasurer": "treasurer",
+    "sheriff": "sheriff", "council": "council",
+}
+
+
+def _offices(clean_text: str) -> set:
+    """Set of elected-office keys named in a cleaned title."""
+    tokens = clean_text.split()
+    found = set()
+    consumed = set()
+    n = len(tokens)
+    for i in range(n):
+        if i in consumed:
+            continue
+        for plen, key in (
+            (3, _OFFICE_PHRASES.get(tuple(tokens[i:i + 3]))),
+            (2, _OFFICE_PHRASES.get(tuple(tokens[i:i + 2]))),
+        ):
+            if key:
+                found.add(key)
+                consumed.update(range(i, i + plen))
+                break
+    for i, tok in enumerate(tokens):
+        if i not in consumed and tok in _OFFICE_SINGLE:
+            found.add(_OFFICE_SINGLE[tok])  # canonical form (governorship->governor)
+    return found
+
+
+# --------------------------------------------------------------------------- #
+#  Verifiers                                                                    #
+# --------------------------------------------------------------------------- #
+
+class OutcomePolarityVerifier:
+    """Resolve whether Kalshi-YES maps to the Polymarket YES token or its NO.
+
+    Heuristic and intentionally conservative: it returns INVERTED only when it
+    finds a clear meaning-flip (odd negation parity difference, or opposite
+    threshold directions). When it finds clear agreement it returns ALIGNED.
+    Otherwise UNKNOWN — the composite decides whether UNKNOWN is fatal.
+    """
+
+    name = "outcome_polarity"
+
+    def verify(self, kalshi_market: Dict, polymarket_market: Dict) -> MatchVerdict:
+        k_title = clean_title(kalshi_market.get("title") or kalshi_market.get("clean_title") or "")
+        p_title = clean_title(polymarket_market.get("title") or polymarket_market.get("clean_title") or "")
+
+        reasons: List[str] = []
+
+        # 1) Negation parity: an odd difference flips meaning.
+        k_neg = _negation_parity(kalshi_market.get("title", "") or k_title)
+        p_neg = _negation_parity(polymarket_market.get("title", "") or p_title)
+        neg_flip = k_neg != p_neg
+
+        # 2) Threshold direction.
+        k_dir = _direction(kalshi_market.get("title", "") or k_title)
+        p_dir = _direction(polymarket_market.get("title", "") or p_title)
+        dir_flip = k_dir is not None and p_dir is not None and k_dir != p_dir
+        dir_same = k_dir is not None and p_dir is not None and k_dir == p_dir
+
+        if neg_flip and not dir_flip:
+            reasons.append("negation_parity_differs")
+            return MatchVerdict(True, INVERTED, 0.75, tuple(reasons), self.name)
+        if dir_flip and not neg_flip:
+            reasons.append(f"threshold_direction k={k_dir} p={p_dir}")
+            return MatchVerdict(True, INVERTED, 0.8, tuple(reasons), self.name)
+        if neg_flip and dir_flip:
+            # two flips cancel out → aligned
+            reasons.append("double_flip_cancels")
+            return MatchVerdict(True, ALIGNED, 0.7, tuple(reasons), self.name)
+
+        if dir_same:
+            reasons.append(f"threshold_direction_match={k_dir}")
+            return MatchVerdict(True, ALIGNED, 0.8, tuple(reasons), self.name)
+
+        # No negation/threshold signal on either side and titles are similar:
+        # default to ALIGNED with modest confidence (binary YES/YES is the
+        # overwhelmingly common case for matched contracts).
+        if not k_neg and not p_neg:
+            reasons.append("no_flip_signals")
+            return MatchVerdict(True, ALIGNED, 0.55, tuple(reasons), self.name)
+
+        reasons.append("ambiguous_polarity")
+        return MatchVerdict(True, UNKNOWN, 0.0, tuple(reasons), self.name)
+
+
+class DistinguishingEntityVerifier:
+    """Reject pairs whose distinguishing entity / scope differs.
+
+    The lexical similarity score rewards shared boilerplate, so different
+    real-world events with the same template ("Will <X> be arrested before
+    2027", "Will the Republicans win the <Y> Senate") score 0.76-0.82 and slip
+    through the threshold. After stripping boilerplate, the SET of distinguishing
+    tokens (the subject/scope) must agree. Two complementary checks:
+
+      (A) Geography/scope veto — if the two titles name different states or
+          countries, or one is national while the other names a sub-scope (state),
+          reject. Catches U.S.-Senate vs Montana-Senate, Israel-Qatar vs
+          Israel-Saudi, national-governorship vs South-Dakota-governor.
+      (B) Distinguishing-entity overlap — the smaller distinguishing token set
+          must be >= MATCH_MIN_DISTINGUISHING_OVERLAP covered by the other,
+          tolerant of spelling variants. Catches Kash-Patel vs Joe-Biden.
+
+    Runs for ALL above-threshold pairs (verifiers run after the similarity gate),
+    so it fires in the 0.76-0.85 band where utils._penalize_divergent_terms does
+    not. Deterministic, pure-Python.
+    """
+
+    name = "distinguishing_entity"
+
+    def __init__(self, min_overlap: Optional[float] = None):
+        self.min_overlap = (
+            min_overlap if min_overlap is not None
+            else getattr(Config, "MATCH_MIN_DISTINGUISHING_OVERLAP", 0.5)
+        )
+
+    def verify(self, kalshi_market: Dict, polymarket_market: Dict) -> MatchVerdict:
+        reasons: List[str] = []
+
+        # (A0) Categorical (multi-outcome) veto. A "Who will / Which X" market
+        # enumerates many candidates as separate contracts; it is NOT the same
+        # tradeable contract as a single-subject binary ("Will <specific> X").
+        # Matching them yields a structurally wrong "buy YES / sell YES" hedge.
+        k_cat = _is_categorical(kalshi_market)
+        p_cat = _is_categorical(polymarket_market)
+        if k_cat != p_cat:
+            return MatchVerdict(False, UNKNOWN, 0.0,
+                                (f"categorical_vs_binary k_cat={k_cat} p_cat={p_cat}",), self.name)
+
+        # (A) Geography / scope veto. Use title + Kalshi subtitles for scope.
+        # The scope SETS must be equal: if either venue names a place the other
+        # doesn't, it's a different event — whether that's national-vs-state
+        # (k={} p={montana}) or a country swap (k={israel,qatar} p={israel,
+        # saudi_arabia}, which share israel but differ on the distinguishing one).
+        k_scope = extract_scope_entities(_scope_text(kalshi_market))
+        p_scope = extract_scope_entities(_scope_text(polymarket_market))
+        if k_scope != p_scope:
+            return MatchVerdict(False, UNKNOWN, 0.0,
+                                (f"scope_mismatch k={sorted(k_scope)} p={sorted(p_scope)}",),
+                                self.name)
+
+        # (A1) Office veto: a contest for a DIFFERENT elected office is a
+        # different event (Attorney General race vs Governor race in the same
+        # state). Offices are stripped as boilerplate for entity overlap, so
+        # check them explicitly: if both name an office and they don't intersect,
+        # reject.
+        k_off = _offices(_clean(kalshi_market))
+        p_off = _offices(_clean(polymarket_market))
+        if k_off and p_off and not (k_off & p_off):
+            return MatchVerdict(False, UNKNOWN, 0.0,
+                                (f"office_mismatch k={sorted(k_off)} p={sorted(p_off)}",), self.name)
+
+        kt = _normalize_tokens(set(_clean(kalshi_market).split()) - _BOILERPLATE)
+        pt = _normalize_tokens(set(_clean(polymarket_market).split()) - _BOILERPLATE)
+
+        # (B) Numeric veto — handle YEARS and QUANTITIES separately.
+        # Years (4-digit 19xx/20xx) date the event; quantities (thresholds like
+        # "4000 measles cases", "8+ points") define the outcome. Each kind, when
+        # present on both sides, must agree. Critically, a shared YEAR must not
+        # mask a different QUANTITY ("more than 4000" vs "at least 5000" both in
+        # 2026): split them so 4000!=5000 still rejects.
+        def _split_nums(toks):
+            years, qty = set(), set()
+            for w in toks:
+                digits = "".join(c for c in w if c.isdigit())
+                if not digits:
+                    continue
+                if len(digits) == 4 and digits[:2] in ("19", "20") and w == digits:
+                    years.add(digits)
+                else:
+                    qty.add(w)
+            return years, qty
+        k_years, k_qty = _split_nums(kt)
+        p_years, p_qty = _split_nums(pt)
+        if k_years and p_years and not (k_years & p_years):
+            return MatchVerdict(False, UNKNOWN, 0.0,
+                                (f"year_mismatch k={sorted(k_years)} p={sorted(p_years)}",), self.name)
+        if k_qty and p_qty and not (k_qty & p_qty):
+            return MatchVerdict(False, UNKNOWN, 0.0,
+                                (f"quantity_mismatch k={sorted(k_qty)} p={sorted(p_qty)}",), self.name)
+
+        # Month-period scope: a single-MONTH market ("June 2026 hottest") is a
+        # different event than a full-year one — but only when the month SCOPES
+        # the period, not when it's a deadline ("...by June 30", which is the
+        # same event with a cutoff). Reject only on a genuine period mismatch.
+        k_month = _month_period_scope(kalshi_market.get("title", ""))
+        p_month = _month_period_scope(polymarket_market.get("title", ""))
+        if k_month != p_month and (k_month or p_month):
+            return MatchVerdict(False, UNKNOWN, 0.0,
+                                (f"month_period_mismatch k={k_month} p={p_month}",), self.name)
+
+        # Added-name veto: one side names a full person (two consecutive
+        # capitalized words) the other lacks → different subject specificity
+        # ("fight Charles Oliveira" vs "fight next").
+        k_title_raw = kalshi_market.get("title", "")
+        p_title_raw = polymarket_market.get("title", "")
+        added = _added_name_pair(k_title_raw, p_title_raw) or _added_name_pair(p_title_raw, k_title_raw)
+        if added:
+            return MatchVerdict(False, UNKNOWN, 0.0,
+                                (f"added_name {added!r}",), self.name)
+
+        # Superlative veto: a ranking word ("score the MOST goals") on one side
+        # only is a different proposition than the plain occurrence ("score A
+        # goal"). Checked on the RAW title because "most" is boilerplate and is
+        # stripped from the entity-token sets before the qualifier veto.
+        rank = _superlative_asymmetry(k_title_raw, p_title_raw)
+        if rank:
+            return MatchVerdict(False, UNKNOWN, 0.0, (f"superlative_asymmetry {rank!r}",), self.name)
+
+        # Partial-scope veto: "win ANY county" (carry ≥1 sub-unit) is not "win the
+        # election" (the aggregate). One side only ⇒ different proposition.
+        if _partial_scope_asymmetry(k_title_raw, p_title_raw):
+            return MatchVerdict(False, UNKNOWN, 0.0, ("partial_scope_asymmetry",), self.name)
+
+        # (C) Distinguishing-ENTITY check on the ALPHABETIC tokens (subject /
+        # identity). Numeric tokens are excluded so a shared year can't inflate
+        # different subjects. The decisive rule: after removing matched tokens
+        # and generic template words, if BOTH sides still carry a distinct
+        # substantive token, they name DIFFERENT subjects — reject. This catches
+        # "TYLOO" vs "BetBoom" (event template "qualify stage IEM Cologne"
+        # matches, but the team differs) and "Kash Patel" vs "Joe Biden", while
+        # passing "Vitality"=="Vitality" and "Team Falcons"=="Falcons" (only one
+        # side has a leftover template word).
+        # Entity tokens: anything with a letter (keeps alphanumeric team/ticker
+        # names like "g2", "b8", "ma06"); pure-numeric tokens (years) are
+        # excluded — they're handled by the numeric veto above.
+        ke = {w for w in kt if any(c.isalpha() for c in w)}
+        pe = {w for w in pt if any(c.isalpha() for c in w)}
+        if not ke or not pe:
+            return MatchVerdict(True, UNKNOWN, 0.3, ("no_entity_tokens",), self.name)
+        k_only = {w for w in ke if not _token_matches(w, pe)} - _TEMPLATE_TOKENS
+        p_only = {w for w in pe if not _token_matches(w, ke)} - _TEMPLATE_TOKENS
+        if k_only and p_only:
+            return MatchVerdict(False, UNKNOWN, 0.0,
+                                (f"distinct_subjects k={sorted(k_only)} p={sorted(p_only)}",),
+                                self.name)
+        # Secondary: require a reasonable fraction of the smaller set to match
+        # (guards the case where one side is a strict superset of unrelated
+        # template words).
+        smaller, larger = (ke, pe) if len(ke) <= len(pe) else (pe, ke)
+        matched = sum(1 for w in smaller if _token_matches(w, larger))
+        overlap = matched / len(smaller)
+        if overlap < self.min_overlap:
+            return MatchVerdict(False, UNKNOWN, 0.0,
+                                (f"entity_overlap={overlap:.2f} sm={sorted(smaller)}",), self.name)
+
+        # (D) Predicate-qualifier veto: same subject, DIFFERENT proposition.
+        # An ordinal/superlative/outcome qualifier present on one side but not
+        # EXACTLY on the other changes what's being asked ("hottest" vs
+        # "second-hottest" year; "on the ballot" vs "win"). Use EXACT set
+        # difference (not fuzzy _token_matches) so "secondhottest" is not
+        # smoothed into "hottest".
+        q_mismatch = (ke ^ pe) & _PREDICATE_QUALIFIERS
+        if q_mismatch:
+            return MatchVerdict(False, UNKNOWN, 0.0,
+                                (f"predicate_qualifier_mismatch {sorted(q_mismatch)}",), self.name)
+
+        # Same subject and the deterministic rules accept, but if the two time
+        # anchors disagree in a way the year-veto can't reject ("in 2028" vs
+        # "by September 30"; "next" vs "in 2026"), this is the genuinely
+        # ambiguous residue: flag it uncertain so an optional LLM tiebreaker can
+        # adjudicate. The pass STANDS by default — without a tiebreaker we keep
+        # recall (the same shape covers 40+ true matches) at the cost of the
+        # rare false positive.
+        uncertain = _time_anchors_uncertain(
+            kalshi_market.get("title", ""), polymarket_market.get("title", "")
+        )
+        reasons = (f"entity_overlap={overlap:.2f}",)
+        if uncertain:
+            reasons = reasons + ("uncertain_time_anchor",)
+        return MatchVerdict(True, UNKNOWN, 0.7, reasons, self.name, uncertain=uncertain)
+
+
+class ResolutionCriteriaVerifier:
+    """Reject pairs whose resolution criteria diverge.
+
+    Checks: (a) close/resolution-time proximity, (b) numeric-threshold
+    compatibility, (c) rules-text divergence using the same boilerplate-aware
+    machinery as the matcher.
+    """
+
+    name = "resolution_criteria"
+
+    def __init__(self, max_close_skew_hours: Optional[float] = None):
+        self.max_close_skew_hours = (
+            max_close_skew_hours
+            if max_close_skew_hours is not None
+            else Config.MATCH_MAX_CLOSE_TIME_SKEW_HOURS
+        )
+
+    def verify(self, kalshi_market: Dict, polymarket_market: Dict) -> MatchVerdict:
+        reasons: List[str] = []
+
+        # (a) Close-time is INFORMATIONAL ONLY — it is NOT used to reject.
+        # Audit of 16k live candidates showed the two venues' close_time fields
+        # are unreliable for same-event detection: Kalshi often certifies in the
+        # NEXT calendar year (close_time Jan-2027 for a 2026 election), so even a
+        # year-level close-time veto rejected identical-title true matches. The
+        # authoritative date signal is the YEAR token IN THE TITLE, already
+        # enforced by the numeric veto in DistinguishingEntityVerifier. We record
+        # the skew for diagnostics but never reject on it.
+        k_close = _parse_time(kalshi_market.get("close_time"))
+        p_close = _parse_time(polymarket_market.get("close_time"))
+        if k_close and p_close:
+            skew_h = abs((k_close - p_close).total_seconds()) / 3600.0
+            reasons.append(f"close_time_skew={skew_h:.1f}h_info")
+
+        # (b) Numeric thresholds (e.g. "above 4.5%" vs "4.25-4.50%").
+        k_title = kalshi_market.get("title", "")
+        p_title = polymarket_market.get("title", "")
+        if not thresholds_compatible(k_title, p_title):
+            k_thr = extract_prop_threshold(k_title)
+            p_thr = extract_prop_threshold(p_title)
+            reasons.append(f"threshold_mismatch k={k_thr} p={p_thr}")
+            return MatchVerdict(False, UNKNOWN, 0.0, tuple(reasons), self.name)
+
+        # (c) Rules-text divergence (only when both sides expose rules). Also
+        # apply a scope veto on the rules text — a state/country named in one
+        # venue's rules but absent from the other's is a different event.
+        k_rules = _rules_text(kalshi_market)
+        p_rules = _rules_text(polymarket_market)
+        if k_rules and p_rules:
+            k_rscope = extract_scope_entities(k_rules)
+            p_rscope = extract_scope_entities(p_rules)
+            if k_rscope and p_rscope and not (k_rscope & p_rscope):
+                reasons.append(f"rules_scope_mismatch k={sorted(k_rscope)} p={sorted(p_rscope)}")
+                return MatchVerdict(False, UNKNOWN, 0.0, tuple(reasons), self.name)
+            d1 = set(k_rules.split()) - _BOILERPLATE
+            d2 = set(p_rules.split()) - _BOILERPLATE
+            if d1 and d2:
+                smaller, larger = (d1, d2) if len(d1) <= len(d2) else (d2, d1)
+                shared = sum(
+                    1 for w in smaller
+                    if w in larger or (len(w) >= 4 and any(lw.startswith(w[:4]) for lw in larger))
+                )
+                containment = shared / len(smaller)
+                min_cont = getattr(Config, "MATCH_MIN_RULES_CONTAINMENT", 0.4)
+                if containment < min_cont:
+                    # At near-identical TITLES the pair names the same
+                    # proposition prima facie, and low containment is almost
+                    # always a STYLE gap — Kalshi's one-line "If X, then Yes"
+                    # vs Polymarket's multi-paragraph legalese (live audit
+                    # 2026-06-09: 33 exact-title "next PM of Romania/Israel"
+                    # pairs hard-rejected at containment 0.33-0.36). That can
+                    # still hide real definitional/window asymmetry, so flag
+                    # UNCERTAIN (held-for-review, never auto-clean) instead of
+                    # rejecting. Below the title bar, low containment keeps its
+                    # original meaning — different events that share a template
+                    # — and stays a hard reject.
+                    kt_clean = (kalshi_market.get("clean_title")
+                                or clean_title(k_title))
+                    pt_clean = (polymarket_market.get("clean_title")
+                                or clean_title(p_title))
+                    title_sim = get_similarity_score(kt_clean, pt_clean)
+                    if title_sim >= 0.95:
+                        reasons.append(
+                            f"rules_divergent_review containment={containment:.2f} "
+                            f"title_sim={title_sim:.2f}")
+                        return MatchVerdict(True, UNKNOWN, 0.4, tuple(reasons),
+                                            self.name, uncertain=True)
+                    reasons.append(f"rules_divergent containment={containment:.2f}")
+                    return MatchVerdict(False, UNKNOWN, 0.0, tuple(reasons), self.name)
+                reasons.append(f"rules_ok containment={containment:.2f}")
+
+        return MatchVerdict(True, UNKNOWN, 0.6, tuple(reasons or ("criteria_unverified",)), self.name)
+
+
+class ResolutionCongruenceVerifier:
+    """Reject pairs whose stated resolution DEADLINES diverge.
+
+    Two markets can name the same subject/scope/proposition yet resolve on
+    different cutoffs — "reopen the embassy *before Sep 1, 2026*" vs "*by Dec 31,
+    2026*", or "release an album *before Dec 1*" vs "*by Dec 31*". Those are not
+    the same contract: there's a window where one resolves YES and the other NO,
+    so a "hedge" across them is an un-hedged directional bet (basis risk). This
+    gate extracts the governing deadline from each venue's TITLE + rules text and
+    rejects when they differ by more than a few days.
+
+    Deliberately conservative on recall: the many phrasings of the *same* cutoff
+    ("before Jan 1, 2027" == "by Dec 31, 2026" == "in 2026") normalize to within
+    a day and PASS; it only fires when both sides expose a clear deadline AND
+    they are materially apart. Same-deadline pairs whose divergence is purely
+    *definitional* (e.g. "arrested" defined differently) are NOT caught here —
+    that residue is left to the optional LLM tiebreaker.
+    """
+
+    name = "resolution_congruence"
+
+    def __init__(self, tolerance_days: Optional[int] = None):
+        self.tolerance_days = (
+            tolerance_days if tolerance_days is not None
+            else getattr(Config, "MATCH_MAX_DEADLINE_SKEW_DAYS", 7)
+        )
+
+    def verify(self, kalshi_market: Dict, polymarket_market: Dict) -> MatchVerdict:
+        k_dl = _extract_deadline(_raw_rules(kalshi_market))
+        p_dl = _extract_deadline(_raw_rules(polymarket_market))
+        # (a) Deadline mismatch is a hard reject (different settlement window).
+        if k_dl is not None and p_dl is not None:
+            skew = abs(k_dl - p_dl)
+            if skew > self.tolerance_days:
+                return MatchVerdict(
+                    False, UNKNOWN, 0.0,
+                    (f"deadline_mismatch skew={skew}d (>{self.tolerance_days})",),
+                    self.name,
+                )
+            base = (f"deadline_ok skew={skew}d",)
+            conf = 0.6
+        else:
+            base = ("deadline_unverified",)
+            conf = 0.3
+        # (b) Definitional divergence: one venue carves out exceptions the other
+        # doesn't (Polymarket's "...will NOT qualify" arrest list vs Kalshi's
+        # one-liner). Same deadline, different resolution FUNCTION → basis risk.
+        # NOT a hard reject (recall: verbose-vs-terse rules are often equivalent);
+        # flag UNCERTAIN so the tool holds it for review / the LLM tiebreaker
+        # adjudicates, rather than auto-allowlisting an un-hedged bet.
+        if _has_exclusion_clause(kalshi_market) != _has_exclusion_clause(polymarket_market):
+            return MatchVerdict(True, UNKNOWN, conf,
+                                base + ("exclusion_clause_asymmetry_review",),
+                                self.name, uncertain=True)
+        # (c) Threshold-comparator divergence: strict ">" on one venue vs
+        # inclusive ">=" on the other (Musk-trillionaire: "more than $1T" vs
+        # "reaches or exceeds $1T"). Exactly-on-threshold resolves YES on one
+        # venue and NO on the other. Flag UNCERTAIN, not reject (the boundary
+        # case is low- but non-zero-probability, and the asymmetry frequently
+        # accompanies a source-pinning difference too).
+        k_cmp = _threshold_comparator(kalshi_market)
+        p_cmp = _threshold_comparator(polymarket_market)
+        if k_cmp and p_cmp and k_cmp != p_cmp:
+            return MatchVerdict(True, UNKNOWN, conf,
+                                base + (f"threshold_comparator_asymmetry_review "
+                                        f"k={k_cmp} p={p_cmp}",),
+                                self.name, uncertain=True)
+        # (d) Resolution-authority asymmetry: one venue pins resolution to a
+        # named definitional authority (WHO, Bloomberg, CDC, ...) the other
+        # never mentions — the authority's judgment (or silence) IS that
+        # venue's market, so the pair can split (live pandemic pair: PM
+        # resolves on an official WHO declaration, which the WHO has no formal
+        # mechanism to make; Kalshi resolves on "any disease becomes a
+        # pandemic"). Flag UNCERTAIN, not reject; only fires when BOTH sides
+        # expose rules text, so a transient rules-backfill failure can't
+        # mass-flag the catalog.
+        k_auth, k_has = _named_authorities(kalshi_market)
+        p_auth, p_has = _named_authorities(polymarket_market)
+        if k_has and p_has and (k_auth ^ p_auth):
+            diff = ",".join(sorted(k_auth ^ p_auth))
+            return MatchVerdict(True, UNKNOWN, conf,
+                                base + (f"resolution_authority_asymmetry_review "
+                                        f"one_sided={diff}",),
+                                self.name, uncertain=True)
+        # (e) Competition-tier asymmetry: a sub-competition qualifier (league /
+        # conference / round) on ONE side only means the two markets sit at
+        # different tiers of the same tournament — hierarchically related, not
+        # identical (live audit 2026-06-09: Kalshi "Pro Baseball Championship"
+        # [= World Series] matched PM "American League Championship Series"
+        # [= AL pennant] and was labeled clean). Flag UNCERTAIN, not reject:
+        # the asymmetry can also be a genuine paraphrase ("win the AFC
+        # Championship" vs "reach the Super Bowl"), which review can clear.
+        k_tier = _competition_tiers(kalshi_market)
+        p_tier = _competition_tiers(polymarket_market)
+        if k_tier ^ p_tier:
+            diff = ",".join(sorted(k_tier ^ p_tier))
+            return MatchVerdict(True, UNKNOWN, conf,
+                                base + (f"competition_tier_asymmetry_review "
+                                        f"one_sided={diff}",),
+                                self.name, uncertain=True)
+        # (f) Seats-plurality asymmetry: one venue resolves on winning the MOST
+        # SEATS while the other never mentions seats at all. In parliamentary
+        # systems "winning the election" (forming government / providing the
+        # head of government) and "winning the most seats" genuinely diverge
+        # (live audit: PM Berlin-2026 pins "greatest number of seats"; Kalshi's
+        # rules are the tautology "If CDU wins ... resolves to Yes"). Narrowly
+        # scoped to seats so US first-past-the-post races ("most votes") are
+        # untouched.
+        k_seats = bool(_SEATS_PLURALITY_RX.search(_raw_rules(kalshi_market)))
+        p_seats = bool(_SEATS_PLURALITY_RX.search(_raw_rules(polymarket_market)))
+        if k_seats != p_seats:
+            other = _raw_rules(kalshi_market if p_seats else polymarket_market)
+            if not _SEAT_WORD_RX.search(other):
+                return MatchVerdict(True, UNKNOWN, conf,
+                                    base + ("seats_plurality_asymmetry_review",),
+                                    self.name, uncertain=True)
+        return MatchVerdict(True, UNKNOWN, conf, base, self.name)
+
+
+class AllowlistVerifier:
+    """Operator allow/deny override.
+
+    File format (``Config.MATCH_ALLOWLIST_FILE`` under ``Config.DATA_DIR``)::
+
+        {
+          "approved": [{"kalshi": "<ticker>", "polymarket": "<id>",
+                        "polarity": "aligned"}],
+          "denied":   [{"kalshi": "<ticker>", "polymarket": "<id>"}]
+        }
+
+    Behaviour: denied → fail; approved → pass with the recorded polarity and
+    confidence 1.0; neither → pass but flag ``not_allowlisted`` so the live gate
+    (``CompositeVerifier(require_allowlist=True)``) can reject it.
+    """
+
+    name = "allowlist"
+
+    def __init__(self, path: Optional[str] = None):
+        if path is None:
+            path = os.path.join(Config.DATA_DIR, Config.MATCH_ALLOWLIST_FILE)
+        self.path = path
+        self._approved: Dict = {}
+        self._denied: set = set()
+        self._mtime: Optional[float] = None
+        self._load()
+
+    @staticmethod
+    def _key(kalshi_id, polymarket_id) -> tuple:
+        return (str(kalshi_id), str(polymarket_id))
+
+    def _load(self) -> None:
+        try:
+            mtime = os.path.getmtime(self.path)
+        except OSError:
+            self._approved, self._denied, self._mtime = {}, set(), None
+            return
+        if mtime == self._mtime:
+            return
+        try:
+            with open(self.path) as fh:
+                data = json.load(fh)
+        except (OSError, json.JSONDecodeError) as exc:
+            logger.warning("Could not load match allowlist %s: %s", self.path, exc)
+            return
+        self._approved = {
+            self._key(e.get("kalshi"), e.get("polymarket")): e
+            for e in data.get("approved", [])
+        }
+        self._denied = {
+            self._key(e.get("kalshi"), e.get("polymarket"))
+            for e in data.get("denied", [])
+        }
+        self._mtime = mtime
+
+    def verify(self, kalshi_market: Dict, polymarket_market: Dict) -> MatchVerdict:
+        self._load()
+        key = self._key(kalshi_market.get("id"), polymarket_market.get("id"))
+        if key in self._denied:
+            return MatchVerdict(False, UNKNOWN, 0.0, ("denied_by_operator",), self.name)
+        entry = self._approved.get(key)
+        if entry:
+            polarity = entry.get("polarity", ALIGNED)
+            return MatchVerdict(True, polarity, 1.0, ("approved_by_operator",), self.name)
+        return MatchVerdict(True, UNKNOWN, 0.0, ("not_allowlisted",), self.name)
+
+    def is_allowlisted(self, kalshi_id, polymarket_id) -> bool:
+        self._load()
+        return self._key(kalshi_id, polymarket_id) in self._approved
+
+
+class CompositeVerifier:
+    """Run a chain of verifiers; pass only if none fails. Resolve polarity.
+
+    Polarity resolution precedence: an explicit allowlist polarity wins; then
+    the highest-confidence non-UNKNOWN polarity; ties → UNKNOWN.
+    """
+
+    name = "composite"
+
+    def __init__(
+        self,
+        verifiers: Optional[Sequence[MatchVerifier]] = None,
+        reject_unknown_polarity: Optional[bool] = None,
+        require_allowlist: bool = False,
+        tiebreaker: Optional["object"] = None,
+    ):
+        self.verifiers = list(verifiers) if verifiers is not None else default_verifiers()
+        self.reject_unknown_polarity = (
+            reject_unknown_polarity
+            if reject_unknown_polarity is not None
+            else Config.MATCH_REJECT_UNKNOWN_POLARITY
+        )
+        self.require_allowlist = require_allowlist
+        # Optional same-event judge for the ambiguous residue. Anything with a
+        # ``.judge(kalshi_market, polymarket_market) -> TiebreakResult`` method
+        # and an ``.enabled`` flag (e.g. ``LLMTiebreaker``). When None or
+        # disabled, uncertain pairs simply keep their deterministic verdict.
+        # NOTE: a per-pair tiebreaker here is convenient for evaluation/tests;
+        # the live detection loop prefers the BATCHED path (resolve all of a
+        # scan's uncertain pairs in one cached call) — see
+        # ``llm_tiebreaker.resolve_uncertain_batch``.
+        self.tiebreaker = tiebreaker
+
+    def verify(self, kalshi_market: Dict, polymarket_market: Dict) -> MatchVerdict:
+        reasons: List[str] = []
+        polarity = UNKNOWN
+        polarity_conf = -1.0
+        allowlisted = False
+        uncertain = False
+        confidences: List[float] = []
+
+        for verifier in self.verifiers:
+            verdict = verifier.verify(kalshi_market, polymarket_market)
+            vname = getattr(verifier, "name", verifier.__class__.__name__)
+            reasons.extend(f"{vname}:{r}" for r in verdict.reasons)
+            if not verdict.passed:
+                return MatchVerdict(False, verdict.polarity, 0.0, tuple(reasons), self.name)
+            confidences.append(verdict.confidence)
+            uncertain = uncertain or verdict.uncertain
+
+            if vname == AllowlistVerifier.name and "approved_by_operator" in verdict.reasons:
+                allowlisted = True
+                polarity, polarity_conf = verdict.polarity, 1.0
+            elif verdict.polarity != UNKNOWN and verdict.confidence > polarity_conf and not allowlisted:
+                polarity, polarity_conf = verdict.polarity, verdict.confidence
+
+        if self.require_allowlist and not allowlisted:
+            return MatchVerdict(False, polarity, 0.0, tuple(reasons + ["require_allowlist"]), self.name)
+
+        if polarity == UNKNOWN and self.reject_unknown_polarity:
+            return MatchVerdict(False, UNKNOWN, 0.0, tuple(reasons + ["unknown_polarity_rejected"]), self.name)
+
+        confidence = min(confidences) if confidences else 0.0
+
+        # An operator-approved pair is authoritative — never escalate it.
+        if uncertain and not allowlisted and self.tiebreaker is not None \
+                and getattr(self.tiebreaker, "enabled", False):
+            result = self.tiebreaker.judge(kalshi_market, polymarket_market)
+            if result is not None:
+                reasons.append(f"llm_tiebreaker:{result.reason}")
+                if not result.same_event:
+                    return MatchVerdict(False, UNKNOWN, result.confidence,
+                                        tuple(reasons), self.name)
+                # Same event — let the LLM's polarity win if the rules left it open.
+                if polarity == UNKNOWN and result.polarity != UNKNOWN:
+                    polarity = result.polarity
+                return MatchVerdict(True, polarity, max(confidence, result.confidence),
+                                    tuple(reasons), self.name, uncertain=False)
+
+        return MatchVerdict(True, polarity, confidence, tuple(reasons), self.name,
+                            uncertain=uncertain)
+
+
+def default_verifiers() -> List[MatchVerifier]:
+    """The standard detection-time verifier chain."""
+    return [
+        AllowlistVerifier(),
+        OutcomePolarityVerifier(),
+        DistinguishingEntityVerifier(),
+        ResolutionCriteriaVerifier(),
+        ResolutionCongruenceVerifier(),
+    ]

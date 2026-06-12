@@ -11,6 +11,13 @@ from collections import defaultdict
 import heapq
 from .api_clients import KalshiClient, PolymarketClient
 from .utils import clean_title, get_similarity_score, extract_stat_types, thresholds_compatible
+from .matching import (
+    CompositeVerifier,
+    INVERTED,
+    UNKNOWN,
+    LLMTiebreaker,
+    resolve_uncertain_batch,
+)
 from .config import Config
 from .mock_execution import MockExecutionEngine, FeeModel
 from .confirmed_pnl import ConfirmedPnLTracker
@@ -35,7 +42,25 @@ class MarketAnalyzer:
             'price_cache': {}
         }
         self.opportunities_history = []
-        
+
+        # Semantic match verification (Phase A): runs after the lexical
+        # similarity threshold to reject false positives (divergent resolution
+        # criteria, inverted polarity) before they reach the execution path.
+        self.match_verifier = CompositeVerifier() if Config.MATCH_VERIFICATION_ENABLED else None
+        # Optional LLM tiebreaker for the genuinely-ambiguous residue (asymmetric
+        # time anchors). A no-op unless ANTHROPIC_API_KEY is set and the SDK is
+        # installed, so the deterministic verdict is always the default. The
+        # per-pair verifier flags these ``uncertain``; we resolve a whole scan's
+        # uncertain pairs in ONE batched, prompt-cached call after matching.
+        self.match_tiebreaker = (
+            LLMTiebreaker() if Config.MATCH_VERIFICATION_ENABLED else None
+        )
+        self.completeness_stats_rejected_matches = 0
+        # Optional candidate capture for recall auditing (set ARB_CAPTURE_CANDIDATES
+        # to a file path to record every above-threshold pair + verdict).
+        self._candidate_capture = os.environ.get('ARB_CAPTURE_CANDIDATES') or None
+        self._candidate_capture_seen = set()
+
         # Performance optimization caches
         self._polymarket_term_index = defaultdict(set)  # term -> set of market_ids
         self._similarity_cache = {}  # (title1, title2) -> similarity
@@ -83,7 +108,17 @@ class MarketAnalyzer:
         self._orderbook_miss_logged: Set[str] = set()
         self._scan_orderbook_hits: Dict[str, int] = {'kalshi': 0, 'polymarket': 0}
         self._scan_orderbook_misses: Dict[str, int] = {'kalshi': 0, 'polymarket': 0}
-    
+        self._scan_orderbook_empty: Dict[str, int] = {'kalshi': 0, 'polymarket': 0}
+
+    @staticmethod
+    def _book_has_levels(orderbook: Dict, platform: str) -> bool:
+        """True if a fetched book has at least one resting bid/ask level."""
+        if platform == 'kalshi':
+            keys = ('yes_asks', 'yes_bids', 'no_asks', 'no_bids')
+        else:
+            keys = ('bids', 'asks')
+        return any(orderbook.get(k) for k in keys)
+
     async def initialize(self):
         """Initialize the analyzer with WebSocket connections."""
         logger.info("Initializing Market Analyzer with WebSocket-only mode...")
@@ -213,6 +248,7 @@ class MarketAnalyzer:
         # Reset per-scan orderbook counters, REST budgets, and nearest-miss tracker
         self._scan_orderbook_hits = {'kalshi': 0, 'polymarket': 0}
         self._scan_orderbook_misses = {'kalshi': 0, 'polymarket': 0}
+        self._scan_orderbook_empty = {'kalshi': 0, 'polymarket': 0}
         self._nearest_misses = []  # Track best rejected margins for diagnostics
         self.reset_completeness_stats()  # (B14) per-scan; else the scan report shows LIFETIME totals
         self.kalshi_client.reset_rest_budget()
@@ -313,6 +349,9 @@ class MarketAnalyzer:
                     self._scan_orderbook_hits['polymarket'] /
                     max(1, self._scan_orderbook_hits['polymarket'] + self._scan_orderbook_misses['polymarket'])
                 ),
+                # Books fetched OK but with no resting levels (liquidity health).
+                'kalshi_empty': self._scan_orderbook_empty['kalshi'],
+                'polymarket_empty': self._scan_orderbook_empty['polymarket'],
             }
         }
         
@@ -360,10 +399,27 @@ class MarketAnalyzer:
         k_misses = self._scan_orderbook_misses['kalshi']
         p_hits = self._scan_orderbook_hits['polymarket']
         p_misses = self._scan_orderbook_misses['polymarket']
+        k_empty = self._scan_orderbook_empty['kalshi']
+        p_empty = self._scan_orderbook_empty['polymarket']
         logger.info(
-            f"Orderbook availability: Kalshi {k_hits}/{k_hits+k_misses} hits, "
-            f"Polymarket {p_hits}/{p_hits+p_misses} hits"
+            f"Orderbook availability: Kalshi {k_hits}/{k_hits+k_misses} hits "
+            f"({k_empty} empty), Polymarket {p_hits}/{p_hits+p_misses} hits "
+            f"({p_empty} empty)"
         )
+        # Loud liquidity-health warning: if a venue's fetched books are all
+        # empty, detection CAN'T find arbitrage regardless of matching — this
+        # distinguishes "efficient market" from "no live liquidity on a venue".
+        if k_hits > 0 and k_empty == k_hits:
+            logger.warning(
+                "LIQUIDITY: all %d Kalshi books fetched were EMPTY (no resting "
+                "orders) — detection is starved on the Kalshi side. 0 opportunities "
+                "here reflects missing liquidity, not an efficient market.", k_hits
+            )
+        if p_hits > 0 and p_empty == p_hits:
+            logger.warning(
+                "LIQUIDITY: all %d Polymarket books fetched were EMPTY — detection "
+                "is starved on the Polymarket side.", p_hits
+            )
 
         self._first_scan_completed = True
         logger.info(f"Scan completed in {scan_duration:.2f}s - Found {len(opportunities)} opportunities")
@@ -595,6 +651,14 @@ class MarketAnalyzer:
                 if hasattr(self, 'kalshi_client') and market_id in self.kalshi_client.price_cache:
                     price_data = self.kalshi_client.price_cache[market_id]
                 
+                # Live quote/metadata live in the RAW Kalshi object (under
+                # 'raw_data'), under the migrated field names (yes_bid_dollars,
+                # volume_fp, ...). Prefer fresh WS price data when present, else
+                # the REST raw object.
+                raw = market.get('raw_data') or market
+                yes_bid = price_data.get('yes_bid')
+                if yes_bid is None:
+                    yes_bid = self._kalshi_price(raw, 'yes_bid', 0.5)
                 processed_market = {
                     'id': market_id,
                     'title': market_title,
@@ -602,10 +666,10 @@ class MarketAnalyzer:
                     'platform': 'kalshi',
                     'status': market.get('status', 'active'),
                     'close_time': market.get('close_time'),
-                    'yes_price': price_data.get('yes_bid', 0.5),  # Use WebSocket price data
-                    'no_price': 1.0 - price_data.get('yes_bid', 0.5),  # Complement
-                    'volume': self._safe_float(market.get('volume', 0)),
-                    'open_interest': self._safe_float(market.get('open_interest', 0)),
+                    'yes_price': yes_bid,
+                    'no_price': 1.0 - yes_bid,
+                    'volume': self._kalshi_count(raw, 'volume', 0.0),
+                    'open_interest': self._kalshi_count(raw, 'open_interest', 0.0),
                     'raw_data': market
                 }
                 
@@ -697,6 +761,18 @@ class MarketAnalyzer:
             logger.info(f"Completed batch {i+1}/{len(batch_results)} - found {len(result)} matches")
         
         logger.info(f"Found {len(matches)} potential market matches above {Config.SIMILARITY_THRESHOLD} threshold")
+
+        # LLM tiebreaker post-pass: resolve the scan's genuinely-ambiguous
+        # pairs (flagged ``uncertain`` by the deterministic verifier) in a
+        # single batched, prompt-cached call. No-op without an API key, so the
+        # deterministic matches pass through unchanged.
+        if self.match_tiebreaker is not None and getattr(self.match_tiebreaker, "enabled", False):
+            before = len(matches)
+            matches = resolve_uncertain_batch(matches, self.match_tiebreaker)
+            if len(matches) != before:
+                logger.info(
+                    f"LLM tiebreaker dropped {before - len(matches)} different-event pair(s)"
+                )
         return matches
     
     def _process_kalshi_batch(self, kalshi_batch: List[Dict], polymarket_markets: List[Dict], batch_id: int = 0) -> List[Dict]:
@@ -767,6 +843,41 @@ class MarketAnalyzer:
             for term in key_terms:
                 self._polymarket_term_index[term].add(market_id)
     
+    def _capture_candidate(self, k_market: Dict, p_market: Dict, similarity: float, verdict) -> None:
+        """Append one above-threshold candidate + verdict to the capture file.
+
+        Records the raw titles, rules, scope subtitles, similarity, and the
+        verifier's pass/fail + reasons so a human can audit recall (true matches
+        wrongly rejected) and precision (false matches wrongly accepted).
+        """
+        kid = str(k_market.get('id', '')); pid = str(p_market.get('id', ''))
+        key = (kid, pid)
+        if key in self._candidate_capture_seen:
+            return
+        self._candidate_capture_seen.add(key)
+        k_raw = k_market.get('raw_data', {}) or {}
+        p_raw = p_market.get('raw_data', {}) or {}
+        row = {
+            'kalshi_id': kid, 'polymarket_id': pid,
+            'kalshi_title': k_market.get('title', ''),
+            'polymarket_title': p_market.get('title', ''),
+            'similarity': round(float(similarity), 4),
+            'passed': bool(verdict.passed) if verdict else None,
+            'reasons': list(verdict.reasons) if verdict else [],
+            'polarity': verdict.polarity if verdict else None,
+            'kalshi_rules': str(k_raw.get('rules_primary', ''))[:300],
+            'polymarket_rules': str(p_raw.get('description', ''))[:300],
+            'kalshi_subtitle': str(k_raw.get('yes_sub_title', '')),
+            'kalshi_event_ticker': str(k_raw.get('event_ticker', '')),
+            'kalshi_close_time': k_market.get('close_time'),
+            'polymarket_close_time': p_market.get('close_time'),
+        }
+        try:
+            with open(self._candidate_capture, 'a') as fh:
+                fh.write(json.dumps(row) + '\n')
+        except OSError as e:
+            logger.debug(f"candidate capture write failed: {e}")
+
     async def _process_kalshi_batch_optimized(self, kalshi_batch: List[Dict], batch_id: int = 0) -> List[Dict]:
         """Optimized batch processing using adaptive limits and completeness tracking."""
         batch_matches = []
@@ -831,9 +942,26 @@ class MarketAnalyzer:
                     self._similarity_cache[similarity_key] = similarity
                 
                 if similarity >= Config.SIMILARITY_THRESHOLD:
+                    # --- Semantic verification gate (Phase A) ---
+                    # Lexical similarity is necessary but not sufficient: reject
+                    # pairs with divergent resolution criteria, and resolve
+                    # outcome polarity (Kalshi-YES vs PM YES/NO token).
+                    verdict = None
+                    if self.match_verifier is not None:
+                        verdict = self.match_verifier.verify(k_market, p_market)
+                        # Optional capture (ARB_CAPTURE_CANDIDATES=path): record
+                        # EVERY above-threshold candidate + its verdict so the
+                        # verifier's accept/reject decisions can be audited for
+                        # recall (false negatives) on real data.
+                        if self._candidate_capture is not None:
+                            self._capture_candidate(k_market, p_market, similarity, verdict)
+                        if not verdict.passed:
+                            self.completeness_stats_rejected_matches += 1
+                            continue
+
                     # Use heap to maintain top matches per Kalshi market (adaptive limit)
                     # Add unique tie-breaker to avoid dict comparison issues
-                    heap_item = (similarity, market_id, p_market)
+                    heap_item = (similarity, market_id, (p_market, verdict))
                     if len(top_matches) < max_matches:
                         heapq.heappush(top_matches, heap_item)
                     elif similarity > top_matches[0][0]:
@@ -841,9 +969,9 @@ class MarketAnalyzer:
                     elif len(top_matches) >= max_matches:
                         # Track truncation for completeness monitoring
                         self.completeness_stats['truncated_matches'] += 1
-            
+
             # Add top matches to results
-            for similarity, _, p_market in top_matches:
+            for similarity, _, (p_market, verdict) in top_matches:
                 match = {
                     'kalshi_market': k_market,
                     'polymarket_market': p_market,
@@ -851,6 +979,9 @@ class MarketAnalyzer:
                     'match_confidence': self._calculate_match_confidence(k_market, p_market),
                     'timestamp': datetime.now().isoformat()
                 }
+                if verdict is not None:
+                    match['verification'] = verdict.to_dict()
+                    match['polarity'] = verdict.polarity
                 batch_matches.append(match)
         
         return batch_matches
@@ -1131,7 +1262,13 @@ class MarketAnalyzer:
                 source=simulated_execution.get('confirmation_source', 'simulation'),
                 metadata=metadata,
                 mark_confirmed=True,
-                mark_settled=bool(Config.CONFIRMED_PNL_REQUIRE_SETTLEMENT),
+                # A LIVE exchange fill is confirmed-but-not-settled: profit is
+                # locked at fill, realized only at resolution (months out). The
+                # reconciler settles it later. Paper/sim settle at fill.
+                mark_settled=(
+                    simulated_execution.get('confirmation_source') != 'exchange'
+                    or bool(Config.CONFIRMED_PNL_MARK_SETTLED_AT_FILL)
+                ),
                 timestamp=float(simulated_execution.get('timestamp', time.time())),
             )
         except Exception as e:
@@ -1220,6 +1357,7 @@ class MarketAnalyzer:
         no_token_id = None
         no_orderbook = None
 
+        _dbg = os.environ.get('ARB_DEBUG_EDGES')
         for token_id, price_data in polymarket_prices.items():
             if not price_data:
                 continue
@@ -1229,6 +1367,10 @@ class MarketAnalyzer:
                 if ob:
                     yes_token_id = token_id
                     yes_orderbook = ob
+                elif _dbg:
+                    logger.info("YESBOOK_NONE tok=%s mid=%s | %.35s",
+                                str(token_id)[:10], str(polymarket_market['id'])[:14],
+                                polymarket_market.get('title', ''))
             elif outcome_name in {'no', 'false', '0'}:
                 ob = await self._get_cached_orderbook(polymarket_market['id'], 'polymarket', token_id)
                 if ob:
@@ -1256,6 +1398,44 @@ class MarketAnalyzer:
         if no_orderbook is not None and not _skew_ok(no_orderbook):
             self.completeness_stats['data_staleness_warnings'] += 1
             no_token_id = no_orderbook = None
+
+        # --- Polarity normalization (Phase A) ---
+        # All four strategies below are written in the Kalshi-YES frame: they
+        # assume the PM "yes_*" book is the SAME real-world outcome as Kalshi
+        # YES. When the verifier resolved the pair as INVERTED (Kalshi YES ==
+        # Polymarket NO token), swap the YES/NO books so the frame holds. This
+        # is the safety-critical fix: without it an inverted match turns a
+        # "buy YES / sell YES" hedge into buying the same side twice.
+        if match.get('polarity') == INVERTED:
+            yes_token_id, no_token_id = no_token_id, yes_token_id
+            yes_orderbook, no_orderbook = no_orderbook, yes_orderbook
+
+        # Optional edge instrumentation (set ARB_DEBUG_EDGES=1) — logs the raw
+        # cross-venue spread per matched pair so "0 opportunities" can be
+        # verified as real efficiency rather than a pricing bug.
+        if os.environ.get('ARB_DEBUG_EDGES') and not yes_orderbook:
+            _outs = {str(pd.get('outcome')): tid[:8] for tid, pd in polymarket_prices.items() if pd}
+            logger.info(
+                "NOEDGE prices=%d outcomes=%s yes_tok=%s kob=%s | %.35s",
+                len(polymarket_prices), _outs, bool(yes_token_id), bool(kalshi_orderbook),
+                polymarket_market.get('title', ''),
+            )
+        if os.environ.get('ARB_DEBUG_EDGES') and yes_orderbook:
+            def _best(levels, side):
+                ps = [l.get('price') for l in (levels or []) if l.get('price') is not None]
+                return (min(ps) if side == 'ask' else max(ps)) if ps else None
+            k_ask = _best(kalshi_orderbook.get('yes_asks'), 'ask')
+            k_bid = _best(kalshi_orderbook.get('yes_bids'), 'bid')
+            p_ask = _best(yes_orderbook.get('asks'), 'ask')
+            p_bid = _best(yes_orderbook.get('bids'), 'bid')
+            if None not in (k_ask, k_bid, p_ask, p_bid):
+                logger.info(
+                    "EDGE %s | K[ask=%.3f bid=%.3f] P[ask=%.3f bid=%.3f] "
+                    "buyK/sellP=%+.3f buyP/sellK=%+.3f | %.40s == %.40s",
+                    match.get('polarity', '?'), k_ask, k_bid, p_ask, p_bid,
+                    p_bid - k_ask, k_bid - p_ask,
+                    kalshi_market.get('title', ''), polymarket_market.get('title', ''),
+                )
 
         # Phase 2: Same-outcome strategies (existing logic, using YES orderbooks)
         if yes_orderbook:
@@ -1385,6 +1565,12 @@ class MarketAnalyzer:
                     'skipped_reason': result.skipped_reason,
                     'buy_order_id': result.buy_order_id,
                     'sell_order_id': result.sell_order_id,
+                    # Venue lineage for reconciliation against statements.
+                    'buy_fill_id': result.buy_fill_id,
+                    'sell_fill_id': result.sell_fill_id,
+                    'buy_trade_id': result.buy_trade_id,
+                    'sell_trade_id': result.sell_trade_id,
+                    'settlement_id': result.settlement_id,
                     'confirmation_source': result.confirmation_source,
                     'timestamp': result.timestamp,
                 }
@@ -1478,6 +1664,13 @@ class MarketAnalyzer:
                 if ts is None or (time.time() - float(ts)) <= max_age:
                     self.completeness_stats['cache_hits'] += 1
                     self._scan_orderbook_hits[platform] = self._scan_orderbook_hits.get(platform, 0) + 1
+                    # Liquidity health: a fetched book with no resting levels is a
+                    # "hit" but carries no tradeable depth. Tracking this lets a
+                    # live operator tell "efficient market" from "venue serving
+                    # empty books" (the latter is why a live scan can find 0 even
+                    # when both venues respond 200).
+                    if not self._book_has_levels(orderbook, platform):
+                        self._scan_orderbook_empty[platform] = self._scan_orderbook_empty.get(platform, 0) + 1
                     orderbook_copy = dict(orderbook)
                     orderbook_copy.setdefault('is_synthetic', False)
                     return orderbook_copy
@@ -1537,7 +1730,17 @@ class MarketAnalyzer:
         # Only return opportunities above threshold
         if profit_margin < Config.MIN_PROFIT_THRESHOLD:
             return None
-            
+        # Price-realism cap: a genuine same-event cross-venue edge is sub-15%;
+        # a 30-60% "margin" is a near-certain false match (different proposition,
+        # e.g. "score the MOST goals" vs "a goal") or a stale leg, NOT arbitrage.
+        # Reject so the autonomous machine never fires an un-hedged directional
+        # trade on a phantom edge.
+        if profit_margin > Config.MAX_PLAUSIBLE_PROFIT_MARGIN:
+            logger.warning(
+                "Rejecting implausible edge %.1f%% (>%.0f%%) as likely false match/stale: %s",
+                profit_margin * 100, Config.MAX_PLAUSIBLE_PROFIT_MARGIN * 100, strategy)
+            return None
+
         return {
             'strategy': strategy,
             'buy_platform': buy_platform,
@@ -1676,6 +1879,13 @@ class MarketAnalyzer:
         profit_margin = total_profit / total_cost if total_cost > 0 else 0
 
         if profit_margin < Config.MIN_PROFIT_THRESHOLD:
+            return None
+        # Price-realism cap (see same-outcome path): reject implausibly large
+        # complementary "edges" as false matches / stale legs, not arbitrage.
+        if profit_margin > Config.MAX_PLAUSIBLE_PROFIT_MARGIN:
+            logger.warning(
+                "Rejecting implausible complementary edge %.1f%% (>%.0f%%) as likely false match: %s",
+                profit_margin * 100, Config.MAX_PLAUSIBLE_PROFIT_MARGIN * 100, strategy)
             return None
 
         weighted_cost_a = sum(t['buy_price_a'] * t['volume'] for t in trades) / total_volume
@@ -2237,7 +2447,33 @@ class MarketAnalyzer:
             return float(value)
         except (ValueError, TypeError):
             return 0.0
-    
+
+    @staticmethod
+    def _kalshi_count(market: Dict, base: str, default: float = 0.0) -> float:
+        """Read a Kalshi fixed-point count field (volume_fp, open_interest_fp)
+        with legacy fallback; values may be strings."""
+        for key in (f"{base}_fp", base):
+            if market.get(key) is not None:
+                try:
+                    return float(market[key])
+                except (TypeError, ValueError):
+                    continue
+        return default
+
+    @staticmethod
+    def _kalshi_price(market: Dict, base: str, default: float = 0.5) -> float:
+        """Read a Kalshi dollar price field (yes_bid_dollars, ...) with legacy
+        fallback. The *_dollars fields are already 0..1; legacy cents (>1) are
+        divided by 100."""
+        for key in (f"{base}_dollars", base):
+            if market.get(key) is not None:
+                try:
+                    v = float(market[key])
+                    return v / 100.0 if v > 1 else v
+                except (TypeError, ValueError):
+                    continue
+        return default
+
     async def _save_scan_results(self, scan_report: Dict):
         """Save scan results to disk for historical analysis."""
         try:

@@ -6,7 +6,7 @@ Anything marked `[LEAD]` is plausible but NOT yet verified end-to-end.
 ## Kalshi historical recovery — CONFIRMED VIABLE (root cause = wrong endpoint tier)
 
 - **Coverage today:** 30 / 1090 games have Kalshi ticks (all Mar 22–25 2026). Cause is NOT data loss.
-- **Root cause:** `nba_odds_study/kalshi_hist.py::enumerate_markets` reads
+- **Root cause:** `research/research/nba_odds_study/kalshi_hist.py::enumerate_markets` reads
   `GET /events/{SERIES}-{datecode}{AWAY}{HOME}?with_nested_markets=true`. For settled games the
   event still resolves (HTTP 200) but its **nested `markets` array is empty**, so no tickers are
   enumerated → no candles → empty shard. Pre-cutoff settled markets have moved to the **historical tier**.
@@ -43,7 +43,7 @@ Anything marked `[LEAD]` is plausible but NOT yet verified end-to-end.
   1-min) remain unverified; only pursue if trade-calibration proves insufficient.
 
 ## Source rebuild feasibility
-- `nba_odds_study/_cache/*.pkl` pickles EXIST (Dataset objects incl. `game.on_intervals`), so a
+- `research/research/nba_odds_study/_cache/*.pkl` pickles EXIST (Dataset objects incl. `game.on_intervals`), so a
   from-pickle cache rebuild is feasible **without** re-fetching ESPN — useful if a source-level fix is ever
   needed. WS1's C1/C2/C3 fixes did NOT require it (they derive cleanly from correct raw lake data); C4
   (stars_on NaN-vs-0) measured at ~0% prevalence, so no rebuild needed there either.

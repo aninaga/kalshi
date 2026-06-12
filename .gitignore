@@ -127,6 +127,8 @@ market_data/trials_scratch.db
 /trials.db
 market_data/audit.log
 market_data/budget_ledger.jsonl
+# Live shadow-run artifacts (append-only ledger + monitor log) — runtime data.
+market_data/shadow/
 
 # In-tree venv symlink (per-user; points to ~/code/kvenv)
 research/.venv-research
@@ -153,3 +155,9 @@ market_data/polymarket_anirudh_*.csv
 
 # Claude Code agent worktrees + local settings
 .claude/
+
+# Execution runtime artifacts (Phase C/D)
+market_data/executions/
+market_data/EXECUTION_HALT
+market_data/matching/match_allowlist.json
+market_data/LIVE_TRADING_ARMED

@@ -497,6 +497,40 @@ class MonitoringSystem:
             self.metrics.record("cache_hits", 1)
         else:
             self.metrics.record("cache_misses", 1)
+
+    def record_execution(self, result: Any, estimate: Optional[Dict[str, Any]] = None,
+                         hedge: Optional[Dict[str, Any]] = None):
+        """Record execution-health metrics (Phase C).
+
+        ``result`` is an ExecutionResult-like object; ``estimate`` carries the
+        pre-trade expected net so we can track estimated-vs-realized drift.
+        """
+        self.metrics.record("executions", 1)
+        source = getattr(result, "confirmation_source", "unknown")
+        self.metrics.record("executions_by_source", 1, {"source": source})
+
+        skipped = getattr(result, "skipped_reason", None)
+        if skipped:
+            self.metrics.record("executions_skipped", 1, {"reason": skipped})
+            return
+
+        self.metrics.record("execution_filled_volume", float(getattr(result, "filled_volume", 0)))
+        self.metrics.record("execution_net_profit", float(getattr(result, "net_profit", 0)))
+        self.metrics.record("execution_latency_ms", float(getattr(result, "latency_ms", 0)))
+
+        if estimate is not None and "expected_net" in estimate:
+            realized = float(getattr(result, "net_profit", 0))
+            delta = realized - float(estimate["expected_net"])
+            self.metrics.record("execution_est_vs_real_delta", delta)
+
+        if hedge is not None:
+            if hedge.get("residual", 0) > 0 and not hedge.get("hedged", True):
+                self.metrics.record("execution_unwind_failures", 1)
+            elif hedge.get("unwind_filled"):
+                self.metrics.record("execution_hedges", 1)
+
+    def record_circuit_breaker_open(self, venue: str):
+        self.metrics.record("execution_circuit_breaker_opens", 1, {"venue": venue})
     
     # Dashboard data methods
     def get_dashboard_data(self) -> Dict[str, Any]:
@@ -537,6 +571,15 @@ class MonitoringSystem:
                 "total_active": len(active_alerts),
                 "by_priority": self._count_alerts_by_priority(active_alerts),
                 "recent": [a.to_dict() for a in active_alerts[:5]]
+            },
+            "execution": {
+                "count_last_hour": self.metrics.get_stats("executions", window_seconds=3600)["count"],
+                "filled_volume": self.metrics.get_stats("execution_filled_volume", window_seconds=3600)["sum"],
+                "net_profit": self.metrics.get_stats("execution_net_profit", window_seconds=3600)["sum"],
+                "hedges": self.metrics.get_stats("execution_hedges", window_seconds=3600)["count"],
+                "unwind_failures": self.metrics.get_stats("execution_unwind_failures", window_seconds=3600)["count"],
+                "circuit_breaker_opens": self.metrics.get_stats("execution_circuit_breaker_opens", window_seconds=3600)["count"],
+                "est_vs_real_delta_avg": self.metrics.get_stats("execution_est_vs_real_delta", window_seconds=3600)["avg"],
             }
         }
     

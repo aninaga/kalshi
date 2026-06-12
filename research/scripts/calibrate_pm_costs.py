@@ -30,7 +30,7 @@ import pyarrow.parquet as pq
 _ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_ROOT))
 
-from nba_odds_study import pm_trades  # noqa: E402
+from research.nba_odds_study import pm_trades  # noqa: E402
 
 LAKE = _ROOT / "market_data" / "lake" / "v1"
 OUT = _ROOT / "market_data" / "cost_calibration.json"

@@ -12,7 +12,7 @@ Example:
 import argparse
 import os
 
-from nba_odds_study import batch, schedule, sub_study
+from research.nba_odds_study import batch, schedule, sub_study
 
 
 def print_summary(s: dict, outdir: str) -> None:

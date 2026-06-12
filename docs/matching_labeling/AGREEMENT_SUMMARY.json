@@ -1,0 +1,21 @@
+{
+  "method": "4 independent labelers, blind to verifier; 40-pair shared calibration",
+  "calibration_4way_unanimous": "39/40 (98%)",
+  "polarity_unanimous_on_true_calibration": "14/14",
+  "corpus_size": 691,
+  "true": 263,
+  "false": 428,
+  "verifier_vs_gold": {
+    "precision": 0.985,
+    "recall": 1.0,
+    "f1": 0.993,
+    "FP": 4,
+    "FN": 0
+  },
+  "labelers": {
+    "batch_1": 204,
+    "batch_2": 203,
+    "batch_3": 203,
+    "batch_4": 203
+  }
+}
