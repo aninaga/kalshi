@@ -60,6 +60,14 @@ PAPER_JOBS = [
     (900, "paper_open", f"{PYTHON} -m research.lab.paper --open --book weather_maker_v1 --strategy forecast_gap_maker"),
     (900, "paper_mark", f"{PYTHON} -m research.lab.paper --mark --book weather_maker_v1"),
     (3600, "paper_settle", f"{PYTHON} -m research.lab.paper --settle --book weather_maker_v1"),
+    # measure-only pilots (2026-06-11): crypto BTC 95-99c hour-20 taker scan +
+    # weather maker FILL PROBE (60m rests, NYC/CHI). Same cadence as above.
+    (900, "paper_open_btc9599", f"{PYTHON} -m research.lab.paper --open --book crypto_btc9599_v1 --strategy btc_9599_pilot"),
+    (900, "paper_mark_btc9599", f"{PYTHON} -m research.lab.paper --mark --book crypto_btc9599_v1"),
+    (3600, "paper_settle_btc9599", f"{PYTHON} -m research.lab.paper --settle --book crypto_btc9599_v1"),
+    (900, "paper_open_wxprobe", f"{PYTHON} -m research.lab.paper --open --book weather_fillprobe_v2 --strategy wx_fillprobe"),
+    (900, "paper_mark_wxprobe", f"{PYTHON} -m research.lab.paper --mark --book weather_fillprobe_v2"),
+    (3600, "paper_settle_wxprobe", f"{PYTHON} -m research.lab.paper --settle --book weather_fillprobe_v2"),
 ]
 
 TOPUP_CMDS = [

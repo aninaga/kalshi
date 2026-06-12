@@ -36,18 +36,15 @@ Priority = expected information value about making (at least paper) money.
   count expression instead. (Codify into governance when convenient.)
 
 ## NOW (top = next lane to launch)
-1. **Crypto paper-trading support + BTC hour=20 pilot** (build lane) — **PILOT
-   GATE NOW PASSED** (btc_9599_capacity 2026-06-12: the survivor is sizeable &
-   two-sided across ALL volume buckets, not a thin-book artifact). Fills are the
-   program's binding uncertainty (paper 0/3 vs ~26-42% expected; crypto books
-   give ~48 events/day vs weather's ~5, so fill evidence accumulates 10x faster).
-   Load-bearing paper-engine refactor + the FIRST forward test -> interactive
-   apex, not a codex lane. STRUCTURAL PROPOSAL (do NOT self-apply): stand up a
-   NARROW crypto paper pilot of the BTC 95-99c / hour=20 ET / spread1c / 31-60m
-   sleeve, both sides, orders capped to displayed touch, vol>=100 preferred. Keep
-   it narrow: btc_session_regime says hour=20 is an isolated single-hour anomaly,
-   NOT a session regime, so do NOT generalize to neighbor hours. Hold only if
-   realized all-in entry cost stays under ~fee+1c (fee+2c turns it negative).
+1. ~~Crypto paper-trading support + BTC hour=20 pilot (build lane)~~ **BUILT
+   2026-06-12T03:14Z** (interactive apex; run note
+   `runs/paper_pilots_20260612T031450Z.md`). Paper harness generalized to a
+   per-family live seam (LIVE_FAMILIES: weather + crypto); two MEASURE-ONLY
+   books enrolled and on the controller cadence — see IN-FLIGHT. The pilot is
+   exactly the NARROW spec proposed here (hour=20 only, spread 1c, 31-60m,
+   vol>=100, both sides, cost line fee+1c via the real ceil'd taker fee);
+   docstrings carry BTC-ONLY-ARTIFACT + ISOLATED-SPIKE-NOISE + declared K=386
+   and forbid promotion without the min-12-holdout-events + alpha/K rules.
 2. ~~Favorite-leg taker lane (hyp #3) + 80-99c maker successor~~ **BOTH DEAD**
    (taker cancelled pre-gate; 80-99c maker successor KILLED by band8099_maker
    memo 2026-06-11: no maker spec survives holdout, -1.49c bid/-2.91c mid on
@@ -90,6 +87,20 @@ Priority = expected information value about making (at least paper) money.
    sharpen the surplus forecast.
 
 ## IN-FLIGHT
+- **crypto_btc9599_v1 paper book (btc_9599_pilot, 2026-06-12)** — MEASURE-ONLY
+  taker scan of the frozen BTC 95-99c / hour=20 ET / spread1c / 31-60m /
+  vol>=100 sleeve; records would-be fills at the displayed ask (the memos'
+  cross-through case), max 1 entry per event-side. Beats: open/mark 15m,
+  settle hourly. Expect ~1 event/day; weeks to a verdict by design. Promotion
+  forbidden by docstring without min-12-holdout-events + declared-K (K=386).
+- **weather_fillprobe_v2 paper book (wx_fillprobe, 2026-06-12)** — measure-only
+  maker FILL PROBE: same frozen forecast-gap signal as v1, 60m rests (a
+  pre-registered study horizon), restricted to the fill-MECHANICS levers
+  (NYC+CHI, local 06:00-15:59; the 66-cell schedule is EX-POST per
+  wx_sched_walkforward and is NOT used). Purpose: manufacture fills to measure
+  fill rate + adverse selection (~40% lower-bound 60m fill expected vs v1's
+  27%-at-30m). NOT alpha; answers the prior beat's structural proposal with
+  option (b) in a NEW book — weather_maker_v1 untouched.
 - weather_maker_v1 paper book (forecast_gap_maker) — live, beats every 15m.
   As of 2026-06-11 19:41Z: 0 fills, **5 cancelled**, fill_rate 0.0, ev 0.0.
   **RE-POINT PROPOSAL NOW DEAD:** wx_sched_walkforward (graded this beat) proved

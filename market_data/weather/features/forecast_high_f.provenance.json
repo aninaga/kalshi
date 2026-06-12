@@ -119,6 +119,723 @@
         "KXHIGHNY-26JUN10"
       ],
       "rule": "identical PIT rule; complete-local-day vintages only; known_from_ts always in the past at write time"
+    },
+    {
+      "script": "research/scripts/update_forecast_vintages.py",
+      "fetched_at": "2026-06-10T06:22:42+00:00",
+      "rows_appended": 12,
+      "events": [
+        "KXHIGHAUS-26JUN10",
+        "KXHIGHCHI-26JUN10",
+        "KXHIGHDEN-26JUN09",
+        "KXHIGHDEN-26JUN10",
+        "KXHIGHMIA-26JUN10",
+        "KXHIGHNY-26JUN10"
+      ],
+      "rule": "identical PIT rule; complete-local-day vintages only; known_from_ts always in the past at write time"
+    },
+    {
+      "script": "research/scripts/update_forecast_vintages.py",
+      "fetched_at": "2026-06-10T08:24:01+00:00",
+      "rows_appended": 10,
+      "events": [
+        "KXHIGHAUS-26JUN10",
+        "KXHIGHCHI-26JUN10",
+        "KXHIGHDEN-26JUN10",
+        "KXHIGHMIA-26JUN10",
+        "KXHIGHNY-26JUN10"
+      ],
+      "rule": "identical PIT rule; complete-local-day vintages only; known_from_ts always in the past at write time"
+    },
+    {
+      "script": "research/scripts/update_forecast_vintages.py",
+      "fetched_at": "2026-06-10T09:23:31+00:00",
+      "rows_appended": 10,
+      "events": [
+        "KXHIGHAUS-26JUN10",
+        "KXHIGHCHI-26JUN10",
+        "KXHIGHDEN-26JUN10",
+        "KXHIGHMIA-26JUN10",
+        "KXHIGHNY-26JUN10"
+      ],
+      "rule": "identical PIT rule; complete-local-day vintages only; known_from_ts always in the past at write time"
+    },
+    {
+      "script": "research/scripts/update_forecast_vintages.py",
+      "fetched_at": "2026-06-10T10:23:28+00:00",
+      "rows_appended": 10,
+      "events": [
+        "KXHIGHAUS-26JUN10",
+        "KXHIGHCHI-26JUN10",
+        "KXHIGHDEN-26JUN10",
+        "KXHIGHMIA-26JUN10",
+        "KXHIGHNY-26JUN10"
+      ],
+      "rule": "identical PIT rule; complete-local-day vintages only; known_from_ts always in the past at write time"
+    },
+    {
+      "script": "research/scripts/update_forecast_vintages.py",
+      "fetched_at": "2026-06-10T11:23:27+00:00",
+      "rows_appended": 10,
+      "events": [
+        "KXHIGHAUS-26JUN10",
+        "KXHIGHCHI-26JUN10",
+        "KXHIGHDEN-26JUN10",
+        "KXHIGHMIA-26JUN10",
+        "KXHIGHNY-26JUN10"
+      ],
+      "rule": "identical PIT rule; complete-local-day vintages only; known_from_ts always in the past at write time"
+    },
+    {
+      "script": "research/scripts/update_forecast_vintages.py",
+      "fetched_at": "2026-06-10T12:23:29+00:00",
+      "rows_appended": 10,
+      "events": [
+        "KXHIGHAUS-26JUN10",
+        "KXHIGHCHI-26JUN10",
+        "KXHIGHDEN-26JUN10",
+        "KXHIGHMIA-26JUN10",
+        "KXHIGHNY-26JUN10"
+      ],
+      "rule": "identical PIT rule; complete-local-day vintages only; known_from_ts always in the past at write time"
+    },
+    {
+      "script": "research/scripts/update_forecast_vintages.py",
+      "fetched_at": "2026-06-10T13:23:34+00:00",
+      "rows_appended": 10,
+      "events": [
+        "KXHIGHAUS-26JUN10",
+        "KXHIGHCHI-26JUN10",
+        "KXHIGHDEN-26JUN10",
+        "KXHIGHMIA-26JUN10",
+        "KXHIGHNY-26JUN10"
+      ],
+      "rule": "identical PIT rule; complete-local-day vintages only; known_from_ts always in the past at write time"
+    },
+    {
+      "script": "research/scripts/update_forecast_vintages.py",
+      "fetched_at": "2026-06-10T14:23:36+00:00",
+      "rows_appended": 15,
+      "events": [
+        "KXHIGHAUS-26JUN10",
+        "KXHIGHAUS-26JUN11",
+        "KXHIGHCHI-26JUN10",
+        "KXHIGHCHI-26JUN11",
+        "KXHIGHDEN-26JUN10",
+        "KXHIGHDEN-26JUN11",
+        "KXHIGHMIA-26JUN10",
+        "KXHIGHMIA-26JUN11",
+        "KXHIGHNY-26JUN10",
+        "KXHIGHNY-26JUN11"
+      ],
+      "rule": "identical PIT rule; complete-local-day vintages only; known_from_ts always in the past at write time"
+    },
+    {
+      "script": "research/scripts/update_forecast_vintages.py",
+      "fetched_at": "2026-06-10T15:23:42+00:00",
+      "rows_appended": 15,
+      "events": [
+        "KXHIGHAUS-26JUN10",
+        "KXHIGHAUS-26JUN11",
+        "KXHIGHCHI-26JUN10",
+        "KXHIGHCHI-26JUN11",
+        "KXHIGHDEN-26JUN10",
+        "KXHIGHDEN-26JUN11",
+        "KXHIGHMIA-26JUN10",
+        "KXHIGHMIA-26JUN11",
+        "KXHIGHNY-26JUN10",
+        "KXHIGHNY-26JUN11"
+      ],
+      "rule": "identical PIT rule; complete-local-day vintages only; known_from_ts always in the past at write time"
+    },
+    {
+      "script": "research/scripts/update_forecast_vintages.py",
+      "fetched_at": "2026-06-10T16:23:42+00:00",
+      "rows_appended": 15,
+      "events": [
+        "KXHIGHAUS-26JUN10",
+        "KXHIGHAUS-26JUN11",
+        "KXHIGHCHI-26JUN10",
+        "KXHIGHCHI-26JUN11",
+        "KXHIGHDEN-26JUN10",
+        "KXHIGHDEN-26JUN11",
+        "KXHIGHMIA-26JUN10",
+        "KXHIGHMIA-26JUN11",
+        "KXHIGHNY-26JUN10",
+        "KXHIGHNY-26JUN11"
+      ],
+      "rule": "identical PIT rule; complete-local-day vintages only; known_from_ts always in the past at write time"
+    },
+    {
+      "script": "research/scripts/update_forecast_vintages.py",
+      "fetched_at": "2026-06-10T17:23:43+00:00",
+      "rows_appended": 15,
+      "events": [
+        "KXHIGHAUS-26JUN10",
+        "KXHIGHAUS-26JUN11",
+        "KXHIGHCHI-26JUN10",
+        "KXHIGHCHI-26JUN11",
+        "KXHIGHDEN-26JUN10",
+        "KXHIGHDEN-26JUN11",
+        "KXHIGHMIA-26JUN10",
+        "KXHIGHMIA-26JUN11",
+        "KXHIGHNY-26JUN10",
+        "KXHIGHNY-26JUN11"
+      ],
+      "rule": "identical PIT rule; complete-local-day vintages only; known_from_ts always in the past at write time"
+    },
+    {
+      "script": "research/scripts/update_forecast_vintages.py",
+      "fetched_at": "2026-06-10T18:23:47+00:00",
+      "rows_appended": 15,
+      "events": [
+        "KXHIGHAUS-26JUN10",
+        "KXHIGHAUS-26JUN11",
+        "KXHIGHCHI-26JUN10",
+        "KXHIGHCHI-26JUN11",
+        "KXHIGHDEN-26JUN10",
+        "KXHIGHDEN-26JUN11",
+        "KXHIGHMIA-26JUN10",
+        "KXHIGHMIA-26JUN11",
+        "KXHIGHNY-26JUN10",
+        "KXHIGHNY-26JUN11"
+      ],
+      "rule": "identical PIT rule; complete-local-day vintages only; known_from_ts always in the past at write time"
+    },
+    {
+      "script": "research/scripts/update_forecast_vintages.py",
+      "fetched_at": "2026-06-10T19:23:54+00:00",
+      "rows_appended": 15,
+      "events": [
+        "KXHIGHAUS-26JUN10",
+        "KXHIGHAUS-26JUN11",
+        "KXHIGHCHI-26JUN10",
+        "KXHIGHCHI-26JUN11",
+        "KXHIGHDEN-26JUN10",
+        "KXHIGHDEN-26JUN11",
+        "KXHIGHMIA-26JUN10",
+        "KXHIGHMIA-26JUN11",
+        "KXHIGHNY-26JUN10",
+        "KXHIGHNY-26JUN11"
+      ],
+      "rule": "identical PIT rule; complete-local-day vintages only; known_from_ts always in the past at write time"
+    },
+    {
+      "script": "research/scripts/update_forecast_vintages.py",
+      "fetched_at": "2026-06-10T20:24:04+00:00",
+      "rows_appended": 15,
+      "events": [
+        "KXHIGHAUS-26JUN10",
+        "KXHIGHAUS-26JUN11",
+        "KXHIGHCHI-26JUN10",
+        "KXHIGHCHI-26JUN11",
+        "KXHIGHDEN-26JUN10",
+        "KXHIGHDEN-26JUN11",
+        "KXHIGHMIA-26JUN10",
+        "KXHIGHMIA-26JUN11",
+        "KXHIGHNY-26JUN10",
+        "KXHIGHNY-26JUN11"
+      ],
+      "rule": "identical PIT rule; complete-local-day vintages only; known_from_ts always in the past at write time"
+    },
+    {
+      "script": "research/scripts/update_forecast_vintages.py",
+      "fetched_at": "2026-06-10T21:24:13+00:00",
+      "rows_appended": 15,
+      "events": [
+        "KXHIGHAUS-26JUN10",
+        "KXHIGHAUS-26JUN11",
+        "KXHIGHCHI-26JUN10",
+        "KXHIGHCHI-26JUN11",
+        "KXHIGHDEN-26JUN10",
+        "KXHIGHDEN-26JUN11",
+        "KXHIGHMIA-26JUN10",
+        "KXHIGHMIA-26JUN11",
+        "KXHIGHNY-26JUN10",
+        "KXHIGHNY-26JUN11"
+      ],
+      "rule": "identical PIT rule; complete-local-day vintages only; known_from_ts always in the past at write time"
+    },
+    {
+      "script": "research/scripts/update_forecast_vintages.py",
+      "fetched_at": "2026-06-10T22:24:12+00:00",
+      "rows_appended": 15,
+      "events": [
+        "KXHIGHAUS-26JUN10",
+        "KXHIGHAUS-26JUN11",
+        "KXHIGHCHI-26JUN10",
+        "KXHIGHCHI-26JUN11",
+        "KXHIGHDEN-26JUN10",
+        "KXHIGHDEN-26JUN11",
+        "KXHIGHMIA-26JUN10",
+        "KXHIGHMIA-26JUN11",
+        "KXHIGHNY-26JUN10",
+        "KXHIGHNY-26JUN11"
+      ],
+      "rule": "identical PIT rule; complete-local-day vintages only; known_from_ts always in the past at write time"
+    },
+    {
+      "script": "research/scripts/update_forecast_vintages.py",
+      "fetched_at": "2026-06-10T23:24:23+00:00",
+      "rows_appended": 15,
+      "events": [
+        "KXHIGHAUS-26JUN10",
+        "KXHIGHAUS-26JUN11",
+        "KXHIGHCHI-26JUN10",
+        "KXHIGHCHI-26JUN11",
+        "KXHIGHDEN-26JUN10",
+        "KXHIGHDEN-26JUN11",
+        "KXHIGHMIA-26JUN10",
+        "KXHIGHMIA-26JUN11",
+        "KXHIGHNY-26JUN10",
+        "KXHIGHNY-26JUN11"
+      ],
+      "rule": "identical PIT rule; complete-local-day vintages only; known_from_ts always in the past at write time"
+    },
+    {
+      "script": "research/scripts/update_forecast_vintages.py",
+      "fetched_at": "2026-06-11T00:24:22+00:00",
+      "rows_appended": 15,
+      "events": [
+        "KXHIGHAUS-26JUN10",
+        "KXHIGHAUS-26JUN11",
+        "KXHIGHCHI-26JUN10",
+        "KXHIGHCHI-26JUN11",
+        "KXHIGHDEN-26JUN10",
+        "KXHIGHDEN-26JUN11",
+        "KXHIGHMIA-26JUN10",
+        "KXHIGHMIA-26JUN11",
+        "KXHIGHNY-26JUN10",
+        "KXHIGHNY-26JUN11"
+      ],
+      "rule": "identical PIT rule; complete-local-day vintages only; known_from_ts always in the past at write time"
+    },
+    {
+      "script": "research/scripts/update_forecast_vintages.py",
+      "fetched_at": "2026-06-11T01:24:32+00:00",
+      "rows_appended": 15,
+      "events": [
+        "KXHIGHAUS-26JUN10",
+        "KXHIGHAUS-26JUN11",
+        "KXHIGHCHI-26JUN10",
+        "KXHIGHCHI-26JUN11",
+        "KXHIGHDEN-26JUN10",
+        "KXHIGHDEN-26JUN11",
+        "KXHIGHMIA-26JUN10",
+        "KXHIGHMIA-26JUN11",
+        "KXHIGHNY-26JUN10",
+        "KXHIGHNY-26JUN11"
+      ],
+      "rule": "identical PIT rule; complete-local-day vintages only; known_from_ts always in the past at write time"
+    },
+    {
+      "script": "research/scripts/update_forecast_vintages.py",
+      "fetched_at": "2026-06-11T02:24:40+00:00",
+      "rows_appended": 15,
+      "events": [
+        "KXHIGHAUS-26JUN10",
+        "KXHIGHAUS-26JUN11",
+        "KXHIGHCHI-26JUN10",
+        "KXHIGHCHI-26JUN11",
+        "KXHIGHDEN-26JUN10",
+        "KXHIGHDEN-26JUN11",
+        "KXHIGHMIA-26JUN10",
+        "KXHIGHMIA-26JUN11",
+        "KXHIGHNY-26JUN10",
+        "KXHIGHNY-26JUN11"
+      ],
+      "rule": "identical PIT rule; complete-local-day vintages only; known_from_ts always in the past at write time"
+    },
+    {
+      "script": "research/scripts/update_forecast_vintages.py",
+      "fetched_at": "2026-06-11T03:24:49+00:00",
+      "rows_appended": 17,
+      "events": [
+        "KXHIGHAUS-26JUN10",
+        "KXHIGHAUS-26JUN11",
+        "KXHIGHCHI-26JUN10",
+        "KXHIGHCHI-26JUN11",
+        "KXHIGHDEN-26JUN10",
+        "KXHIGHDEN-26JUN11",
+        "KXHIGHMIA-26JUN10",
+        "KXHIGHMIA-26JUN11",
+        "KXHIGHNY-26JUN10",
+        "KXHIGHNY-26JUN11"
+      ],
+      "rule": "identical PIT rule; complete-local-day vintages only; known_from_ts always in the past at write time"
+    },
+    {
+      "script": "research/scripts/update_forecast_vintages.py",
+      "fetched_at": "2026-06-11T04:25:00+00:00",
+      "rows_appended": 19,
+      "events": [
+        "KXHIGHAUS-26JUN10",
+        "KXHIGHAUS-26JUN11",
+        "KXHIGHCHI-26JUN10",
+        "KXHIGHCHI-26JUN11",
+        "KXHIGHDEN-26JUN10",
+        "KXHIGHDEN-26JUN11",
+        "KXHIGHMIA-26JUN10",
+        "KXHIGHMIA-26JUN11",
+        "KXHIGHNY-26JUN10",
+        "KXHIGHNY-26JUN11"
+      ],
+      "rule": "identical PIT rule; complete-local-day vintages only; known_from_ts always in the past at write time"
+    },
+    {
+      "script": "research/scripts/update_forecast_vintages.py",
+      "fetched_at": "2026-06-11T05:25:07+00:00",
+      "rows_appended": 16,
+      "events": [
+        "KXHIGHAUS-26JUN10",
+        "KXHIGHAUS-26JUN11",
+        "KXHIGHCHI-26JUN10",
+        "KXHIGHCHI-26JUN11",
+        "KXHIGHDEN-26JUN10",
+        "KXHIGHDEN-26JUN11",
+        "KXHIGHMIA-26JUN11",
+        "KXHIGHNY-26JUN11"
+      ],
+      "rule": "identical PIT rule; complete-local-day vintages only; known_from_ts always in the past at write time"
+    },
+    {
+      "script": "research/scripts/update_forecast_vintages.py",
+      "fetched_at": "2026-06-11T06:25:15+00:00",
+      "rows_appended": 12,
+      "events": [
+        "KXHIGHAUS-26JUN11",
+        "KXHIGHCHI-26JUN11",
+        "KXHIGHDEN-26JUN10",
+        "KXHIGHDEN-26JUN11",
+        "KXHIGHMIA-26JUN11",
+        "KXHIGHNY-26JUN11"
+      ],
+      "rule": "identical PIT rule; complete-local-day vintages only; known_from_ts always in the past at write time"
+    },
+    {
+      "script": "research/scripts/update_forecast_vintages.py",
+      "fetched_at": "2026-06-11T07:25:16+00:00",
+      "rows_appended": 10,
+      "events": [
+        "KXHIGHAUS-26JUN11",
+        "KXHIGHCHI-26JUN11",
+        "KXHIGHDEN-26JUN11",
+        "KXHIGHMIA-26JUN11",
+        "KXHIGHNY-26JUN11"
+      ],
+      "rule": "identical PIT rule; complete-local-day vintages only; known_from_ts always in the past at write time"
+    },
+    {
+      "script": "research/scripts/update_forecast_vintages.py",
+      "fetched_at": "2026-06-11T08:25:26+00:00",
+      "rows_appended": 10,
+      "events": [
+        "KXHIGHAUS-26JUN11",
+        "KXHIGHCHI-26JUN11",
+        "KXHIGHDEN-26JUN11",
+        "KXHIGHMIA-26JUN11",
+        "KXHIGHNY-26JUN11"
+      ],
+      "rule": "identical PIT rule; complete-local-day vintages only; known_from_ts always in the past at write time"
+    },
+    {
+      "script": "research/scripts/update_forecast_vintages.py",
+      "fetched_at": "2026-06-11T09:25:34+00:00",
+      "rows_appended": 10,
+      "events": [
+        "KXHIGHAUS-26JUN11",
+        "KXHIGHCHI-26JUN11",
+        "KXHIGHDEN-26JUN11",
+        "KXHIGHMIA-26JUN11",
+        "KXHIGHNY-26JUN11"
+      ],
+      "rule": "identical PIT rule; complete-local-day vintages only; known_from_ts always in the past at write time"
+    },
+    {
+      "script": "research/scripts/update_forecast_vintages.py",
+      "fetched_at": "2026-06-11T10:25:39+00:00",
+      "rows_appended": 10,
+      "events": [
+        "KXHIGHAUS-26JUN11",
+        "KXHIGHCHI-26JUN11",
+        "KXHIGHDEN-26JUN11",
+        "KXHIGHMIA-26JUN11",
+        "KXHIGHNY-26JUN11"
+      ],
+      "rule": "identical PIT rule; complete-local-day vintages only; known_from_ts always in the past at write time"
+    },
+    {
+      "script": "research/scripts/update_forecast_vintages.py",
+      "fetched_at": "2026-06-11T11:25:49+00:00",
+      "rows_appended": 10,
+      "events": [
+        "KXHIGHAUS-26JUN11",
+        "KXHIGHCHI-26JUN11",
+        "KXHIGHDEN-26JUN11",
+        "KXHIGHMIA-26JUN11",
+        "KXHIGHNY-26JUN11"
+      ],
+      "rule": "identical PIT rule; complete-local-day vintages only; known_from_ts always in the past at write time"
+    },
+    {
+      "script": "research/scripts/update_forecast_vintages.py",
+      "fetched_at": "2026-06-11T12:25:55+00:00",
+      "rows_appended": 10,
+      "events": [
+        "KXHIGHAUS-26JUN11",
+        "KXHIGHCHI-26JUN11",
+        "KXHIGHDEN-26JUN11",
+        "KXHIGHMIA-26JUN11",
+        "KXHIGHNY-26JUN11"
+      ],
+      "rule": "identical PIT rule; complete-local-day vintages only; known_from_ts always in the past at write time"
+    },
+    {
+      "script": "research/scripts/update_forecast_vintages.py",
+      "fetched_at": "2026-06-11T13:25:57+00:00",
+      "rows_appended": 10,
+      "events": [
+        "KXHIGHAUS-26JUN11",
+        "KXHIGHCHI-26JUN11",
+        "KXHIGHDEN-26JUN11",
+        "KXHIGHMIA-26JUN11",
+        "KXHIGHNY-26JUN11"
+      ],
+      "rule": "identical PIT rule; complete-local-day vintages only; known_from_ts always in the past at write time"
+    },
+    {
+      "script": "research/scripts/update_forecast_vintages.py",
+      "fetched_at": "2026-06-11T14:26:02+00:00",
+      "rows_appended": 15,
+      "events": [
+        "KXHIGHAUS-26JUN11",
+        "KXHIGHAUS-26JUN12",
+        "KXHIGHCHI-26JUN11",
+        "KXHIGHCHI-26JUN12",
+        "KXHIGHDEN-26JUN11",
+        "KXHIGHDEN-26JUN12",
+        "KXHIGHMIA-26JUN11",
+        "KXHIGHMIA-26JUN12",
+        "KXHIGHNY-26JUN11",
+        "KXHIGHNY-26JUN12"
+      ],
+      "rule": "identical PIT rule; complete-local-day vintages only; known_from_ts always in the past at write time"
+    },
+    {
+      "script": "research/scripts/update_forecast_vintages.py",
+      "fetched_at": "2026-06-11T15:26:00+00:00",
+      "rows_appended": 15,
+      "events": [
+        "KXHIGHAUS-26JUN11",
+        "KXHIGHAUS-26JUN12",
+        "KXHIGHCHI-26JUN11",
+        "KXHIGHCHI-26JUN12",
+        "KXHIGHDEN-26JUN11",
+        "KXHIGHDEN-26JUN12",
+        "KXHIGHMIA-26JUN11",
+        "KXHIGHMIA-26JUN12",
+        "KXHIGHNY-26JUN11",
+        "KXHIGHNY-26JUN12"
+      ],
+      "rule": "identical PIT rule; complete-local-day vintages only; known_from_ts always in the past at write time"
+    },
+    {
+      "script": "research/scripts/update_forecast_vintages.py",
+      "fetched_at": "2026-06-11T16:26:12+00:00",
+      "rows_appended": 15,
+      "events": [
+        "KXHIGHAUS-26JUN11",
+        "KXHIGHAUS-26JUN12",
+        "KXHIGHCHI-26JUN11",
+        "KXHIGHCHI-26JUN12",
+        "KXHIGHDEN-26JUN11",
+        "KXHIGHDEN-26JUN12",
+        "KXHIGHMIA-26JUN11",
+        "KXHIGHMIA-26JUN12",
+        "KXHIGHNY-26JUN11",
+        "KXHIGHNY-26JUN12"
+      ],
+      "rule": "identical PIT rule; complete-local-day vintages only; known_from_ts always in the past at write time"
+    },
+    {
+      "script": "research/scripts/update_forecast_vintages.py",
+      "fetched_at": "2026-06-11T17:26:20+00:00",
+      "rows_appended": 15,
+      "events": [
+        "KXHIGHAUS-26JUN11",
+        "KXHIGHAUS-26JUN12",
+        "KXHIGHCHI-26JUN11",
+        "KXHIGHCHI-26JUN12",
+        "KXHIGHDEN-26JUN11",
+        "KXHIGHDEN-26JUN12",
+        "KXHIGHMIA-26JUN11",
+        "KXHIGHMIA-26JUN12",
+        "KXHIGHNY-26JUN11",
+        "KXHIGHNY-26JUN12"
+      ],
+      "rule": "identical PIT rule; complete-local-day vintages only; known_from_ts always in the past at write time"
+    },
+    {
+      "script": "research/scripts/update_forecast_vintages.py",
+      "fetched_at": "2026-06-11T18:26:23+00:00",
+      "rows_appended": 15,
+      "events": [
+        "KXHIGHAUS-26JUN11",
+        "KXHIGHAUS-26JUN12",
+        "KXHIGHCHI-26JUN11",
+        "KXHIGHCHI-26JUN12",
+        "KXHIGHDEN-26JUN11",
+        "KXHIGHDEN-26JUN12",
+        "KXHIGHMIA-26JUN11",
+        "KXHIGHMIA-26JUN12",
+        "KXHIGHNY-26JUN11",
+        "KXHIGHNY-26JUN12"
+      ],
+      "rule": "identical PIT rule; complete-local-day vintages only; known_from_ts always in the past at write time"
+    },
+    {
+      "script": "research/scripts/update_forecast_vintages.py",
+      "fetched_at": "2026-06-11T19:26:30+00:00",
+      "rows_appended": 15,
+      "events": [
+        "KXHIGHAUS-26JUN11",
+        "KXHIGHAUS-26JUN12",
+        "KXHIGHCHI-26JUN11",
+        "KXHIGHCHI-26JUN12",
+        "KXHIGHDEN-26JUN11",
+        "KXHIGHDEN-26JUN12",
+        "KXHIGHMIA-26JUN11",
+        "KXHIGHMIA-26JUN12",
+        "KXHIGHNY-26JUN11",
+        "KXHIGHNY-26JUN12"
+      ],
+      "rule": "identical PIT rule; complete-local-day vintages only; known_from_ts always in the past at write time"
+    },
+    {
+      "script": "research/scripts/update_forecast_vintages.py",
+      "fetched_at": "2026-06-11T20:26:39+00:00",
+      "rows_appended": 15,
+      "events": [
+        "KXHIGHAUS-26JUN11",
+        "KXHIGHAUS-26JUN12",
+        "KXHIGHCHI-26JUN11",
+        "KXHIGHCHI-26JUN12",
+        "KXHIGHDEN-26JUN11",
+        "KXHIGHDEN-26JUN12",
+        "KXHIGHMIA-26JUN11",
+        "KXHIGHMIA-26JUN12",
+        "KXHIGHNY-26JUN11",
+        "KXHIGHNY-26JUN12"
+      ],
+      "rule": "identical PIT rule; complete-local-day vintages only; known_from_ts always in the past at write time"
+    },
+    {
+      "script": "research/scripts/update_forecast_vintages.py",
+      "fetched_at": "2026-06-11T21:26:43+00:00",
+      "rows_appended": 15,
+      "events": [
+        "KXHIGHAUS-26JUN11",
+        "KXHIGHAUS-26JUN12",
+        "KXHIGHCHI-26JUN11",
+        "KXHIGHCHI-26JUN12",
+        "KXHIGHDEN-26JUN11",
+        "KXHIGHDEN-26JUN12",
+        "KXHIGHMIA-26JUN11",
+        "KXHIGHMIA-26JUN12",
+        "KXHIGHNY-26JUN11",
+        "KXHIGHNY-26JUN12"
+      ],
+      "rule": "identical PIT rule; complete-local-day vintages only; known_from_ts always in the past at write time"
+    },
+    {
+      "script": "research/scripts/update_forecast_vintages.py",
+      "fetched_at": "2026-06-11T22:26:45+00:00",
+      "rows_appended": 15,
+      "events": [
+        "KXHIGHAUS-26JUN11",
+        "KXHIGHAUS-26JUN12",
+        "KXHIGHCHI-26JUN11",
+        "KXHIGHCHI-26JUN12",
+        "KXHIGHDEN-26JUN11",
+        "KXHIGHDEN-26JUN12",
+        "KXHIGHMIA-26JUN11",
+        "KXHIGHMIA-26JUN12",
+        "KXHIGHNY-26JUN11",
+        "KXHIGHNY-26JUN12"
+      ],
+      "rule": "identical PIT rule; complete-local-day vintages only; known_from_ts always in the past at write time"
+    },
+    {
+      "script": "research/scripts/update_forecast_vintages.py",
+      "fetched_at": "2026-06-11T23:26:51+00:00",
+      "rows_appended": 15,
+      "events": [
+        "KXHIGHAUS-26JUN11",
+        "KXHIGHAUS-26JUN12",
+        "KXHIGHCHI-26JUN11",
+        "KXHIGHCHI-26JUN12",
+        "KXHIGHDEN-26JUN11",
+        "KXHIGHDEN-26JUN12",
+        "KXHIGHMIA-26JUN11",
+        "KXHIGHMIA-26JUN12",
+        "KXHIGHNY-26JUN11",
+        "KXHIGHNY-26JUN12"
+      ],
+      "rule": "identical PIT rule; complete-local-day vintages only; known_from_ts always in the past at write time"
+    },
+    {
+      "script": "research/scripts/update_forecast_vintages.py",
+      "fetched_at": "2026-06-12T00:26:55+00:00",
+      "rows_appended": 15,
+      "events": [
+        "KXHIGHAUS-26JUN11",
+        "KXHIGHAUS-26JUN12",
+        "KXHIGHCHI-26JUN11",
+        "KXHIGHCHI-26JUN12",
+        "KXHIGHDEN-26JUN11",
+        "KXHIGHDEN-26JUN12",
+        "KXHIGHMIA-26JUN11",
+        "KXHIGHMIA-26JUN12",
+        "KXHIGHNY-26JUN11",
+        "KXHIGHNY-26JUN12"
+      ],
+      "rule": "identical PIT rule; complete-local-day vintages only; known_from_ts always in the past at write time"
+    },
+    {
+      "script": "research/scripts/update_forecast_vintages.py",
+      "fetched_at": "2026-06-12T01:27:03+00:00",
+      "rows_appended": 15,
+      "events": [
+        "KXHIGHAUS-26JUN11",
+        "KXHIGHAUS-26JUN12",
+        "KXHIGHCHI-26JUN11",
+        "KXHIGHCHI-26JUN12",
+        "KXHIGHDEN-26JUN11",
+        "KXHIGHDEN-26JUN12",
+        "KXHIGHMIA-26JUN11",
+        "KXHIGHMIA-26JUN12",
+        "KXHIGHNY-26JUN11",
+        "KXHIGHNY-26JUN12"
+      ],
+      "rule": "identical PIT rule; complete-local-day vintages only; known_from_ts always in the past at write time"
+    },
+    {
+      "script": "research/scripts/update_forecast_vintages.py",
+      "fetched_at": "2026-06-12T02:27:11+00:00",
+      "rows_appended": 15,
+      "events": [
+        "KXHIGHAUS-26JUN11",
+        "KXHIGHAUS-26JUN12",
+        "KXHIGHCHI-26JUN11",
+        "KXHIGHCHI-26JUN12",
+        "KXHIGHDEN-26JUN11",
+        "KXHIGHDEN-26JUN12",
+        "KXHIGHMIA-26JUN11",
+        "KXHIGHMIA-26JUN12",
+        "KXHIGHNY-26JUN11",
+        "KXHIGHNY-26JUN12"
+      ],
+      "rule": "identical PIT rule; complete-local-day vintages only; known_from_ts always in the past at write time"
     }
   ]
 }
