@@ -25,13 +25,29 @@ Priority = expected information value about making (at least paper) money.
   weather maker (fill-schedule, queue-haircut, real-fill EV), the one
   weakly-alive BTC 95-99c thread, and NEW families whose edge is not a
   microstructure-fill edge.
+- **Min-holdout-events floor (2026-06-12 self-opt)**: any registered hypothesis
+  or locked taker rule whose holdout fires on < 12 DISTINCT settlement events is
+  UNDERPOWERED — label it so and do NOT claim an edge regardless of point
+  estimate or which way the CI leans. Recurring failure mode this kills:
+  nba_revrev, nba_clv_homeleg (CI [-5.29c,+6.16c]) and wx_xcity (5 events, 2
+  winners, CI crosses 0) ALL produced point-positive holdouts whose multiple-
+  testing CI crossed zero largely because the event count was tiny. Few-event
+  holdouts cannot distinguish edge from luck; spend the lane on a higher-event-
+  count expression instead. (Codify into governance when convenient.)
 
 ## NOW (top = next lane to launch)
-1. **Crypto paper-trading support** (build lane) — fills are the program's
-   binding uncertainty (paper 0/3 vs ~26-42% expected; crypto books give ~48
-   events/day vs weather's ~5, so fill evidence accumulates 10x faster).
-   Load-bearing paper-engine refactor -> interactive apex, not a codex lane.
-   Then enroll measure-only: late-ATM maker + spread maker pilot.
+1. **Crypto paper-trading support + BTC hour=20 pilot** (build lane) — **PILOT
+   GATE NOW PASSED** (btc_9599_capacity 2026-06-12: the survivor is sizeable &
+   two-sided across ALL volume buckets, not a thin-book artifact). Fills are the
+   program's binding uncertainty (paper 0/3 vs ~26-42% expected; crypto books
+   give ~48 events/day vs weather's ~5, so fill evidence accumulates 10x faster).
+   Load-bearing paper-engine refactor + the FIRST forward test -> interactive
+   apex, not a codex lane. STRUCTURAL PROPOSAL (do NOT self-apply): stand up a
+   NARROW crypto paper pilot of the BTC 95-99c / hour=20 ET / spread1c / 31-60m
+   sleeve, both sides, orders capped to displayed touch, vol>=100 preferred. Keep
+   it narrow: btc_session_regime says hour=20 is an isolated single-hour anomaly,
+   NOT a session regime, so do NOT generalize to neighbor hours. Hold only if
+   realized all-in entry cost stays under ~fee+1c (fee+2c turns it negative).
 2. ~~Favorite-leg taker lane (hyp #3) + 80-99c maker successor~~ **BOTH DEAD**
    (taker cancelled pre-gate; 80-99c maker successor KILLED by band8099_maker
    memo 2026-06-11: no maker spec survives holdout, -1.49c bid/-2.91c mid on
@@ -41,25 +57,26 @@ Priority = expected information value about making (at least paper) money.
    adverse selection; gated lane saved). See DONE. The hardening successors
    (wx_maker_schedule/queue/gap_realfill, btc_9599_subspec) ALL graded
    2026-06-11T14:41Z — none promotable (see DONE).
-4. **(self-opt 2026-06-11T19:41Z) Surface collapsed to ONE survivor; new wave.**
-   The robustness pass (graded this beat) leaves the entire program with exactly
-   ONE surviving backtested edge: **BTC 95-99c, hour=20 ET, spread=1c, 31-60m,
-   vol=1-99 taker** — +1.63c/contract, K=386 declared, clears alpha/K AND stable
-   under all 3 boundary shifts (btc_9599_selection). Everything else died:
-   wx_sched_walkforward proved the 66-cell weather schedule is EX-POST-ONLY
-   (negative REPORT EV, CI crosses 0) -> **the live-book re-point proposal is
-   DEAD**; wx_gap_taker -2.32c (taker can't rescue the maker calibration);
-   nba_revrev_oos DEAD (but the home moneyline leg is clean & reusable).
-   Codex wave this beat (all 4 spooled): (a) **btc_9599_capacity** — is the lone
-   survivor tradeable at size or a thin-book (vol1-99) artifact?; (b)
-   **btc_session_regime** — is hour=20 a coherent ET-session effect or an
-   isolated-spike artifact?; (c) **nba_clv_homeleg** — favorite-longshot CLV on
-   the clean home leg (tests the desk's cross-family theme in NBA); (d)
-   **wx_xcity_spillover** — NEW weather family, cross-city realized-temp signal,
-   non-microstructure. **Next interactive-apex build thread (gated on the
-   capacity verdict): a crypto paper pilot of the BTC hour=20 survivor** — the
-   first edge that has earned a forward test. Do NOT pilot until btc_9599_capacity
-   confirms it is one-sided/real and sized, not an illiquidity artifact.
+4. **(2026-06-12T00:41Z) Capacity gate PASSED; both new families DEAD; new wave.**
+   Graded this beat: **btc_9599_capacity = SIZEABLE** — the lone survivor (BTC
+   95-99c / hour=20 ET / spread1c / 31-60m) is positive across vol 1-99/100-999/
+   1000+ and on BOTH sides (~$683 alpha/day at full size), cost-robust to fee+1c.
+   The pilot gate (see NOW#1) is therefore OPEN. BUT **btc_session_regime =
+   ISOLATED-SPIKE-NOISE** — hour=20 is positive in both halves yet its neighbors
+   are negative and no ET session block survives Bonferroni; it is a single-hour
+   anomaly with no mechanism, so the pilot must stay narrow. Both NEW families
+   died: **nba_clv_homeleg = REAL-BUT-UNTRADEABLE** (clean favorite-longshot
+   calibration, but late-taker CI [-5.29c,+6.16c] crosses 0; home leg still a
+   clean reusable substrate); **wx_xcity_spillover = DEAD** (cross-city feature
+   worsens holdout log-loss; 5-event taker, CI crosses 0). New codex wave this
+   beat (4 spooled): (a) **btc_9599_xasset** — does the frozen sleeve generalize
+   to ETH, or is it BTC-only? (decision-relevant for the pilot); (b)
+   **crypto_favlongshot_hold** — is favorite-longshot a BROAD buy-and-hold edge or
+   just the hour=20 tip? (non-microstructure); (c) **wx_forecast_revision** — NEW
+   non-microstructure weather family (forecast-revision momentum/reversion);
+   (d) **nba_fav_hold** — early buy-and-hold favorite vs the dead late taker, on
+   the clean home leg. Next interactive-apex build = the NOW#1 pilot; the
+   btc_9599_xasset verdict should gate how confidently to size it.
 
 ## QUEUED
 5. Crypto top-up cadence: daily -> 6h (controller TOPUP change) once any lane
@@ -93,6 +110,31 @@ Priority = expected information value about making (at least paper) money.
   surviving crypto thread (BTC 95-99c sleeve) is queued as btc_9599_subspec.
 
 ## DONE (recent)
+- **Capacity + regime + new-family wave graded (2026-06-12T00:41Z)** — 4 memos;
+  the pilot gate PASSES, the BTC survivor is confirmed sizeable, both new
+  families die.
+  - `btc_9599_capacity`: **SIZEABLE** — hour=20 sleeve positive in vol 1-99
+    (+1.63c), 100-999 (+1.33c), 1000+ (+1.72c) and on BOTH sides (YES +1.49c,
+    NO/sellYES +1.82c); ~$683 alpha/day if allowed into 100+ buckets, ~$14/day on
+    the locked thin cell alone. Break-even ~fee+1.63c adverse entry; fee+2c kills
+    it. NOT a thin-book artifact. **Pilot gate OPEN** (NOW#1).
+  - `btc_session_regime`: **ISOLATED-SPIKE-NOISE** — hr20 positive both halves
+    (0.96/0.99c) but hr19 -1.87c, hr21 -0.66c, lag-1 autocorr -0.24, no a-priori
+    ET session block survives 4-way Bonferroni. A single-hour anomaly, no
+    mechanism -> keep any pilot narrow, do NOT expand to neighbor hours.
+  - `nba_clv_homeleg`: **REAL-BUT-UNTRADEABLE** — clean holdout favorite-longshot
+    calibration (longshots <0.3 over by 1.2-5.1c, favorites >0.5 under by
+    1.6-9.7c) but K_sel=891 late-taker +0.98c/trade with game-cluster CI
+    [-5.29c,+6.16c]; OOS edge did not concentrate late. Home leg = clean reusable
+    calibration substrate.
+  - `wx_xcity_spillover`: **DEAD** — cross-city feature worsens holdout log-loss
+    (-0.00219) vs forecast-only; market mid better-calibrated; locked YES-MIA-0.15
+    taker fires on 5 events (2 winners), adjusted CI [-0.10,+0.96] crosses 0.
+  META: pilot gate passed but with a narrowness caveat; both new families died
+  the SAME way (point-positive holdout, multiple-testing CI crosses 0, few
+  events) -> motivated the new Min-holdout-events HARD RULE. Replaced by 4 lanes:
+  btc_9599_xasset, crypto_favlongshot_hold, wx_forecast_revision, nba_fav_hold.
+  Row in experiments.jsonl.
 - **Robustness + new-family wave graded (2026-06-11T19:41Z)** — 4 memos; the
   surviving surface collapses to ONE candidate and the live-book re-point dies.
   - `wx_sched_walkforward`: EX-POST-ONLY — the 66-cell weather schedule does NOT
