@@ -33,7 +33,7 @@ This system continuously monitors **ALL** markets on both Kalshi and Polymarket,
 
 ```bash
 git clone <repo> && cd kalshi
-git checkout claude/codebase-overview-QycoJ      # the working branch
+# main is the working branch (research + arb lines merged 2026-06-12)
 
 python -m venv .venv && source .venv/bin/activate   # recommended
 pip install -e .                                  # installs the `kalshi-arb` command
