@@ -8,9 +8,10 @@ of this module: every fill snaps to a *listed* strike on the real ladder, fills 
 that strike's REAL quoted probability (never 0.50), crosses a half-spread to take
 liquidity, and pays the venue taker fee.
 
-The fill math is ported from ``research/scripts/totals_realistic.py`` and mirrors
-``research/harness/realistic_fills.py`` + ``kalshi_arbitrage/mock_execution.py``
-``FeeModel``:
+The fill math is ported from ``research/scripts/totals_realistic.py``; fees come
+from ``venue_fees`` (repo root), the canonical schedule shared with
+``kalshi_arbitrage`` — single source of truth, golden-tested against the
+published schedules:
 
     all_in_price = fill_mid + half_spread + fee
 
@@ -20,29 +21,32 @@ where
     interpolated to the entry timestamp (for "under"/"short" sides it is
     ``1 - P(over/cover)``), NOT 0.50;
   * ``half_spread`` is the cost of crossing to take liquidity (default 1.5c);
-  * ``fee`` is the Polymarket taker fee = flat 2% of notional + a small curve
-    piece (or the Kalshi non-linear formula).
+  * ``fee`` is the official venue taker fee — Polymarket
+    ``C x (category_bps/10000) x p x (1-p)`` (sports 300 bps; makers $0), or
+    Kalshi ``ceil_cents(0.07 x C x p x (1-p))``.
+
+FEE CORRECTION (2026-06-12): until this date this module charged a flat 2% of
+notional on every Polymarket taker fill plus a legacy curve — a fee that does
+NOT exist in the official schedule (docs.polymarket.com/trading/fees, verified
+2026-06-09/12). It over-charged ATM NBA fills ~2.4x and tail fills ~14x; every
+lab verdict recorded before 2026-06-12 paid it. Reproduce historical memos with
+``FillModel(legacy_fees=True)``; see ``venue_fees.legacy_pm_taker_fee``.
 
 ``FillModel.fill(panel, ts, side) -> FillResult`` is the public surface.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
-from decimal import Decimal, ROUND_HALF_UP, ROUND_UP
 
 import numpy as np
 
+import venue_fees
 from research.lab.types import FillResult, Panel, WINNER
 
-# ---------------------------------------------------------------------------
-# Fee constants (mirror kalshi_arbitrage.mock_execution.FeeModel /
-# research.harness.realistic_fills). The flat 2% taker on notional applies to
-# EVERY Polymarket taker fill; the per-token curve piece is tiny near ATM but
-# included for honesty. Omitting the flat piece understates PM cost by ~an order
-# of magnitude and is exactly the error that falsely certified totals.
-# ---------------------------------------------------------------------------
-PM_FLAT_TAKER_RATE = 0.02
-PM_CURVE_FEE_RATE_BPS = 1000
+# Legacy re-exports (pre-2026-06-12 memo reproduction ONLY; the official
+# schedule has no flat-on-notional piece).
+PM_FLAT_TAKER_RATE = venue_fees.LEGACY_PM_FLAT_TAKER_RATE
+PM_CURVE_FEE_RATE_BPS = venue_fees.LEGACY_PM_CURVE_FEE_RATE_BPS
 
 # Sides that bet the COMPLEMENT of the ladder's quoted P(over/cover) — i.e. the
 # line is too HIGH (final outcome < strike). Must stay in sync with
@@ -65,34 +69,6 @@ def _interp_at(ts: float, xp: np.ndarray, fp: np.ndarray) -> float:
     return float(np.interp(ts, xp[mask], fp[mask]))
 
 
-def _pm_taker_fee(price: float, size: float = 1.0) -> float:
-    """Polymarket taker fee in dollars per contract (curve + flat 2% notional).
-
-    Identical formula to ``mock_execution.FeeModel.polymarket_taker_fee`` and
-    ``realistic_fills._polymarket_taker_fee``.
-    """
-    p = Decimal(str(price))
-    c = Decimal(str(size))
-    trade_value = p * c
-    fee_rate = Decimal(PM_CURVE_FEE_RATE_BPS) / Decimal("4000")
-    curve = trade_value * fee_rate * (p * (Decimal("1") - p)) ** Decimal("2")
-    flat = trade_value * Decimal(str(PM_FLAT_TAKER_RATE))
-    fee = (curve + flat).quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP)
-    return float(fee)
-
-
-def _kalshi_taker_fee(price: float, size: float = 1.0) -> float:
-    """Kalshi non-linear taker fee: ``ceil(0.07 * size * p * (1-p) * 100) / 100``.
-
-    Identical formula to ``mock_execution.FeeModel.kalshi_taker_fee``.
-    """
-    p = Decimal(str(price))
-    c = Decimal(str(size))
-    raw = Decimal("0.07") * c * p * (Decimal("1") - p)
-    fee = (raw * 100).to_integral_value(rounding=ROUND_UP) / Decimal("100")
-    return float(fee)
-
-
 @dataclass
 class FillModel:
     """Realistic execution model: snap-to-strike + half-spread + taker fee.
@@ -105,19 +81,32 @@ class FillModel:
         ~2c, so 1.5c is the pre-registered central estimate (sweep via
         :func:`cost_sweep`).
     venue : str
-        Fee schedule: ``"polymarket"`` (2% flat + curve) or ``"kalshi"``.
+        Fee schedule: ``"polymarket"`` (official per-category parabolic) or
+        ``"kalshi"`` (``ceil_cents(0.07 x C x p x (1-p))``).
+    category : str
+        Polymarket fee category for this panel's markets (default "sports" —
+        the NBA panels). Ignored for venue="kalshi". See
+        ``venue_fees.PM_CATEGORY_FEE_RATE_BPS``.
+    legacy_fees : bool
+        Charge the retired pre-2026-06-12 PM fee (flat 2% of notional + old
+        curve) instead of the official schedule. ONLY for reproducing
+        historical memos/verdicts.
     """
 
     half_spread: float = 0.015
     venue: str = "polymarket"
+    category: str = "sports"
+    legacy_fees: bool = False
 
     def fee(self, price: float, size: float = 1.0) -> float:
         """Taker fee in dollars per ``size`` contracts at ``price`` (prob units)."""
         v = self.venue.lower()
         if v == "kalshi":
-            return _kalshi_taker_fee(price, size)
+            return venue_fees.kalshi_taker_fee(price, size)
         if v == "polymarket":
-            return _pm_taker_fee(price, size)
+            if self.legacy_fees:
+                return venue_fees.legacy_pm_taker_fee(price, size)
+            return venue_fees.pm_taker_fee(price, size, category=self.category)
         raise ValueError(f"Unknown venue: {self.venue!r} (kalshi|polymarket)")
 
     def fill(self, panel: Panel, ts: float, side: str, *,

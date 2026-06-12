@@ -84,27 +84,30 @@ _ROOT = Path(__file__).resolve().parents[2]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
+import venue_fees  # noqa: E402
 from research.lab import data  # noqa: E402
 from research.lab.types import SPREAD, Trade, Trades  # noqa: E402
 from research.lab.execution import FillModel, _interp_at, _SHORT_SIDES  # noqa: E402
 
 LEDGER = "research/reports/alpha/ledger.jsonl"
 
-# Polymarket maker fee is currently 0% (rebate/zero on resting liquidity); the
-# 2% flat is a TAKER fee. Kalshi charges its standard fee to makers too. We model
-# the optimistic-but-real PM maker path (0 fee) AND a Kalshi maker path.
-PM_MAKER_FEE_RATE = 0.0
+# Maker fees from venue_fees (canonical schedule, verified 2026-06-12):
+# Polymarket makers pay $0 (and earn a 20-25% rebate, not credited). Kalshi
+# NBA series are fee_type="quadratic_with_maker_fees": makers pay
+# ceil_cents(0.0175 x C x p x (1-p)) — a QUARTER of taker, NOT the full taker
+# fee this study charged before 2026-06-12 (which collapsed the Kalshi maker
+# contingency to +0.12c; see runs/exec_makerfill_20260609T091134Z.md).
+PM_MAKER_FEE_RATE = venue_fees.PM_MAKER_FEE_RATE
 
 
 def _kalshi_maker_fee(price: float, size: float = 1.0) -> float:
-    """Kalshi maker fee: same nonlinear formula as taker (Kalshi has no rebate)."""
-    p = Decimal(str(price)); c = Decimal(str(size))
-    raw = Decimal("0.07") * c * p * (Decimal("1") - p)
-    return float((raw * 100).to_integral_value(rounding=ROUND_UP) / Decimal("100"))
+    """Kalshi maker fee on NBA (quadratic_with_maker_fees): quarter-of-taker."""
+    return venue_fees.kalshi_maker_fee(
+        price, size, fee_type=venue_fees.KALSHI_FEE_TYPE_WITH_MAKER)
 
 
 def _pm_maker_fee(price: float, size: float = 1.0) -> float:
-    return float(Decimal(str(price)) * Decimal(str(size)) * Decimal(str(PM_MAKER_FEE_RATE)))
+    return venue_fees.pm_maker_fee(price, size)
 
 
 # ---------------------------------------------------------------------------

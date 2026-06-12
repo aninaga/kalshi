@@ -30,21 +30,37 @@ from research.lab.types import (
 # --------------------------------------------------------------------------- #
 
 
-def test_polymarket_fee_includes_flat_2pct():
+def test_polymarket_fee_is_official_sports_schedule():
+    # Official schedule (docs.polymarket.com/trading/fees, verified 2026-06-12):
+    # taker = shares x (300bps/10000) x p x (1-p) for sports; NO flat piece.
+    # ATM: 0.03 * 0.5 * 0.5 = $0.0075 per share.
     fm = FillModel(venue="polymarket")
-    # Fee = flat (0.02 * notional) + curve piece (peaks at 0.5). The flat piece
-    # is the load-bearing part that the falsely-certifying model omitted, so the
-    # total must be at least the flat component.
-    fee = fm.fee(0.50)
+    assert fm.fee(0.50) == pytest.approx(0.0075, abs=1e-6)
+    # The retired flat-2% fee would have charged >= 1c at ATM — assert gone.
+    assert fm.fee(0.50) < 0.01
+
+
+def test_polymarket_fee_vanishes_at_tails():
+    # Parabolic: ~0 at extreme prices. The legacy flat piece did NOT decay and
+    # over-charged tails ~14x — the error that over-killed tail-priced families.
+    fm = FillModel(venue="polymarket")
+    assert fm.fee(0.95) < 0.002
+    assert fm.fee(0.50) > fm.fee(0.95)
+
+
+def test_legacy_fees_flag_reproduces_pre_20260612_memos():
+    legacy = FillModel(venue="polymarket", legacy_fees=True)
+    fee = legacy.fee(0.50)
     flat = 0.5 * PM_FLAT_TAKER_RATE
-    assert fee >= flat
-    assert fee == pytest.approx(flat, abs=0.01)  # curve adds <1c at ATM
+    assert fee >= flat                       # flat 2% present under the flag
+    assert fee == pytest.approx(0.0178, abs=1e-4)
 
 
-def test_fee_scales_with_size_and_price():
+def test_fee_scales_with_size_and_peaks_atm():
     fm = FillModel(venue="polymarket")
     assert fm.fee(0.50, size=2.0) > fm.fee(0.50, size=1.0)
-    assert fm.fee(0.80) > fm.fee(0.10)  # higher notional -> higher flat fee
+    assert fm.fee(0.50) > fm.fee(0.10)       # parabolic peaks at 0.5
+    assert fm.fee(0.50) > fm.fee(0.90)
 
 
 def test_kalshi_fee_peaks_near_half():
@@ -58,7 +74,7 @@ def test_unknown_venue_raises():
         FillModel(venue="ftx").fee(0.5)
 
 
-def test_fee_constants_match_ported_source():
+def test_legacy_constants_still_exported_for_memo_reproduction():
     assert PM_FLAT_TAKER_RATE == 0.02
     assert PM_CURVE_FEE_RATE_BPS == 1000
 

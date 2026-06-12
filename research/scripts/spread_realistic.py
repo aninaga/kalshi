@@ -56,6 +56,7 @@ _ROOT = Path(__file__).resolve().parents[2]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
+import venue_fees  # noqa: E402
 from nba_odds_study import batch, schedule  # noqa: E402
 from research.scorer.promotion_gate import evaluate_trial  # noqa: E402
 from research.scripts.spread_alpha import (  # noqa: E402
@@ -65,22 +66,19 @@ from research.scripts.spread_alpha import (  # noqa: E402
 
 KINDS = {"spread"}
 
-# Polymarket fee constants (mirror kalshi_arbitrage.mock_execution.FeeModel /
-# research.harness.realistic_fills). Identical to totals_realistic.
-PM_FLAT_TAKER_RATE = 0.02
-PM_CURVE_FEE_RATE_BPS = 1000
+# Fees from venue_fees (canonical schedule, 2026-06-12). Default = the official
+# Polymarket SPORTS taker fee (300 bps parabolic). --legacy-fees reproduces
+# pre-2026-06-12 memos (flat 2% of notional + old curve; not a real fee).
+PM_FLAT_TAKER_RATE = venue_fees.LEGACY_PM_FLAT_TAKER_RATE        # legacy repro only
+PM_CURVE_FEE_RATE_BPS = venue_fees.LEGACY_PM_CURVE_FEE_RATE_BPS  # legacy repro only
+_LEGACY_FEES = False
 
 
 def _pm_taker_fee(price: float, size: float = 1.0) -> float:
-    """Polymarket taker fee in dollars per contract (curve + flat 2% notional)."""
-    p = Decimal(str(price))
-    c = Decimal(str(size))
-    trade_value = p * c
-    fee_rate = Decimal(PM_CURVE_FEE_RATE_BPS) / Decimal("4000")
-    curve = trade_value * fee_rate * (p * (Decimal("1") - p)) ** Decimal("2")
-    flat = trade_value * Decimal(str(PM_FLAT_TAKER_RATE))
-    fee = (curve + flat).quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP)
-    return float(fee)
+    """Official PM sports taker fee (legacy flat-2%+curve under --legacy-fees)."""
+    if _LEGACY_FEES:
+        return venue_fees.legacy_pm_taker_fee(price, size)
+    return venue_fees.pm_taker_fee(price, size, category="sports")
 
 
 def _cached(game) -> bool:
@@ -300,7 +298,13 @@ def main():
     ap.add_argument("--max-entry-elapsed", type=float, default=None)
     ap.add_argument("--walkforward", action="store_true")
     ap.add_argument("--decompose", action="store_true")
+    ap.add_argument("--legacy-fees", action="store_true",
+                    help="reproduce pre-2026-06-12 memos (flat 2%% + old curve)")
     a = ap.parse_args()
+
+    global _LEGACY_FEES
+    _LEGACY_FEES = a.legacy_fees
+    fee_desc = "LEGACY flat-2%+curve" if a.legacy_fees else "official PM sports 300bps"
 
     games = schedule.completed_games(a.start, a.end)
     train_ids, val_ids, test_ids = _splits()
@@ -310,7 +314,7 @@ def main():
     # HARD RULE: never use the test ids. Population = all NON-test games.
     games = [g for g in games if gid_of(g) not in test_ids]
     print(f"{len(games)} non-test games; continuation (pre-registered), thresh={a.thresh}, "
-          f"REALISTIC execution (listed strike + half-spread + PM 2% fee), "
+          f"REALISTIC execution (listed strike + half-spread + {fee_desc} fee), "
           f"gap_cond={a.gap_cond}, max_entry={a.max_entry_elapsed}\n", flush=True)
 
     # Build ONCE (slow I/O) at half_spread=0; reprice analytically for sweeps.

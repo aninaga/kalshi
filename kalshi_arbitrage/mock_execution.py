@@ -7,6 +7,8 @@ from typing import Dict, List, Optional, Tuple
 
 import aiohttp
 
+import venue_fees
+
 from .config import Config
 
 
@@ -104,12 +106,9 @@ class PolymarketFeeClient:
 class FeeModel:
     @staticmethod
     def kalshi_taker_fee(price: float, size: float) -> float:
-        # fees = round up(0.07 x C x P x (1-P))
-        p = Decimal(str(price))
-        c = Decimal(str(size))
-        raw = Decimal('0.07') * c * p * (Decimal('1') - p)
-        fee = (raw * 100).to_integral_value(rounding=ROUND_UP) / Decimal('100')
-        return float(fee)
+        # fees = round up(0.07 x C x P x (1-P)) — delegates to venue_fees,
+        # the repo-wide canonical schedule.
+        return venue_fees.kalshi_taker_fee(price, size)
 
     @staticmethod
     def polymarket_taker_fee(price: float, size: float, fee_rate_bps: int) -> float:
@@ -132,17 +131,14 @@ class FeeModel:
         extreme-priced legs by ~an order of magnitude, understating the
         capturable edge exactly where it lives. Rate 0 (Geopolitics) is a
         genuine zero-fee category, not a missing-data sentinel.
+
+        2026-06-12: delegates to ``venue_fees`` (repo-wide canonical schedule).
+        Missing/zero ``fee_rate_bps`` stays a genuine 0 fee here (this method's
+        contract); venue_fees' category/default fallback is NOT applied.
         """
         if not fee_rate_bps or fee_rate_bps <= 0:
             return 0.0
-        p = Decimal(str(price))
-        c = Decimal(str(size))
-        rate = Decimal(fee_rate_bps) / Decimal('10000')
-        raw = c * rate * p * (Decimal('1') - p)
-        fee = raw.quantize(Decimal('0.00001'), rounding=ROUND_HALF_UP)
-        if raw > 0 and fee < Decimal('0.00001'):
-            fee = Decimal('0.00001')   # minimum charged per the fee schedule
-        return float(fee)
+        return venue_fees.pm_taker_fee(price, size, fee_rate_bps=fee_rate_bps)
 
 
 class MockExecutionEngine:

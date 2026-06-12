@@ -39,7 +39,10 @@ kalshi-arb = "kalshi_arbitrage.cli:main"
 
 [tool.setuptools]
 # Top-level modules + packages that ship with the project.
-py-modules = ["arbitrage_analyzer"]
+# venue_fees is the canonical fee schedule shared by kalshi_arbitrage AND
+# research/* (stdlib-only top-level module: research is not shipped, and
+# research must stay importable without aiohttp, so neither can host it).
+py-modules = ["arbitrage_analyzer", "venue_fees"]
 
 [tool.setuptools.packages.find]
 include = ["kalshi_arbitrage*", "tools*"]

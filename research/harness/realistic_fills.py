@@ -40,6 +40,8 @@ from dataclasses import dataclass, field
 from decimal import Decimal, ROUND_HALF_UP, ROUND_UP
 from typing import Literal, Optional, Sequence
 
+import venue_fees
+
 from research.harness.cost_profile import get_active_profile
 
 
@@ -122,15 +124,13 @@ class FillResult:
 def _kalshi_taker_fee(price: float, size: float) -> float:
     """Kalshi's exact taker fee: `ceil(0.07 * size * price * (1-price) * 100) / 100`.
 
-    Non-linear; highest at price=0.5. Identical formula to
-    `kalshi_arbitrage.mock_execution.FeeModel.kalshi_taker_fee`. Scaled by the
-    active CostProfile's ``kalshi_taker_multiplier`` (default 1.0).
+    Non-linear; highest at price=0.5. Delegates to ``venue_fees`` (the repo-wide
+    canonical schedule, 2026-06-12). Scaled by the active CostProfile's
+    ``kalshi_taker_multiplier`` (default 1.0), applied after the cent-ceil to
+    preserve the profile knob's historical semantics.
     """
-    p = Decimal(str(price))
-    c = Decimal(str(size))
-    raw = Decimal("0.07") * c * p * (Decimal("1") - p)
-    fee = (raw * 100).to_integral_value(rounding=ROUND_UP) / Decimal("100")
-    return float(fee) * get_active_profile().kalshi_taker_multiplier
+    return (venue_fees.kalshi_taker_fee(price, size)
+            * get_active_profile().kalshi_taker_multiplier)
 
 
 def _polymarket_curve_fee(price: float, size: float, fee_rate_bps: int) -> float:
@@ -148,12 +148,7 @@ def _polymarket_curve_fee(price: float, size: float, fee_rate_bps: int) -> float
     """
     if fee_rate_bps <= 0:
         return 0.0
-    p = Decimal(str(price))
-    c = Decimal(str(size))
-    fee_rate = Decimal(fee_rate_bps) / Decimal("10000")
-    fee = c * fee_rate * p * (Decimal("1") - p)
-    fee = fee.quantize(Decimal("0.00001"), rounding=ROUND_HALF_UP)
-    return float(fee)
+    return venue_fees.pm_taker_fee(price, size, fee_rate_bps=fee_rate_bps)
 
 
 # Legacy knob: the official schedule has NO flat-on-notional piece (verified
