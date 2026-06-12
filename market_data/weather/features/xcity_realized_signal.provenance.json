@@ -1,0 +1,29 @@
+{
+  "source": "DERIVED offline: market_data/weather/_cache pkls (settled YES bucket reps + candle windows) + market_data/weather/features/forecast_high_f.parquet (as-of lead-1 forecast at each contributor's close anchor)",
+  "construction": "value(B event, local day E) = mean over the other 4 cities A of [realized_A(E-1) - forecast_asof_A(E-1) - mu_A]; mu_A = TRAIN-only mean surprise; all 4 contributors required, else the row is dropped",
+  "point_in_time_rule": "known_from_ts = max over contributors A of anchor_A(E-1); anchor_A = max(last candle ts + 60s, epoch(end of A's LOCAL day, IANA tz) + 3600s) \u2014 market closed AND local day over >=1h; empirically 01:00 local of day E for all rows. Never 'when the high occurred'.",
+  "train_mu_debias": {
+    "AUS": 2.6914,
+    "CHI": 1.7057,
+    "DEN": 0.9006,
+    "MIA": 2.0777,
+    "NYC": 1.9977
+  },
+  "timezones": {
+    "NYC": "America/New_York",
+    "MIA": "America/New_York",
+    "CHI": "America/Chicago",
+    "AUS": "America/Chicago",
+    "DEN": "America/Denver"
+  },
+  "limitations": [
+    "realized is the settled bucket REPRESENTATIVE (+-0.5-1F granularity; open-ended extreme buckets truncate to cap-1/floor+1)",
+    "Kalshi's official settlement confirmation can postdate the anchor; the underlying high is fixed and publicly observable (NWS real-time obs) by the anchor, and the bucketization is deterministic",
+    "mu debias constants are TRAIN-derived (frozen; documented here); train rows are therefore mildly in-sample w.r.t. the debias mean",
+    "first cached date per city and 2026-04-12 (KXHIGHMIA-26APR11 has no unique YES bucket) have no/partial contributors -> rows dropped"
+  ],
+  "writer": "fable_xcity (analyst/data-agent role merge, single-agent mode of the data-request loop)",
+  "data_request_id": "5fed1350dc0784a2",
+  "written_at": "2026-06-09T23:33:04+00:00",
+  "rows": 1241
+}

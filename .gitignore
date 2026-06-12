@@ -141,6 +141,8 @@ market_data/orchestrator_state*.json
 # Large run outputs (24h simulations, study sweeps, US account exports)
 market_data/run_24h_*/
 market_data/nba_studies/
+market_data/weather/_cache/
+market_data/crypto/_cache/
 market_data/sim_24h_*.json
 market_data/backtest_results.json
 market_data/pnl_analysis.json
@@ -148,3 +150,6 @@ market_data/live_*.json
 market_data/polymarket_us_*.json
 market_data/polymarket_us_*.csv
 market_data/polymarket_anirudh_*.csv
+
+# Claude Code agent worktrees + local settings
+.claude/

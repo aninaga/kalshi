@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kalshi Fund — Desk</title>
+<style>
+  :root {
+    --bg: #0d1117; --panel: #161b22; --border: #30363d;
+    --fg: #e6edf3; --dim: #8b949e; --green: #3fb950; --red: #f85149;
+    --amber: #d29922; --blue: #58a6ff;
+  }
+  * { box-sizing: border-box; margin: 0; }
+  body { background: var(--bg); color: var(--fg);
+         font: 14px/1.5 -apple-system, "SF Mono", Menlo, monospace; padding: 24px; }
+  h1 { font-size: 18px; letter-spacing: .04em; }
+  h1 small { color: var(--dim); font-weight: 400; margin-left: 10px; }
+  .row { display: flex; gap: 16px; flex-wrap: wrap; margin-top: 16px; }
+  .panel { background: var(--panel); border: 1px solid var(--border);
+           border-radius: 10px; padding: 16px; flex: 1; min-width: 260px; }
+  .panel h2 { font-size: 12px; color: var(--dim); text-transform: uppercase;
+              letter-spacing: .1em; margin-bottom: 10px; }
+  #bigbtn { width: 100%; padding: 22px; font-size: 20px; font-weight: 700;
+            border-radius: 12px; border: none; cursor: pointer; color: #fff;
+            letter-spacing: .06em; transition: transform .05s; }
+  #bigbtn:active { transform: scale(.985); }
+  .running #bigbtn { background: var(--red); }
+  .paused  #bigbtn { background: var(--green); }
+  .stat { display: flex; justify-content: space-between; padding: 3px 0; }
+  .stat b { font-weight: 600; }
+  .ok { color: var(--green); } .warn { color: var(--amber); } .bad { color: var(--red); }
+  .dim { color: var(--dim); }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  td, th { text-align: left; padding: 4px 6px; border-bottom: 1px solid var(--border); }
+  th { color: var(--dim); font-weight: 500; }
+  .pill { padding: 1px 8px; border-radius: 999px; font-size: 11px; }
+  .pill.run { background: #12361f; color: var(--green); }
+  .pill.queue { background: #2d2410; color: var(--amber); }
+  .pill.done { background: #1c2128; color: var(--dim); }
+  .pill.off { background: #2d1517; color: var(--red); }
+  #modeline { margin-top: 10px; text-align: center; color: var(--dim); font-size: 12px; }
+  a { color: var(--blue); text-decoration: none; }
+  button.small { background: none; border: 1px solid var(--border); color: var(--dim);
+                 border-radius: 6px; padding: 1px 8px; cursor: pointer; font-size: 11px; }
+</style>
+</head>
+<body class="paused">
+  <h1>KALSHI FUND <small id="clock"></small></h1>
+
+  <div class="row">
+    <div class="panel" style="max-width:340px">
+      <button id="bigbtn" onclick="toggle()">START</button>
+      <div id="modeline">—</div>
+    </div>
+    <div class="panel">
+      <h2>Desk health</h2>
+      <div class="stat"><span>Weather cache</span><b id="wcache">—</b></div>
+      <div class="stat"><span>Crypto cache</span><b id="ccache">—</b></div>
+      <div class="stat"><span>Disk free</span><b id="disk">—</b></div>
+      <div class="stat"><span>Last data top-up</span><b id="topup">—</b></div>
+    </div>
+    <div class="panel">
+      <h2>Codex (OpenAI's own meter)</h2>
+      <div class="stat"><span>5-hour window</span><b id="cdx5h">—</b></div>
+      <div class="stat"><span>Weekly window</span><b id="cdxwk">—</b></div>
+      <div class="stat"><span>Resets</span><b id="cdxreset" class="dim">—</b></div>
+      <div class="stat"><span>Lane credits est.</span><b id="credits" class="dim">—</b></div>
+    </div>
+    <div class="panel">
+      <h2>Claude (Anthropic's own meter)</h2>
+      <div class="stat"><span>5-hour window</span><b id="cl5h">—</b></div>
+      <div class="stat"><span>Weekly (all models)</span><b id="clwk">—</b></div>
+      <div class="stat"><span>Resets</span><b id="clreset" class="dim">—</b></div>
+      <div class="stat"><span>Burn (API-equiv)</span><b id="clburn" class="dim">—</b></div>
+    </div>
+  </div>
+
+  <div class="row">
+    <div class="panel">
+      <h2>Lanes — running</h2>
+      <table id="children"><tr><th>lane</th><th>kind</th><th>elapsed</th><th>log</th></tr></table>
+    </div>
+    <div class="panel">
+      <h2>Queue</h2>
+      <table id="queue"><tr><th>lane</th><th>status</th><th></th></tr></table>
+    </div>
+  </div>
+
+  <div class="row">
+    <div class="panel">
+      <h2>Ledger — recent verdicts</h2>
+      <table id="ledger"><tr><th>hyp</th><th>family</th><th>¢/contract</th><th>gate</th></tr></table>
+    </div>
+  </div>
+
+<script>
+const $ = id => document.getElementById(id);
+let mode = "paused";
+
+function fmtElapsed(s) {
+  if (s < 90) return s + "s";
+  if (s < 5400) return Math.round(s/60) + "m";
+  return (s/3600).toFixed(1) + "h";
+}
+
+async function refresh() {
+  let r;
+  try { r = await (await fetch("/api/status")).json(); }
+  catch { $("modeline").textContent = "controller unreachable"; return; }
+  mode = r.mode;
+  document.body.className = mode;
+  $("bigbtn").textContent = mode === "running" ? "PAUSE — safe to close laptop after" : "START THE DESK";
+  $("modeline").textContent = mode.toUpperCase() + " since " +
+      new Date(r.since * 1000).toLocaleTimeString();
+  $("wcache").textContent = r.caches.weather + " events";
+  $("ccache").textContent = r.caches.crypto + " events";
+  $("disk").textContent = r.disk_free_gb + " GB";
+  $("disk").className = r.disk_free_gb < 10 ? "bad" : "ok";
+  $("topup").textContent = r.last_topup ?
+      new Date(r.last_topup * 1000).toLocaleString() : "never";
+  $("credits").textContent = r.codex_budget.credits_est;
+  const cdx = (r.usage || {}).codex || {}, cl = (r.usage || {}).claude || {};
+  const pct = v => v == null ? "—" : v.toFixed(1) + "%";
+  $("cdx5h").textContent = pct(cdx.five_hour_pct);
+  $("cdx5h").className = (cdx.five_hour_pct || 0) > 80 ? "bad" : (cdx.five_hour_pct || 0) > 50 ? "warn" : "ok";
+  $("cdxwk").textContent = pct(cdx.weekly_pct);
+  $("cdxwk").className = (cdx.weekly_pct || 0) > 80 ? "bad" : (cdx.weekly_pct || 0) > 50 ? "warn" : "ok";
+  $("cdxreset").textContent = cdx.five_hour_resets_at ?
+      new Date(cdx.five_hour_resets_at * 1000).toLocaleTimeString() : "—";
+  const clp = (r.usage || {}).claude_plan || {};
+  $("cl5h").textContent = pct(clp.five_hour_pct);
+  $("cl5h").className = (clp.five_hour_pct || 0) > 80 ? "bad" : (clp.five_hour_pct || 0) > 50 ? "warn" : "ok";
+  $("clwk").textContent = pct(clp.weekly_pct);
+  $("clwk").className = (clp.weekly_pct || 0) > 80 ? "bad" : (clp.weekly_pct || 0) > 50 ? "warn" : "ok";
+  $("clreset").textContent = clp.five_hour_resets_at ?
+      new Date(clp.five_hour_resets_at).toLocaleTimeString() : "—";
+  $("clburn").textContent = cl.burn_usd_per_hr != null ? "$" + cl.burn_usd_per_hr + "/hr" : "—";
+
+  const ch = $("children");
+  ch.innerHTML = "<tr><th>lane</th><th>kind</th><th>elapsed</th><th>log</th></tr>";
+  const entries = Object.entries(r.children);
+  if (!entries.length) {
+    const beats = Object.entries(r.next_beats || {})
+      .map(([k, s]) => `${k.replace("paper_","")} in ${fmtElapsed(Math.max(0,s))}`).join(" · ");
+    ch.innerHTML += `<tr><td colspan=4 class=dim>idle — next beats: ${beats || "—"}</td></tr>`;
+  }
+  for (const [id, c] of entries)
+    ch.innerHTML += `<tr><td>${id}</td><td>${c.kind}</td>
+      <td>${fmtElapsed(c.elapsed_s)}</td>
+      <td><a href="/api/log/${id}" target="_blank">tail</a></td></tr>`;
+
+  const qt = $("queue");
+  qt.innerHTML = "<tr><th>lane</th><th>status</th><th></th></tr>";
+  if (!r.queue.length) qt.innerHTML += "<tr><td colspan=3 class=dim>empty — operator fills this</td></tr>";
+  for (const it of r.queue) {
+    const pill = it.enabled === false ? "off" :
+                 it.status === "running" ? "run" :
+                 it.status === "done" ? "done" : "queue";
+    const label = it.enabled === false ? "disabled" : it.status;
+    qt.innerHTML += `<tr><td>${it.id}</td>
+      <td><span class="pill ${pill}">${label}</span></td>
+      <td><button class=small onclick="toggleLane('${it.id}')">${it.enabled === false ? "enable" : "disable"}</button></td></tr>`;
+  }
+
+  const lt = $("ledger");
+  lt.innerHTML = "<tr><th>hyp</th><th>family</th><th>¢/contract</th><th>gate</th></tr>";
+  if (!r.ledger_tail.length) lt.innerHTML += "<tr><td colspan=4 class=dim>no entries yet</td></tr>";
+  for (const e of r.ledger_tail)
+    lt.innerHTML += `<tr><td>${(e.hyp_id||"").slice(0,10)}</td><td>${e.family||""}</td>
+      <td>${e.cents_per_contract ?? ""}</td>
+      <td class="${e.passed ? "ok" : "bad"}">${e.passed ? "PASS" : "fail"}</td></tr>`;
+}
+
+async function toggle() {
+  await fetch(mode === "running" ? "/api/pause" : "/api/run", {method: "POST"});
+  refresh();
+}
+async function toggleLane(id) {
+  await fetch("/api/lane_toggle/" + id, {method: "POST"});
+  refresh();
+}
+setInterval(refresh, 4000);
+setInterval(() => $("clock").textContent = new Date().toLocaleString(), 1000);
+refresh();
+</script>
+</body>
+</html>
