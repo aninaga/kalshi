@@ -19,7 +19,6 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from kalshi_arbitrage.market_analyzer import MarketAnalyzer
 from kalshi_arbitrage.risk_engine import RiskEngine, ExecutionStrategy, NetworkCondition
 from kalshi_arbitrage.data_normalizer import DataNormalizer
-from kalshi_arbitrage.monitoring import get_monitoring_system
 
 # Configure logging
 logging.basicConfig(

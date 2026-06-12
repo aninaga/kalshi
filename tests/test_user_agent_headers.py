@@ -18,7 +18,6 @@ PKG = Path(__file__).resolve().parents[1] / "kalshi_arbitrage"
 SESSION_FILES = [
     "api_clients.py",
     "websocket_client.py",
-    "enhanced_websocket_client.py",
     "kalshi_executor.py",
     "mock_execution.py",
 ]

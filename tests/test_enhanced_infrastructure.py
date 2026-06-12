@@ -28,10 +28,6 @@ from kalshi_arbitrage.risk_engine import (
     SlippageModel, FeeCalculator, RiskEngine,
     MarketImpactModel, ExecutionStrategy, NetworkCondition
 )
-from kalshi_arbitrage.monitoring import (
-    MonitoringSystem, AlertType, AlertPriority,
-    MetricAggregator, HealthChecker
-)
 
 class TestCircuitBreaker:
     """Test circuit breaker functionality."""
@@ -305,62 +301,3 @@ class TestRiskEngine:
         assert assessment.total_risk_score > Decimal("0")
         assert assessment.profit_after_risk > Decimal("0")
         assert len(assessment.recommendations) > 0
-
-class TestMonitoring:
-    """Test monitoring system functionality."""
-    
-    def test_metric_aggregator(self):
-        """Test metric aggregation."""
-        aggregator = MetricAggregator(window_seconds=60)
-        
-        # Record some metrics
-        for i in range(10):
-            aggregator.record("api_calls", 1)
-            aggregator.record("api_latency", 50 + i * 10)
-        
-        # Get stats
-        call_stats = aggregator.get_stats("api_calls")
-        assert call_stats["count"] == 10
-        assert call_stats["sum"] == 10
-        
-        latency_stats = aggregator.get_stats("api_latency")
-        assert latency_stats["count"] == 10
-        assert latency_stats["avg"] == 95  # (50+60+...+140)/10
-        assert latency_stats["min"] == 50
-        assert latency_stats["max"] == 140
-        
-    @pytest.mark.asyncio
-    async def test_alert_manager(self):
-        """Test alert creation and management."""
-        from kalshi_arbitrage.monitoring import AlertManager
-        
-        manager = AlertManager()
-        
-        # Create test alert
-        alert_id = await manager.create_alert(
-            AlertType.OPPORTUNITY,
-            AlertPriority.HIGH,
-            "Test Opportunity",
-            "3% arbitrage found",
-            {"profit": 0.03}
-        )
-        
-        assert alert_id != ""
-        
-        # Get active alerts
-        active = manager.get_active_alerts()
-        assert len(active) == 1
-        assert active[0].title == "Test Opportunity"
-        
-        # Test rate limiting
-        for i in range(15):
-            await manager.create_alert(
-                AlertType.SYSTEM_ERROR,
-                AlertPriority.LOW,
-                f"Error {i}",
-                "Test error"
-            )
-        
-        # Should be rate limited
-        active = manager.get_active_alerts(AlertType.SYSTEM_ERROR)
-        assert len(active) <= 10  # Rate limit

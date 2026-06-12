@@ -84,7 +84,7 @@ class OrderbookSnapshot:
 class FillResult:
     """Result of simulating one leg of a trade.
 
-    Modeled on `tools/dry_run_execution.py::DryRunResult` for taxonomy
+    Modeled on the retired `tools/dry_run_execution.py::DryRunResult` (deleted 2026-06-12, audit kill-list) for taxonomy
     consistency (timing + kill reasons).
 
     Attributes

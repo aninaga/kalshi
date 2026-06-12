@@ -1,35 +1,45 @@
-# Kalshi-Polymarket Arbitrage Detection System
+# Kalshi repo — arbitrage machine + research fund
 
-A comprehensive Python system for detecting and analyzing arbitrage opportunities between Kalshi and Polymarket prediction markets with real-time streaming and multiple completeness levels.
+This repository holds **two independent products** that share market-data
+plumbing but are otherwise separate:
 
-## 🎯 Overview
+1. **Cross-venue arbitrage machine** (`kalshi_arbitrage/` + root
+   `arbitrage_analyzer.py`) — finds genuine, fee-clearing Kalshi↔Polymarket
+   arbitrage, holds basis-risk lookalikes for review, and can paper-trade (then
+   live-trade, under hard gates) the survivors.
+2. **Automated research fund** (`research/` + `ops/`) — an NBA quantitative
+   research / strategy-backtesting effort plus an always-on controller that
+   conducts cloud-side analyst lanes.
 
-This system continuously monitors **ALL** markets on both Kalshi and Polymarket, identifies equivalent markets, and detects arbitrage opportunities with detailed analysis and historical tracking. Features two-phase architecture with lossless analysis and real-time streaming capabilities.
+> **Separation rule:** `kalshi_arbitrage/` must never import from `research/`.
 
-## ✨ Key Features
+The operator runbooks are in `docs/`: **[`docs/MACHINE.md`](docs/MACHINE.md)**
+(the arb machine, incl. the critical legality / basis-risk / capital-lockup
+caveats — read this before risking capital), **[`docs/EXECUTION.md`](docs/EXECUTION.md)**
+(the gated-execution safety model), **[`docs/NEXT_GEN.md`](docs/NEXT_GEN.md)**
+(roadmap).
 
-### Phase 1: Lossless Arbitrage Detection
-- **Three Completeness Levels**:
-  - `FAST`: 95% completeness, optimized for speed (3 matches/market, 10 trades/opportunity)
-  - `BALANCED`: 99% completeness, good speed/accuracy balance (10 matches/market, 25 trades/opportunity)
-  - `LOSSLESS`: 100% completeness, no information loss (unlimited matches/trades)
+---
 
-### Phase 2: Real-Time Streaming
-- **WebSocket Integration**: Live price and orderbook updates
-- **Cache Staleness Elimination**: Fresh data with sub-second latency
-- **Fallback Mechanisms**: Graceful degradation to REST APIs when streams fail
-- **Stream Health Monitoring**: Connection quality and data freshness tracking
+## The arbitrage machine
 
-### Core Capabilities
-- **Complete Market Coverage**: Captures ALL active markets from both platforms using pagination
-- **Intelligent Matching**: Advanced fuzzy string matching with similarity scoring
-- **Comprehensive Pricing**: Real-time bid/ask spreads with slippage calculations
-- **Volume Assessment**: Liquidity analysis for tradeable opportunities
-- **Historical Tracking**: Persistent storage of all opportunities and market data
-- **Professional Logging**: Multi-level logging with file rotation
-- **Authentication Support**: Full Kalshi API access with proper authentication
+### It is not analysis-only — it has a full, gated execution stack
+Out of the box (`EXECUTION_ENABLED=True`, `EXECUTION_MODE="paper"`) a run does
+**everything except place a real order**: detect → match-verify → price →
+risk-check → build orders → **simulated fills** → PnL capture. A real order
+reaches a venue only when all three independent conditions hold — flipping a
+config flag is **not** enough:
 
-## 🚀 Installation (local)
+1. `Config.EXECUTION_ENABLED` is `True`   (default `True`)
+2. `Config.EXECUTION_MODE == "live"`      (default `"paper"`)
+3. the **live-trading lock is ARMED**     (`execution/live_lock.py`)
+
+In paper mode a `SimulatedGateway` fills orders locally with the real fee model
+but never calls a venue API; in live mode the real gateways refuse to POST
+(`live_trading_locked`) until the lock is armed. Live caps are tiny by default
+(`LIVE_MAX_NOTIONAL_USD=5`/leg, `LIVE_MAX_CONCURRENT_POSITIONS=1`).
+
+### Install (local)
 
 ```bash
 git clone <repo> && cd kalshi
@@ -40,238 +50,178 @@ pip install -e .                                  # installs the `kalshi-arb` co
 ```
 
 `pip install -e .` is all you need to run a paper scan. Optional extras:
-`pip install -e ".[dev]"` (tests), `".[viz]"` (plots), `".[research]"` (parquet/duckdb).
+`".[dev]"` (tests), `".[viz]"` (plots), `".[research]"` (parquet/duckdb).
 
-## ⚡ Quick Start — one command for everything
-
-Everything runs through a single `kalshi-arb` CLI:
+### Quick start — everything runs through `kalshi-arb`
 
 ```bash
-kalshi-arb doctor            # 1. confirm both venues are reachable (catches the
-                             #    Polymarket Cloudflare/User-Agent gotcha)
-kalshi-arb scan              # 2. full paper pipeline: detect → match → verify →
-                             #    price → simulated fills → PnL  (NO real orders)
-kalshi-arb analyze-paper     # 3. summarize the captured paper run (drift, hedges)
-kalshi-arb diagnose matches  #    inspect why matches are/aren't found
-kalshi-arb backtest          #    matching precision/recall gate (needs labels)
-kalshi-arb readiness         # 4. live-pilot go/no-go checklist
-kalshi-arb live status       #    show the live-trading lock state
+kalshi-arb doctor            # confirm both venues are reachable (the PM UA/403 gotcha)
+kalshi-arb scan              # full paper pipeline: detect → match → verify → price →
+                             #   simulated fills → PnL   (NO real orders)
+kalshi-arb find-arb          # discover → bucket genuine / held-for-review / rejected → allowlist
+kalshi-arb monitor           # continuous fee-aware capture; records gap episodes to a ledger
+kalshi-arb analyze-ledger    # summarize a paper session (net, episode/duration mix, per-market)
+kalshi-arb analyze-paper     # summarize a captured paper run (drift, hedges)
+kalshi-arb diagnose matches  # inspect why matches are/aren't found
+kalshi-arb backtest          # matching precision/recall gate (needs labels)
+kalshi-arb review            # walk held-for-review pairs → allow/deny decisions
+kalshi-arb readiness         # live-pilot go/no-go checklist
+kalshi-arb live status       # show / arm / disarm the live-trading lock
 ```
 
 > **Safe by default.** `kalshi-arb scan` runs the *entire* pipeline including the
 > execution engine, but fills are **simulated** — no real order is ever placed.
-> Real trading additionally requires `EXECUTION_MODE="live"` **and** an armed
-> live-trading lock (see *Auto-Execution* below). It is the mechanism saved for
-> after you've validated.
 
-### Common scan variations
+The original `python arbitrage_analyzer.py ...` entry point still works; the CLI
+wraps it plus the validation tools.
+
 ```bash
-kalshi-arb scan --mode single --completeness LOSSLESS   # one thorough pass
-kalshi-arb scan --mode continuous --interval 30         # keep monitoring
-kalshi-arb scan --threshold 0.015 --similarity 0.80     # custom thresholds
+python arbitrage_analyzer.py --help
+  --mode {single,continuous}                 (default: continuous)
+  --interval SECONDS                         (default: 30)
+  --threshold DECIMAL                        min profit (default: 0.02)
+  --similarity DECIMAL                       lexical match floor (default: 0.78)
+  --completeness {FAST,BALANCED,LOSSLESS}
+  --realtime                                 enable WebSocket streaming
 ```
 
-(The original `python arbitrage_analyzer.py ...` entry point still works; the CLI
-just wraps it plus the validation tools.)
+### Going live (deliberate, gated — only after validation)
 
-### Going live (only after validation)
 ```bash
 kalshi-arb readiness                 # must print PASS
 kalshi-arb live arm                  # writes the arm token (deliberate, explicit)
 EXECUTION_MODE=live kalshi-arb scan  # real orders now permitted, hard-capped
 kalshi-arb live disarm               # lock it back down
 ```
-See [`docs/EXECUTION.md`](docs/EXECUTION.md) for the full safety model.
 
-## 📊 Sample Output
+Arming writes `market_data/LIVE_TRADING_ARMED` containing the phrase
+`I_HAVE_VALIDATED_AND_ACCEPT_REAL_MONEY_RISK`. See
+[`docs/EXECUTION.md`](docs/EXECUTION.md) for the full safety model and the
+operator controls (halt / resume / flatten-all).
 
+### Matching is required before any money moves
+Lexical similarity (`SIMILARITY_THRESHOLD = 0.78`) is necessary but not
+sufficient. `kalshi_arbitrage/matching/` adds verification: outcome polarity
+(Kalshi-YES vs the PM YES-token-or-complement), resolution criteria (close dates
+/ thresholds / rules), and an operator allowlist (the live gate). The matching
+gate requires a bootstrapped precision-CI lower bound ≥ 0.99 **and** polarity
+accuracy = 1.0 before the matcher is trusted.
+
+### Fees — `venue_fees.py` is canonical (golden-tested)
+The root `venue_fees.py` is the single source of truth (guarded by
+`tests/test_venue_fees_golden.py`), used by both products. Never hardcode a fee.
+- **Kalshi taker:** `ceil_cents(0.07·C·P·(1−P))` per contract; maker = a quarter
+  of that, only on `quadratic_with_maker_fees` series (e.g. NBA).
+- **Polymarket taker:** per-category parabolic `C·(bps/10000)·P·(1−P)`
+  (sports 300bps, crypto 700bps, geopolitics 0; makers $0 + rebate).
+- There is **no** flat "Polymarket ~2%" fee — it never existed in the official
+  schedule and over-charges the extreme-priced legs where durable arb lives.
+
+### Honest expectation
+Real cross-venue arb on identical contracts is small, illiquid, capital-locked,
+and latency-insensitive. It is dominated by **basis risk** (Kalshi and Polymarket
+use differently-governed oracles and demonstrably resolve the same event
+differently) and **capital lockup** (profit is locked from entry to resolution).
+For US persons there is also a **legality constraint** on the liquid global
+Polymarket book. Read [`docs/MACHINE.md`](docs/MACHINE.md) before funding
+anything — its caveats override the gross-profitability story.
+
+### Authentication
+Copy the template and (optionally) add Kalshi credentials for the live WebSocket
+feed:
+
+```bash
+cp .env.example .env
+# KALSHI_API_KEY=your_access_key_id
+# KALSHI_PRIVATE_KEY_PATH=/absolute/path/to/kalshi_private_key.pem  (RSA-PSS)
+# POLYMARKET_PRIVATE_KEY=...   (only needed for the live pilot)
 ```
-📊 SCAN #42 COMPLETED (14:23:15)
-Duration: 8.2s | Uptime: 0:21:18
-Markets: Kalshi(234) + Polymarket(567) = 801
-Matches: 89 | Opportunities: 3
 
-🚨 3 ARBITRAGE OPPORTUNITIES DETECTED!
+Without these the client runs **REST-only**: public REST market data still works,
+but there is no live Kalshi WebSocket feed. Secrets live in a local `.env`, never
+committed.
 
-🎯 TOP 3 OPPORTUNITIES:
-────────────────────────────────────────────────────────────────────────────────
-1. Buy Kalshi YES → Sell Polymarket
-   Profit: 4.2% | Similarity: 87.3%
-   Kalshi: Trump wins 2024 presidential election
-   Polymarket: Donald Trump to win 2024 US Presidential Election
-   Buy: $0.456 → Sell: $0.485
+---
 
-2. Buy Polymarket → Sell Kalshi YES
-   Profit: 2.8% | Similarity: 91.2%
-   Kalshi: Federal Reserve raises rates in December 2024
-   Polymarket: Fed to hike rates December 2024
-   Buy: $0.234 → Sell: $0.248
+## The research fund (`research/` + `ops/`)
+
+`research/` is the NBA quantitative-research / strategy-backtesting project. It is
+self-contained and never imported by the arb bot.
+
+| Path | Purpose |
+|------|---------|
+| `research/nba_odds_study/` | NBA data ingestion + analysis package |
+| `research/harness/` | strategy backtester — replay, realistic fills, cost profiles (uses `venue_fees`) |
+| `research/scorer/`, `research/promotion/` | statistical gates (bootstrap CIs) + promotion pipeline |
+| `research/registry/`, `research/lake/` | result registry (SQLite) + data lake (parquet/DuckDB) |
+| `research/agents/` | research worker pool (codex workers, Claude reviewer) |
+| `research/scripts/` | study CLIs — run as modules from the repo root |
+
+```bash
+python -m research.scripts.analyze_nba_game
+python -m research.scripts.study_players
 ```
 
-## 🔧 Configuration
+`ops/` is the **fund controller** — `ops/controller.py` is the single always-on
+process of the desk (a localhost dashboard + one RUN/PAUSE state machine that
+owns every fund process). Models are cloud-side; this box only conducts. See
+`ops/APEX_PROTOCOL.md`.
 
-### Analysis Settings
-- `MIN_PROFIT_THRESHOLD`: Minimum profit margin (default: 2%)
-- `SIMILARITY_THRESHOLD`: Market matching sensitivity (default: 55%)
-- `SCAN_INTERVAL_SECONDS`: Analysis frequency (default: 30s)
+---
 
-### Performance Optimization
-- `MAX_CONCURRENT_API_CALLS`: Parallel request limit (default: 20)
-- `BATCH_PROCESSING_SIZE`: Processing batch size (default: 50)
-- `CACHE_CLEANUP_INTERVAL`: Cache maintenance frequency (default: 5min)
-
-### Real-Time Streaming
-- `REALTIME_ENABLED`: Enable WebSocket streaming (default: true)
-- `STREAM_BUFFER_SIZE`: Message buffer capacity (default: 1000)
-- `STREAM_FRESHNESS_THRESHOLD`: Data staleness limit (default: 10s)
-
-## 📁 Project Structure
-
-This repo holds **two separate projects** that share market-data plumbing but
-are otherwise independent — keep contributions on the correct side of the line:
-
-1. **Kalshi–Polymarket arbitrage bot** — the `kalshi_arbitrage/` package and the
-   root `arbitrage_analyzer.py` entry point. Never imports from `research/`.
-2. **Automated hedge-fund research** (NBA quant studies, strategy backtesting) —
-   everything under `research/`. Self-contained.
+## Project structure
 
 ```
 kalshi/
-├── arbitrage_analyzer.py          # ARB BOT — main entry point
-├── analyze_price_discrepancies.py # ARB BOT — helper scripts
+├── arbitrage_analyzer.py          # ARB — original scan entry point
+├── analyze_price_discrepancies.py # ARB — helper scripts
 ├── simple_price_check.py
-├── kalshi_arbitrage/              # ARB BOT — core package
-│   ├── api_clients.py             # API integration layer
-│   ├── market_analyzer.py         # detection / matching engine
-│   ├── matching/                  # cross-venue match verification (polarity, criteria, allowlist)
-│   ├── execution/                 # general-purpose order execution (gateways, engine, kill switch)
-│   ├── arbitrage_executor.py      # arb orchestration (two-leg + confirmed-unwind hedge)
-│   ├── validation/                # arb validation tooling
-│   │   ├── matching/              #   matcher precision/recall backtest + gate
-│   │   ├── paper/                 #   paper-run analysis
-│   │   └── pilot/                 #   live-pilot readiness checklist
-│   ├── risk_engine.py · monitoring.py · config.py · utils.py · websocket_client.py
+├── venue_fees.py                  # CANONICAL fee schedule (shared, golden-tested)
+├── kalshi_arbitrage/              # ARB — core package
+│   ├── api_clients.py             #   Kalshi + Polymarket REST clients
+│   ├── market_analyzer.py         #   detection / matching engine
+│   ├── live_probe.py              #   tested economics core (< $1 complementary arb)
+│   ├── matching/                  #   cross-venue match verification (polarity, criteria, allowlist)
+│   ├── execution/                 #   general-purpose order stack (gateways, engine, kill switch, live_lock)
+│   ├── arbitrage_executor.py      #   arb orchestration (2-leg + confirmed-unwind hedge)
+│   ├── validation/                #   arb validation tooling
+│   │   ├── matching/              #     matcher precision/recall backtest + gate
+│   │   ├── paper/                 #     paper-run analysis
+│   │   └── pilot/                 #     live-pilot readiness checklist
+│   ├── risk_engine.py · circuit_breaker.py · reconcile.py · confirmed_pnl.py
+│   ├── ws_books.py · websocket_client.py · config.py · utils.py
 │   └── ...
-├── research/                      # HEDGE FUND — NBA quant research (independent project)
-│   ├── nba_odds_study/            #   NBA data/analysis package
-│   ├── harness/                   #   strategy backtester (replay, fills, cost profiles)
-│   ├── scorer/ · promotion/ · registry/ · lake/ · agents/
-│   └── scripts/                   #   NBA study CLIs (analyze_nba_game.py, study_*.py)
-├── tests/                         # ARB BOT test suite (pytest; async via pytest-asyncio)
-├── tools/                         # misc analysis utilities
-├── docs/EXECUTION.md              # auto-execution platform guide
-└── market_data/                   # data storage (logs, opportunities, captures)
+├── research/                      # FUND — NBA quant research + backtest harness (independent)
+│   ├── nba_odds_study/  harness/  scorer/  promotion/  registry/  lake/  agents/  scripts/
+├── ops/                           # FUND — always-on controller, governor, usage meter
+├── tests/                         # ARB test suite (pytest; async via pytest-asyncio)
+├── tools/                         # misc analysis/arb CLIs (find_live_arb, monitor_arb, …)
+├── deploy/                        # Docker + systemd shadow-deploy
+├── docs/                          # MACHINE.md · EXECUTION.md · NEXT_GEN.md
+└── market_data/                   # local data storage (logs, captures, allowlists, ledgers)
 ```
 
+## How the arb pipeline works
 
-## 🔍 How It Works
+1. **Market capture** — fetch active markets from both venues (paginated; Gamma
+   top-up keeps extreme-priced PM markets discoverable).
+2. **Match + verify** — lexical similarity, then polarity / resolution-criteria /
+   allowlist verifiers strip out false matches.
+3. **Price + economics** — `live_probe` checks each candidate clears the Kalshi
+   taker fee curve at real book depth.
+4. **Bucket** — genuine (auto-allowlistable) / held-for-review (uncertain
+   resolution) / rejected (>15% edge ⇒ false match or stale leg).
+5. **Execute** — simulated fills by default; real orders only under the three
+   gates above, with a partial-fill-aware confirmed-unwind hedge.
+6. **Persist** — episodes, captures, and PnL to local ledgers under `market_data/`.
 
-1. **Full Market Capture**: Fetches ALL active markets from both platforms using pagination
-2. **Data Processing**: Standardizes and cleans market data for comparison
-3. **Intelligent Matching**: Uses fuzzy string matching to identify equivalent markets
-4. **Price Analysis**: Retrieves real-time pricing data for matched markets
-5. **Arbitrage Detection**: Calculates profit margins accounting for platform fees
-6. **Opportunity Ranking**: Sorts opportunities by profit potential and confidence
-7. **Data Persistence**: Saves all results for historical analysis and trending
-
-## 🌐 API Integration
-
-### Kalshi
-- **Authentication**: Email/password login for full access
-- **Market Data**: Complete market information with pricing
-- **Rate Limiting**: Respectful API usage with retry logic
-
-### Polymarket
-- **Public Access**: No authentication required for market data
-- **Comprehensive Coverage**: All active markets with token pricing
-- **Real-time Pricing**: Live bid/ask data via CLOB API
-
-## 📈 Data & Analytics
-
-- **Historical Tracking**: All opportunities saved with timestamps
-- **Market Coverage Reports**: Complete visibility into market scanning
-- **Performance Metrics**: Scan duration, success rates, opportunity trends
-- **Exportable Data**: JSON format for further analysis
-
-## ⚙️ Command Line Options
+## Development & testing
 
 ```bash
-python arbitrage_analyzer.py --help
-
-options:
-  --mode {single,continuous}    Analysis mode (default: continuous)
-  --interval SECONDS           Scan interval in seconds (default: 30)
-  --threshold DECIMAL          Min profit threshold (default: 0.02)
-  --similarity DECIMAL         Market similarity threshold (default: 0.55)
-  --completeness {FAST,BALANCED,LOSSLESS}  Analysis completeness level
-  --realtime                   Enable real-time WebSocket streaming
+~/code/kvenv/bin/python3 -m pytest tests/ -q     # arb test suite (async via pytest-asyncio)
 ```
 
-## 🔐 Authentication Setup
-
-1. Create `.env` file from template:
-```bash
-cp .env.example .env
-```
-
-2. (Optional) Add Kalshi API credentials for the live WebSocket feed:
-```
-KALSHI_API_KEY=your_access_key_id
-KALSHI_PRIVATE_KEY_PATH=/absolute/path/to/kalshi_private_key.pem
-```
-The bot signs WebSocket requests with an API key id + an RSA private key
-(RSA-PSS), **not** an email/password. The key may also live at the repo root
-as `kalshi_private_key.pem`.
-
-3. Without these, the client runs **REST-only**: public REST market data still
-   works, but there is no live Kalshi WebSocket feed.
-
-## 📜 Legal & Compliance
-
-- **Analysis Only**: No trading functionality - pure market analysis
-- **Educational Purpose**: For research and educational use
-- **Terms Compliance**: Respects API terms of service
-- **Data Privacy**: All data stored locally
-
-## 🚀 Performance
-
-### Typical Performance Metrics
-- **Scan Duration**: 8-15 seconds for complete market analysis
-- **Market Coverage**: 200+ Kalshi markets, 500+ Polymarket markets
-- **Match Detection**: 50-100 potential market pairs per scan
-- **Opportunity Detection**: 1-5 arbitrage opportunities per scan (varies by market conditions)
-- **Memory Usage**: ~50-100MB during active scanning
-- **API Efficiency**: 95%+ success rate with retry logic
-
-### Scalability Features
-- **Concurrent Processing**: Parallel market analysis
-- **Efficient Caching**: Reduces redundant API calls by 60-80%
-- **Adaptive Throttling**: Dynamic rate limiting based on API response times
-- **Memory Management**: Automatic cache cleanup and optimization
-
-## 🎯 Use Cases
-
-- **Market Research**: Identify pricing inefficiencies across platforms
-- **Academic Study**: Research prediction market dynamics
-- **Strategy Development**: Analyze arbitrage opportunity patterns
-- **Platform Comparison**: Compare market offerings and pricing
-
-## 🔬 Development & Testing
-
-### Debug Tools (`debug/`)
-- **Comprehensive Debugging**: Full arbitrage detection pipeline analysis
-- **Price Verification**: Market-specific price checking utilities
-- **API Exploration**: Field inspection and endpoint testing
-- **Issue Diagnosis**: Targeted debugging for specific market pairs
-
-### Test Suite (`tests/`)
-- **System Integration**: End-to-end testing of complete workflows
-- **Completeness Validation**: Phase 1 lossless feature verification
-- **Real-Time Testing**: Phase 2 WebSocket functionality validation
-- **Performance Testing**: Load testing and optimization validation
-
-### Utility Tools (`tools/`)
-- **Market Search**: Advanced search through historical and live data
-- **Data Analysis**: Flexible analysis of stored market information
-- **Report Generation**: Custom analysis and reporting utilities
-- **Data Exploration**: Interactive market data investigation
+- Use the repo venv `~/code/kvenv/bin/python3` (a Desktop `.venv` hits an iCloud
+  dataless-`.pyc` import hang).
+- All fee math goes through `venue_fees.py`.
+- Do not weaken the live lock, the kill switch, or the live caps.
