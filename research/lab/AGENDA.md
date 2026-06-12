@@ -60,31 +60,54 @@ Priority = expected information value about making (at least paper) money.
   no new crypto/weather/NBA backtest spools. Forward information now comes only
   from real paper fills or genuinely new out-of-sample data. (Codify into the
   governor as a surface-exhaustion fleet damper — see owner proposal in beat log.)
+- **Pre-ingestion scoping fleet recipe (2026-06-12T20:44Z self-opt)**: the only
+  forward unlock is NEW-data ingestion (macro prints / WNBA / MLB per
+  new_family_scoping), but BUILDING ingestion is a repo task headless codex lanes
+  CANNOT do — quarantined lanes are offline/web research only and must never write
+  load-bearing code into the repo. So until the owner/interactive apex stands up an
+  ingestion family, codex spools DE-RISK each top-ranked new family BEFORE the desk
+  spends ingestion-engineering budget: per family, one **GO/NO-GO feasibility lane**
+  (does the first cell clear fee+spread+settlement? with an expected-edge cents
+  number) PLUS one **build-ready ingestion/settlement spec lane** (feeds, schema,
+  official-outcome loaders, snapshot cadence). This converts the exhausted-surface
+  idle risk into decision-useful, sequenced forward motion instead of re-mining
+  dead substrate. A well-argued NO-GO that saves an ingestion build is a SUCCESSFUL
+  lane. Retire this recipe once real ingestion + paper fills become the information
+  source.
 
 ## NOW (top = next lane to launch)
-0. **(2026-06-12T15:45Z) BOTH remaining contested threads DEAD; backtest surface
-   FULLY EXHAUSTED; codex redirected to NEW surface; BTC pilot now has a frozen
-   decision rule.** Graded this beat (see DONE): **nba_fav_hold_kaudit = SIGN-FLIP/
-   RETIRE** (p>=0.85 NBA home-fav hold: train -1.82c neg vs holdout +5.31c pos =
-   sign flip, K=4 CI [-1.76,+8.71] crosses 0; the K=1 clearance was K-laundering
-   exactly as the new rule predicted — RETIRE, do not pilot); **crypto_9798_
-   lossexposure = SURVIVORSHIP-ARTIFACT** (97-98c NO +2.00c is a zero-realized-loss
-   payoff tautology — all 99 entries at exactly 97.0c; Wilson 0/97 admits net EV
-   [-1.81,+2.00], gross LB below the fee line; DEAD); **btc_pilot_power = DECISION-
-   RULE-DELIVERED** (frozen sigma=0.9766c; N=30 retire-if-mean<-0.293c / graduate-
-   if-mean>+2.630c & LB>+1.00c — see IN-FLIGHT); **nba_homefav_curve = TAIL-ONLY**
-   (broad continuous curve does NOT validate train->holdout; the one K=1 rule
-   stakes 88.5% at p>=0.85 = the very cell kaudit just killed). META: the desk's
-   two last threads (NBA p>=0.85 hold, crypto 97-98c) are both DEAD; the BTC hr20
-   pilot is the ONLY surviving forward thread and now has a frozen rule. SELF-OPT
-   (applied): added the **Exhausted-surface STOP rule** above. OWNER PROPOSAL
-   (structural, not self-applied): a governor surface-exhaustion fleet damper (soft-
-   cap codex to 1 when the last N graded lanes are all-dead) — see beat log. New
-   codex wave (4 spooled, backlog floor restored, all NEW-surface/infra per the
-   STOP rule): new_family_scoping, claude_attribution, maker_book_decision_rule,
-   crossven_resolution_disagree. Next interactive-apex action: keep the 3 measure-
-   only books running to their rules; do NOT authorize new crypto/weather/NBA
-   backtests.
+0. **(2026-06-12T20:44Z) PIVOT WAVE GRADED — the post-exhaustion scoping/infra
+   wave delivered the desk's path forward; 4 pre-ingestion scoping lanes spooled.**
+   Graded this beat (see DONE): **new_family_scoping = ROADMAP** (ranked NEW-data
+   families by edge-per-ingestion-$; GO top-3 = macro/econ print bucket ladders
+   #1 [CPI/jobs, scheduled+timestamped = cleanest new surface], WNBA game lines
+   #2 [nba_odds_study transfers cheapest, in-season NOW], MLB micro-lines #3
+   [NRFI]); **claude_attribution = APEX-IS-CHEAP** (apex beat only $23.43/2.5%
+   of observed Claude spend; operator/unattributed is 70-97% — do NOT cut the
+   beat for budget; instrument the operator channel instead); **maker_book_
+   decision_rule = PASTEABLE** (wx_fillprobe/weather_maker_v1 analog of
+   btc_pilot_power: at 30 real fills, frozen sigma=36.1c, margin=10.8c —
+   MAKER-DEAD if mean<-10.8c, ALIVE if >+10.8c & LB>0; fill-rate floors set —
+   see IN-FLIGHT); **crossven_resolution_disagree = ARB-DEFECT FOUND** (clean
+   same-event divergence ~6-7c/p90 12-13c -> basis floor >=12.5c; AND >=25.6%
+   of scanner matches are FALSE matches manufacturing the 20-68c "extreme edges"
+   -> the durable-edge-at-extremes arb thesis is NOT supported once cleaned).
+   SELF-OPT (applied): codified the **Pre-ingestion scoping fleet recipe** above.
+   OWNER PROPOSALS (structural, in beat log): (a) arb match-quality fix — extend
+   matching/ResolutionCriteriaVerifier to catch deadline/threshold/polarity false
+   matches + adopt >=12.5c basis floor (touches the live gate); (b) per-invocation
+   Claude consumer+cost wrapper (usage_meter); (c) weather_maker_v1 cadence-starved
+   (8 cancels/0 fills) — re-point or pause per its new 14-day floor. New codex wave
+   (4 spooled, backlog floor restored, all pre-ingestion scoping per the recipe):
+   macro_prints_feasibility, macro_settlement_spec, wnba_ingestion_spec,
+   mlb_nrfi_feasibility. Next owner action: read new_family_scoping's roadmap and
+   AUTHORIZE the macro-prints ingestion BUILD (headless codex cannot build it —
+   lanes are offline/web research only).
+0b. *(superseded 15:45Z summary)* Both last contested backtest threads (NBA
+   p>=0.85 hold, crypto 97-98c) graded DEAD and the backtest surface is FULLY
+   EXHAUSTED; the BTC hr20 pilot is the only surviving forward thread and has a
+   frozen N=30 decision rule (btc_pilot_power). See DONE. Do NOT authorize new
+   crypto/weather/NBA backtests — honor the Exhausted-surface STOP rule.
 1. ~~Crypto paper-trading support + BTC hour=20 pilot (build lane)~~ **BUILT
    2026-06-12T03:14Z** (interactive apex; run note
    `runs/paper_pilots_20260612T031450Z.md`). Paper harness generalized to a
@@ -196,8 +219,21 @@ Priority = expected information value about making (at least paper) money.
   fill rate + adverse selection (~40% lower-bound 60m fill expected vs v1's
   27%-at-30m). NOT alpha; answers the prior beat's structural proposal with
   option (b) in a NEW book — weather_maker_v1 untouched.
+  **FROZEN DECISION RULE (maker_book_decision_rule, 2026-06-12T20:44Z):** at 30
+  REAL settled fills, compute event-equal gross markout EV (c/fill); frozen
+  sigma=36.1c, one-sided 95% margin=10.8c, cost line 0.0c. MAKER-DEAD if mean
+  < -10.8c; ALIVE-candidate if > +10.8c AND one-sided 95% LB>0; else keep
+  measuring (do NOT re-run backtest or change spec). Expected ~3 calendar days
+  at the intended 20 signal-hours/day (69.1% strict-fill prior). FILL-RATE FLOOR:
+  if <20 real fills after 3 active days, RE-POINT or PAUSE (cadence failure).
+  Owner/interactive apex: paste into the book's governance.
 - weather_maker_v1 paper book (forecast_gap_maker) — live, beats every 15m.
-  As of 2026-06-11 19:41Z: 0 fills, **5 cancelled**, fill_rate 0.0, ev 0.0.
+  **As of 2026-06-12 20:44Z: 0 fills, 8 cancelled (was 5), fill_rate 0.0, ev 0.0
+  — still cadence-starved, accumulating cancels not fills.**
+  **FROZEN DECISION RULE (maker_book_decision_rule, 2026-06-12T20:44Z):** same
+  30-real-fill / sigma=36.1c / ±10.8c MAKER-DEAD-vs-ALIVE test; FILL-RATE FLOOR:
+  if <3 real fills after 14 active calendar days, RE-POINT or PAUSE rather than
+  run open-ended. The book is already deep into that floor's clock with 0 fills.
   **RE-POINT PROPOSAL NOW DEAD:** wx_sched_walkforward (graded this beat) proved
   the 66-cell schedule is EX-POST-ONLY (negative REPORT EV, Bonferroni CI crosses
   0), so there is NO validated spec to re-point the book to. The book is now a
@@ -216,6 +252,41 @@ Priority = expected information value about making (at least paper) money.
   surviving crypto thread (BTC 95-99c sleeve) is queued as btc_9599_subspec.
 
 ## DONE (recent)
+- **New-surface scoping + infra wave graded (2026-06-12T20:44Z)** — 4 memos; the
+  post-exhaustion pivot. Maps the desk's path off the dead backtest surface.
+  - `new_family_scoping`: **ROADMAP** — ranked 9 NEW-data families by
+    edge-per-ingestion-$. GO top-3: (1) scheduled macro/econ print bucket ladders
+    (CPI/jobs/claims/ISM/FOMC — scheduled, discrete, externally-timestamped =
+    cleanest new surface; emphasize CPI/jobs BUCKET ladders, NOT Fed no-change
+    which is arbed vs rate futures), (2) WNBA game lines (nba_odds_study transfers
+    cheapest, in-season NOW, 40 active PM mkts), (3) MLB micro-lines (NRFI/first
+    inning). DEFER weather-beyond-cities; NO-GO equities/IPO ladders (insider risk).
+  - `claude_attribution`: **APEX-IS-CHEAP** — apex beat is only $23.43 (2.5%) of
+    observed incremental Claude spend ($944/window); operator/unattributed 70-97%,
+    gated lanes ~0 (no per-invocation cost evidence). Do NOT cut the beat to save
+    budget; instrument the operator channel (per-invocation consumer+model+cost).
+  - `maker_book_decision_rule`: **PASTEABLE** — wx_fillprobe/weather_maker_v1 analog
+    of btc_pilot_power. At 30 REAL settled fills: frozen sigma=36.1c, one-sided 95%
+    margin=10.8c, cost line 0.0c. MAKER-DEAD if event-equal gross markout mean
+    < -10.8c; ALIVE-candidate if > +10.8c AND LB>0; else keep measuring. wx_fillprobe
+    fill clock ~3 calendar days (20 sig-hr/day, 69.1% strict-fill prior); RE-POINT/
+    PAUSE floors: wx_fillprobe <20 fills/3d, weather_maker_v1 <3 fills/14d.
+  - `crossven_resolution_disagree`: **ARB-DEFECT FOUND** — clean same-event IPO
+    cross-venue divergence ~6-7c (p90 12-13c) -> basis floor >=12.5c, treat <15c as
+    not-robust. CRITICAL: >=25.6% of the scanner's detailed opportunity obs are
+    OBVIOUS FALSE MATCHES (deadline/threshold/polarity/no-branch) manufacturing the
+    20-68c "extreme edges"; once cleaned, divergence is NOT worst at extremes -> the
+    durable-edge-at-extremes arb thesis is unsupported as clean venue disagreement.
+    True settlement-disagreement unmeasurable here (resolution CSV 9 NBA/NFL rows, 0
+    overlap with IPO opps) -> capture-spec gap flagged.
+  META: with the backtest surface exhausted, this wave delivers the forward map
+  (NEW-data roadmap), proves apex cost is negligible, arms the 2 weather paper books
+  with a 30-fill convergence verdict, and exposes a real fixable arb-machine defect.
+  SELF-OPT: codified the **Pre-ingestion scoping fleet recipe**. OWNER PROPOSALS
+  (beat log): arb match-quality fix + >=12.5c basis floor; Claude consumer/cost
+  instrumentation; weather_maker_v1 re-point/pause. Replaced by 4 pre-ingestion
+  scoping lanes: macro_prints_feasibility, macro_settlement_spec, wnba_ingestion_spec,
+  mlb_nrfi_feasibility. Row in experiments.jsonl.
 - **K-audit + loss-exposure + pilot-power + homefav-curve wave graded
   (2026-06-12T15:45Z)** — 4 memos; both last contested threads DIE, backtest
   surface fully exhausted, BTC pilot gets a frozen decision rule.
