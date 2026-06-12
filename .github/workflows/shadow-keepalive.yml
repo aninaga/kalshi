@@ -27,7 +27,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: claude/codebase-overview-QycoJ
+          ref: main
 
       - uses: actions/setup-python@v5
         with:
@@ -65,7 +65,7 @@ jobs:
           git commit -m "shadow-keepalive: ledger snapshot $(date -u +%Y-%m-%dT%H:%MZ) [skip ci]"
           # Rebase in case a live session pushed while this job ran.
           for i in 1 2 3; do
-            git pull --rebase origin claude/codebase-overview-QycoJ && \
-            git push origin HEAD:claude/codebase-overview-QycoJ && break
+            git pull --rebase origin main && \
+            git push origin HEAD:main && break
             sleep $((i*5))
           done
