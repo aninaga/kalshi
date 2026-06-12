@@ -45,8 +45,46 @@ Priority = expected information value about making (at least paper) money.
   surviving cell MUST also report TRAIN performance (a holdout-positive /
   train-negative family is a sign flip, not an edge). (Codify into governance
   when convenient.)
+- **Exhausted-surface STOP rule (2026-06-12T15:45Z self-opt)**: the directional/
+  hold/maker/calibration backtest surface on the desk's THREE cached datasets
+  (crypto stride-1 panel, weather forecast-gap panel, NBA polymarket home-leg) is
+  EXHAUSTED — every family has graded DEAD or untradeable across ~24 lanes. Do NOT
+  spool any further re-grades, robustness checks, threshold sweeps, or new
+  hold/calibration families on these three substrates; re-mining them is destroyed
+  budget + manufactured noise (each "survivor" has been a K-laundering / few-event /
+  zero-loss-survivorship artifact). Codex backlog now feeds ONLY: (a) NEW data
+  families requiring NEW ingestion (econ prints / climate / in-season sports — NOT
+  NBA, out until ~Oct); (b) desk-economics/infra lanes (budget attribution,
+  paper-book decision rules); (c) the unstudied cross-venue basis-risk question.
+  The lone live thread (BTC hr20 pilot) runs to its FROZEN btc_pilot_power rule —
+  no new crypto/weather/NBA backtest spools. Forward information now comes only
+  from real paper fills or genuinely new out-of-sample data. (Codify into the
+  governor as a surface-exhaustion fleet damper — see owner proposal in beat log.)
 
 ## NOW (top = next lane to launch)
+0. **(2026-06-12T15:45Z) BOTH remaining contested threads DEAD; backtest surface
+   FULLY EXHAUSTED; codex redirected to NEW surface; BTC pilot now has a frozen
+   decision rule.** Graded this beat (see DONE): **nba_fav_hold_kaudit = SIGN-FLIP/
+   RETIRE** (p>=0.85 NBA home-fav hold: train -1.82c neg vs holdout +5.31c pos =
+   sign flip, K=4 CI [-1.76,+8.71] crosses 0; the K=1 clearance was K-laundering
+   exactly as the new rule predicted — RETIRE, do not pilot); **crypto_9798_
+   lossexposure = SURVIVORSHIP-ARTIFACT** (97-98c NO +2.00c is a zero-realized-loss
+   payoff tautology — all 99 entries at exactly 97.0c; Wilson 0/97 admits net EV
+   [-1.81,+2.00], gross LB below the fee line; DEAD); **btc_pilot_power = DECISION-
+   RULE-DELIVERED** (frozen sigma=0.9766c; N=30 retire-if-mean<-0.293c / graduate-
+   if-mean>+2.630c & LB>+1.00c — see IN-FLIGHT); **nba_homefav_curve = TAIL-ONLY**
+   (broad continuous curve does NOT validate train->holdout; the one K=1 rule
+   stakes 88.5% at p>=0.85 = the very cell kaudit just killed). META: the desk's
+   two last threads (NBA p>=0.85 hold, crypto 97-98c) are both DEAD; the BTC hr20
+   pilot is the ONLY surviving forward thread and now has a frozen rule. SELF-OPT
+   (applied): added the **Exhausted-surface STOP rule** above. OWNER PROPOSAL
+   (structural, not self-applied): a governor surface-exhaustion fleet damper (soft-
+   cap codex to 1 when the last N graded lanes are all-dead) — see beat log. New
+   codex wave (4 spooled, backlog floor restored, all NEW-surface/infra per the
+   STOP rule): new_family_scoping, claude_attribution, maker_book_decision_rule,
+   crossven_resolution_disagree. Next interactive-apex action: keep the 3 measure-
+   only books running to their rules; do NOT authorize new crypto/weather/NBA
+   backtests.
 1. ~~Crypto paper-trading support + BTC hour=20 pilot (build lane)~~ **BUILT
    2026-06-12T03:14Z** (interactive apex; run note
    `runs/paper_pilots_20260612T031450Z.md`). Paper harness generalized to a
@@ -126,10 +164,13 @@ Priority = expected information value about making (at least paper) money.
 6. Weather favorite maker expression — round-2 killed the taker version on
    zero-volume entries; maker variant only if weather_maker_v1 paper shows
    real fills at touch.
-7. New-family scouting sweep (econ prints / climate / sports when in season)
-   — governor-paced codex fleet, same lens methodology.
-8. ccusage-independent Claude $-attribution (operator vs apex vs lanes) to
-   sharpen the surplus forecast.
+7. ~~New-family scouting sweep (econ prints / climate / sports when in season)~~
+   **SPOOLED 2026-06-12T15:45Z** as `new_family_scoping` (reasoning/planning lane;
+   no NBA — out of season). The Exhausted-surface STOP rule makes this the desk's
+   primary unlock now. See IN-FLIGHT/backlog.
+8. ~~ccusage-independent Claude $-attribution (operator vs apex vs lanes)~~
+   **SPOOLED 2026-06-12T15:45Z** as `claude_attribution` (uses usage_history +
+   lane_history). See backlog.
 
 ## IN-FLIGHT
 - **crypto_btc9599_v1 paper book (btc_9599_pilot, 2026-06-12)** — MEASURE-ONLY
@@ -138,6 +179,15 @@ Priority = expected information value about making (at least paper) money.
   cross-through case), max 1 entry per event-side. Beats: open/mark 15m,
   settle hourly. Expect ~1 event/day; weeks to a verdict by design. Promotion
   forbidden by docstring without min-12-holdout-events + declared-K (K=386).
+  **FROZEN DECISION RULE (btc_pilot_power, 2026-06-12T15:45Z):** variance prior
+  sigma=0.9766c (from 16 holdout events, mean +1.744c). Primary checkpoint at
+  N=30 settled real fills (~30 days): RETIRE if event-equal gross mean < -0.293c
+  (one-sided 95% upper bound <=0c); GRADUATE to a sized-pilot PROPOSAL only if
+  mean > +2.630c (fee+1.63c capacity gate) AND one-sided 95% lower bound > +1.000c
+  fee line; else keep measuring — do NOT re-open the backtest or change the sleeve.
+  Later checkpoints at 30-event increments use the same frozen formula (retire
+  thresholds -0.207c@60, -0.169c@90, ...). Owner/interactive apex should paste this
+  into the book's governance.
 - **weather_fillprobe_v2 paper book (wx_fillprobe, 2026-06-12)** — measure-only
   maker FILL PROBE: same frozen forecast-gap signal as v1, 60m rests (a
   pre-registered study horizon), restricted to the fill-MECHANICS levers
@@ -166,6 +216,37 @@ Priority = expected information value about making (at least paper) money.
   surviving crypto thread (BTC 95-99c sleeve) is queued as btc_9599_subspec.
 
 ## DONE (recent)
+- **K-audit + loss-exposure + pilot-power + homefav-curve wave graded
+  (2026-06-12T15:45Z)** — 4 memos; both last contested threads DIE, backtest
+  surface fully exhausted, BTC pilot gets a frozen decision rule.
+  - `nba_fav_hold_kaudit`: **SIGN-FLIP / RETIRE** — p>=0.85 NBA home-fav hold:
+    train -1.82c (neg) vs holdout +5.31c (pos) = validation sign flip, AND the
+    inherited K=4 Bonferroni CI [-1.76c,+8.71c] crosses zero. The prior K=1
+    positive interval was K-laundering exactly as the new rule predicted. The
+    desk's lone live backtested thread is dead — retire, do not pilot.
+  - `crypto_9798_lossexposure`: **SURVIVORSHIP-ARTIFACT** — the 97-98c NO +2.00c
+    is a zero-realized-loss payoff tautology: all 99 holdout entries sit at exactly
+    97.0c so +2.00c IS the mechanical all-wins payoff. 0/97 losses at a 3.0%
+    entry-implied rate has 5.2% probability; Wilson admits loss prob up to 3.81%
+    -> net EV [-1.81c,+2.00c], gross LB below the 1c fee line; 2 adverse
+    settlements flip it negative; adjacent 98.0c tick already shows losses (+0.44c).
+    Round-number/small-sample artifact, not a narrow edge. Lone crypto-hold cell dead.
+  - `btc_pilot_power`: **DECISION-RULE-DELIVERED** — frozen sigma=0.9766c; N=30
+    retire-if-mean<-0.293c / graduate-if-mean>+2.630c & one-sided LB>+1.000c;
+    keep-measuring otherwise; same frozen formula at 30-event increments. Pasted
+    into the btc_9599_pilot IN-FLIGHT entry. The pilot now converges to a verdict.
+  - `nba_homefav_curve`: **TAIL-ONLY** — broad continuous home-fav curve does NOT
+    validate train->holdout (train net-neg across 0.50-0.85, only +0.10c net in the
+    0.85-0.95 tail; holdout 0.50-0.85 positive is a sign reversal vs the train-fit).
+    The one K=1 isotonic rule clears the floor but stakes 88.5% at p>=0.85 — the
+    same tail kaudit just killed — so it is not a distinct broad edge.
+  META: both last threads (NBA p>=0.85 hold, crypto 97-98c) DEAD; the BTC hr20
+  pilot is the only surviving forward thread and now has a frozen rule. The
+  backtest surface on all three datasets is FULLY EXHAUSTED. SELF-OPT: added the
+  **Exhausted-surface STOP rule**. OWNER PROPOSAL: governor surface-exhaustion
+  fleet damper (beat log). Replaced by 4 NEW-surface/infra lanes per the STOP
+  rule: new_family_scoping, claude_attribution, maker_book_decision_rule,
+  crossven_resolution_disagree. Row in experiments.jsonl.
 - **Mechanism + broad-hold + extreme-fav wave graded (2026-06-12T10:43Z)** — 3
   memos (the 4th, fee_model_audit, was graded+built into `venue_fees.py` by the
   interactive apex). The lone live thread is K-contested; new K-inheritance rule.
