@@ -1,6 +1,6 @@
 """
 Comprehensive test suite for the enhanced arbitrage infrastructure.
-Tests all components including circuit breakers, risk engine, and monitoring.
+Tests all components including circuit breakers and the risk engine.
 """
 
 import asyncio

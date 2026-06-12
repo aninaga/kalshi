@@ -10,4 +10,3 @@ py-clob-client-v2>=1.0.1  # CLOB V2 (2026-04-28); legacy py-clob-client is archi
 cryptography>=41.0.0
 numpy>=1.24.0
 msgpack>=1.0.0
-redis>=4.2.0  # async client via redis.asyncio; replaces the unmaintained aioredis (cache_manager.py)
