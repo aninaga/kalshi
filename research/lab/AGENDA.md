@@ -54,26 +54,30 @@ Priority = expected information value about making (at least paper) money.
    adverse selection; gated lane saved). See DONE. The hardening successors
    (wx_maker_schedule/queue/gap_realfill, btc_9599_subspec) ALL graded
    2026-06-11T14:41Z — none promotable (see DONE).
-4. **(2026-06-12T00:41Z) Capacity gate PASSED; both new families DEAD; new wave.**
-   Graded this beat: **btc_9599_capacity = SIZEABLE** — the lone survivor (BTC
-   95-99c / hour=20 ET / spread1c / 31-60m) is positive across vol 1-99/100-999/
-   1000+ and on BOTH sides (~$683 alpha/day at full size), cost-robust to fee+1c.
-   The pilot gate (see NOW#1) is therefore OPEN. BUT **btc_session_regime =
-   ISOLATED-SPIKE-NOISE** — hour=20 is positive in both halves yet its neighbors
-   are negative and no ET session block survives Bonferroni; it is a single-hour
-   anomaly with no mechanism, so the pilot must stay narrow. Both NEW families
-   died: **nba_clv_homeleg = REAL-BUT-UNTRADEABLE** (clean favorite-longshot
-   calibration, but late-taker CI [-5.29c,+6.16c] crosses 0; home leg still a
-   clean reusable substrate); **wx_xcity_spillover = DEAD** (cross-city feature
-   worsens holdout log-loss; 5-event taker, CI crosses 0). New codex wave this
-   beat (4 spooled): (a) **btc_9599_xasset** — does the frozen sleeve generalize
-   to ETH, or is it BTC-only? (decision-relevant for the pilot); (b)
-   **crypto_favlongshot_hold** — is favorite-longshot a BROAD buy-and-hold edge or
-   just the hour=20 tip? (non-microstructure); (c) **wx_forecast_revision** — NEW
-   non-microstructure weather family (forecast-revision momentum/reversion);
-   (d) **nba_fav_hold** — early buy-and-hold favorite vs the dead late taker, on
-   the clean home leg. Next interactive-apex build = the NOW#1 pilot; the
-   btc_9599_xasset verdict should gate how confidently to size it.
+4. **(2026-06-12T05:42Z) Pilot survivor confirmed BTC-only & narrow; all 4 new
+   families DEAD; backtest surface near-exhausted; new wave + cost-model flag.**
+   Graded this beat (see DONE): **btc_9599_xasset = BTC-ONLY-ARTIFACT** (BTC hr20
+   holdout +1.41c CI [0.88,1.81] stays positive but ETH -3.49c, hr20 not even
+   ETH's best hour -> do NOT size the pilot up; keep it measure-only narrow);
+   **crypto_favlongshot_hold = NO-EDGE** (broad 95-99c hold flat -0.18c; survivor
+   is a narrow special cell, not a broad-bias tip); **wx_forecast_revision =
+   DEAD** (market mid prices the revision; locked taker 14 events, CI entirely
+   <0); **nba_fav_hold = DEAD-as-tradeable** (p=0.85 +4.31c but all CIs cross 0,
+   train negative). The lone survivor is now boxed in (BTC-only, no mechanism,
+   not a broad tip) and is correctly running ONLY as a measure-only narrow paper
+   pilot. **COST-MODEL FLAG (self-opt proposal, not self-applied):** every
+   hold-to-settlement memo charged a ROUND-TRIP fee 2*0.07*p*(1-p) on positions
+   held to FREE Kalshi settlement; canonical desk fee (execution.py) is ONE-WAY
+   0.07*p*(1-p). Arithmetic says it does NOT revive a dead family this round, but
+   it systematically over-kills hold edges -> see the fee_model_audit lane +
+   report proposal. New codex wave this beat (4 spooled, backlog floor restored):
+   (a) **fee_model_audit** — re-grade all hold cells under one-way fee, does any
+   borderline cell flip?; (b) **btc_9599_mechanism** — is hr20 a real mechanism
+   or noise-to-retire (drop-one-event jackknife)?; (c) **crypto_noside_hold** —
+   is the recurring NO-side asymmetry a BROAD hold edge across all hours?;
+   (d) **nba_extreme_fav_hold** — re-grade p>=0.85 as a single K=1 hypothesis
+   under one-way cost. Next interactive-apex action: keep the 3 measure-only
+   books running; consider the cost-model proposal in the beat report.
 
 ## QUEUED
 5. Crypto top-up cadence: daily -> 6h (controller TOPUP change) once any lane
@@ -121,6 +125,36 @@ Priority = expected information value about making (at least paper) money.
   surviving crypto thread (BTC 95-99c sleeve) is queued as btc_9599_subspec.
 
 ## DONE (recent)
+- **Xasset + broad-hold + new-family wave graded (2026-06-12T05:42Z)** — 4 memos;
+  the pilot survivor is boxed in (BTC-only & narrow) and all 4 families resolve
+  NEGATIVE. Backtest surface is now near-exhausted.
+  - `btc_9599_xasset`: **BTC-ONLY-ARTIFACT** — frozen hr20 sleeve verbatim: BTC
+    holdout +1.41c CI [0.88,1.81] (16 events) positive, ETH -3.49c CI [-19.28,
+    2.06] (9 events), and hr20 is not even ETH's best hour (ETH best = hr08
+    +2.68c). Does NOT generalize cross-asset -> keep the pilot BTC-only, narrow,
+    measure-only; do NOT size up.
+  - `crypto_favlongshot_hold`: **NO-EDGE** — broad 95-99c favorite hold flat
+    -0.18c CI [-1.14,0.63]; ladder non-monotone (only 97-98c CI>0). BTC hr20 in
+    fixed-entry test only +0.43c CI [-2.66,2.14]. Survivor is a narrow special
+    cell, not a broad-bias tip. Side split NO +0.77c [-0.30,1.60] > YES -1.08c
+    -> motivated crypto_noside_hold lane.
+  - `wx_forecast_revision`: **DEAD** — revision improves holdout log-loss 0.024
+    over forecast-only but market mid still better by 0.165; locked NYC-YES-0.15
+    taker fired 14 events (above floor), -0.130 EV, Bonferroni CI [-0.2924,
+    -0.0340] entirely below zero (0 winners/14 losers). Market prices the
+    revision; another dead weather fair-value family.
+  - `nba_fav_hold`: **DEAD-as-tradeable** — early fixed-entry hold point-positive
+    at 3/4 thresholds (p=0.85 +4.31c on 43 games) but ALL game-cluster Bonferroni
+    CIs cross 0 and train negative at all four; all cleared the 12-game floor
+    (power fine, stability the issue). p=0.85 = forward-watchlist only ->
+    re-graded properly-powered in nba_extreme_fav_hold lane.
+  META: lone survivor confirmed BTC-only + not-a-broad-tip -> correctly held as a
+  measure-only narrow pilot. Crypto + weather market mids both well-calibrated
+  (taker/fair-value dead); NBA calibration clean-but-untradeable. COST-MODEL
+  FLAG: hold-to-settlement memos charged round-trip fee on free-settlement
+  positions (canonical desk fee is one-way) -> fee_model_audit lane + owner
+  proposal. Replaced by 4 lanes: fee_model_audit, btc_9599_mechanism,
+  crypto_noside_hold, nba_extreme_fav_hold. Row in experiments.jsonl.
 - **Capacity + regime + new-family wave graded (2026-06-12T00:41Z)** — 4 memos;
   the pilot gate PASSES, the BTC survivor is confirmed sizeable, both new
   families die.
