@@ -34,6 +34,17 @@ Priority = expected information value about making (at least paper) money.
   testing CI crossed zero largely because the event count was tiny. Few-event
   holdouts cannot distinguish edge from luck; spend the lane on a higher-event-
   count expression instead. (Codify into governance when convenient.)
+- **K-inheritance on re-grades (2026-06-12T10:43Z self-opt)**: a cell drawn from
+  an already-swept family MUST inherit the family's prior sweep K — you CANNOT
+  reset to K=1 by re-declaring one cell as "the single pre-registered hypothesis"
+  AFTER the sweep already happened. Motivating failure: nba_extreme_fav_hold
+  re-graded p>=0.85 NBA home-fav hold as K=1 and cleared (CI [+0.26,+8.37]), but
+  the SAME family was swept at 4 thresholds the prior wave (nba_fav_hold) where
+  all four CIs crossed 0 AND train was negative — so the honest multiplicity is
+  K=4, not K=1, and the "clean" CI is K-laundering. Corollary: any re-grade of a
+  surviving cell MUST also report TRAIN performance (a holdout-positive /
+  train-negative family is a sign flip, not an edge). (Codify into governance
+  when convenient.)
 
 ## NOW (top = next lane to launch)
 1. ~~Crypto paper-trading support + BTC hour=20 pilot (build lane)~~ **BUILT
@@ -81,12 +92,33 @@ Priority = expected information value about making (at least paper) money.
    banner (spread taker +0.77→+1.92c; required-n 15.2k→~2.5k; maker fee floor
    ≈0). REMAINING from original scope: one-way-vs-round-trip re-grade of hold
    cells still needs the cache rebuild (queued in the run note).
-   (b) **btc_9599_mechanism** — is hr20 a real mechanism
-   or noise-to-retire (drop-one-event jackknife)?; (c) **crypto_noside_hold** —
-   is the recurring NO-side asymmetry a BROAD hold edge across all hours?;
-   (d) **nba_extreme_fav_hold** — re-grade p>=0.85 as a single K=1 hypothesis
-   under one-way cost. Next interactive-apex action: keep the 3 measure-only
-   books running; consider the cost-model proposal in the beat report.
+   (b) **btc_9599_mechanism** — ✅ GRADED 2026-06-12T10:43Z (NOW#5);
+   (c) **crypto_noside_hold** — ✅ GRADED (NOW#5); (d) **nba_extreme_fav_hold**
+   — ✅ GRADED (NOW#5).
+5. **(2026-06-12T10:43Z) Mechanism/broad-hold/extreme-fav wave graded; lone live
+   thread (NBA) is K-contested; new K-inheritance hard rule + 4-lane robustness
+   wave spooled.** Graded this beat (see DONE): **btc_9599_mechanism =
+   NOISE-TO-RETIRE** (jackknife-robust +1.69c but NO mechanism — hr20 is the UTC
+   opener not ET terminal hour, neighbors hr18/21 negative, train doesn't favor
+   hr20; pre-commit pilot retirement if real fills don't confirm);
+   **crypto_noside_hold = NARROW/NO-BROAD-EDGE** (pooled all-hours -0.024c CI
+   crosses 0; only 97-98c band survives with a degenerate 0-loss flat +2.00c CI;
+   dominant 98-99c negative); **nba_extreme_fav_hold = STRONGEST-CANDIDATE-BUT-
+   K-CONTESTED** (memo says TRADEABLE p>=0.85 +5.31c CI [+0.26,+8.37], but K=1 is
+   contestable vs the prior 4-threshold sweep + no train reported → treat as
+   forward-watchlist, NOT a declared edge; NBA out of season til ~Oct anyway).
+   **SELF-OPT (applied):** added the K-inheritance hard rule above. New codex wave
+   (4 spooled, backlog floor restored): (a) **nba_fav_hold_kaudit** — honest K=4
+   + train re-grade of the NBA candidate (does it survive or is it K-laundering?);
+   (b) **crypto_9798_lossexposure** — is the 97-98c +2.00c a zero-realized-loss
+   survivorship artifact / payoff tautology?; (c) **btc_pilot_power** — a
+   pre-registered confirm/retire decision rule for the BTC pilot from sleeve
+   variance (answers btc_9599_mechanism's follow-up); (d) **nba_homefav_curve** —
+   NEW continuous (non-threshold) home-fav underpricing expression of the clean
+   home-leg substrate. Next interactive-apex action: keep the 3 measure-only
+   books running. **If nba_fav_hold_kaudit also kills the NBA thread, the honest
+   move per the standing guidance is to SLOW the codex cadence and let the paper
+   books run rather than keep mining a near-exhausted backtest surface.**
 
 ## QUEUED
 5. Crypto top-up cadence: daily -> 6h (controller TOPUP change) once any lane
@@ -134,6 +166,38 @@ Priority = expected information value about making (at least paper) money.
   surviving crypto thread (BTC 95-99c sleeve) is queued as btc_9599_subspec.
 
 ## DONE (recent)
+- **Mechanism + broad-hold + extreme-fav wave graded (2026-06-12T10:43Z)** — 3
+  memos (the 4th, fee_model_audit, was graded+built into `venue_fees.py` by the
+  interactive apex). The lone live thread is K-contested; new K-inheritance rule.
+  - `btc_9599_mechanism`: **NOISE-TO-RETIRE** — holdout +1.69c is jackknife-robust
+    (drop-one-event LOO +1.65..+1.93c over 16 events) but has NO mechanism: hr20
+    is the UTC-day OPENER not the ET terminal hour (max ET hour = 23), no
+    weekday/calendar concentration, hr19 carryover explains nothing (~52% side
+    match), neighbors incoherent (hr18 -3.79c, hr21 -2.32c), and TRAIN does not
+    favor hr20 (+0.74c train event-equal). Keep btc_9599_pilot BTC-only/measure-
+    only AND pre-commit retirement if real fills don't confirm. -> btc_pilot_power.
+  - `crypto_noside_hold`: **NARROW / NO-BROAD-EDGE** — under corrected one-way fee,
+    pooled BTC+ETH all-hours NO-favorite hold = -0.024c, clustered CI
+    [-0.569,+0.383] crosses 0 (2212 sig/463 events); BTC -0.060c, ETH +0.872c on
+    tiny n. 18/24 hours Bonferroni-positive but 6 losing hours sink the pool. Band
+    ladder non-monotone: only 97-98c survives (+2.000c, degenerate flat CI, 0
+    losses/97 events — a survivorship flag) while the dominant 98-99c band (1939
+    sig) is negative. Prior +0.77c NO-side ref does NOT upgrade to a broad edge.
+    -> crypto_9798_lossexposure.
+  - `nba_extreme_fav_hold`: **STRONGEST-CANDIDATE-BUT-K-CONTESTED** — memo claims
+    TRADEABLE p>=0.85 home-fav hold (43 games, +5.31c one-way, game-clustered CI
+    [+0.26,+8.37], jackknife +4.91c dropping 2 winners). BUT K=1 is contestable —
+    the same family was swept at 4 thresholds last wave (all four CIs crossed 0,
+    train negative) so honest K≈4 — and the re-grade never reports TRAIN. Graded
+    as forward-watchlist/pilot-candidate, NOT a declared edge; NBA out of season
+    til ~Oct. -> nba_fav_hold_kaudit (honest K=4 + train) + nba_homefav_curve.
+  META: 3/4 of the wave resolve negative-or-contested; the one live thread clears
+  ONLY under a contestable K=1 framing (the same point-positive/CI-crosses-zero
+  failure mode in a K-laundering disguise). Backtest surface near-exhausted;
+  forward progress still hinges on the 3 measure-only paper books (all 0 fills).
+  SELF-OPT: added the **K-inheritance on re-grades** HARD RULE. Replaced by 4
+  robustness lanes: nba_fav_hold_kaudit, crypto_9798_lossexposure, btc_pilot_power,
+  nba_homefav_curve. Row in experiments.jsonl.
 - **Xasset + broad-hold + new-family wave graded (2026-06-12T05:42Z)** — 4 memos;
   the pilot survivor is boxed in (BTC-only & narrow) and all 4 families resolve
   NEGATIVE. Backtest surface is now near-exhausted.
