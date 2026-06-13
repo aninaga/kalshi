@@ -26,7 +26,22 @@ dependencies = [
 # Heavier / optional extras not needed just to run a paper scan.
 viz = ["matplotlib>=3.5.0", "seaborn>=0.11.0"]
 cache = ["redis>=4.2.0"]
-research = ["pyarrow>=12.0.0", "duckdb>=0.9.0"]
+# Everything the research/ suite (and the arb tests that lean on research
+# modules) imports beyond the base deps. CI installs ".[dev,research]":
+#   - pyarrow: lake parquet IO + pandas.read_parquet (also snapshot_store tests)
+#   - duckdb: research/lake reader/schema
+#   - scipy: scorer/dsr.py, lab/strategies/reactions.py
+#   - matplotlib: research/nba_odds_study (imported by evaluator scripts that
+#     tests/test_venue_fees_golden.py exercises in a subprocess)
+#   - scikit-learn: lab/eda.py clustering (soft-optional in code, but installed
+#     so CI exercises the real path rather than the fallback)
+research = [
+    "pyarrow>=12.0.0",
+    "duckdb>=0.9.0",
+    "scipy>=1.10.0",
+    "matplotlib>=3.5.0",
+    "scikit-learn>=1.3.0",
+]
 # Optional LLM tiebreaker for the genuinely-ambiguous matching residue. Absent
 # this extra (and an ANTHROPIC_API_KEY), the deterministic verifier is used
 # unchanged — the tiebreaker no-ops gracefully.

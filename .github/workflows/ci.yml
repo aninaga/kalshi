@@ -5,20 +5,46 @@ on:
   pull_request:
 
 jobs:
+  # Arb-bot suite (tests/). Needs the research extras too: the venue-fees
+  # golden tests import research.harness/research.lab consumers, the evaluator
+  # scripts pull in matplotlib via research/nba_odds_study, and the snapshot
+  # store round-trips parquet through pandas (pyarrow engine).
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Install package (editable, with dev extras)
+      - name: Install package (editable, with dev + research extras)
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[dev]"
+          pip install -e ".[dev,research]"
       - name: Byte-compile (syntax check)
         run: python -m compileall kalshi_arbitrage
       - name: CLI wires up (console script importable)
         run: kalshi-arb --help
       - name: Run arbitrage-bot tests
-        run: pytest tests/ -q
+        run: python -m pytest tests/ -q
+
+  # Research-fund suite (research/). Hermetic: lab/harness tests run on
+  # synthetic fixtures (tmpdir lakes, stubbed providers) — no network, no real
+  # market_data. The two tests that want local data (research/lab/tests/
+  # test_data.py cache round-trip, research/agents/tools/tests/
+  # test_run_backtest.py train-split smoke) self-skip when the NBA cache /
+  # lake splits are absent, which is exactly the fresh-checkout state here.
+  research:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install package (editable, with dev + research extras)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev,research]"
+      - name: Run research-fund tests
+        run: python -m pytest research/ -q
