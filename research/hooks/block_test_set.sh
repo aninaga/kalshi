@@ -9,7 +9,11 @@
 
 set -euo pipefail
 
-PROJECT_ROOT="/Users/anirudh/Desktop/Projects/kalshi"
+# Portable root derivation: this script lives at <root>/research/hooks/, so the
+# project root is two directories up from its own location. This keeps fresh
+# clones, worktrees, and CI guarded without an absolute operator path.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 AUDIT_LOG="${PROJECT_ROOT}/market_data/test_unlocks.log"
 ERROR_LOG="${HOME}/.claude/hook-errors.log"
 

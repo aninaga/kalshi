@@ -153,8 +153,10 @@ market_data/polymarket_us_*.json
 market_data/polymarket_us_*.csv
 market_data/polymarket_anirudh_*.csv
 
-# Claude Code agent worktrees + local settings
-.claude/
+# Claude Code agent worktrees + local settings (but track settings.json: it
+# wires the test-set deny-hook for fresh clones / worktrees / CI)
+.claude/*
+!.claude/settings.json
 
 # Execution runtime artifacts (Phase C/D)
 market_data/executions/
