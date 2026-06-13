@@ -78,9 +78,12 @@ def test_live_notional_clamp(monkeypatch):
     monkeypatch.setattr(Config, "LIVE_MAX_NOTIONAL_USD", 5.0, raising=False)
     monkeypatch.setattr(Config, "MAX_POSITION_SIZE_USD", 100.0, raising=False)
     ex = ArbitrageExecutor()
-    # buy price 0.40 → 5 USD / 0.40 = 12.5 shares cap, well below 100 requested.
+    # buy price 0.40 → 5 USD / 0.40 = 12.5 cap, floored to 12 WHOLE contracts
+    # (fractional sizes caused a permanent sub-share leg imbalance: Kalshi
+    # truncates to int, Polymarket kept the float).
     vol = ex._capped_volume(_opp())
-    assert vol == pytest.approx(12.5)
+    assert vol == pytest.approx(12.0)
+    assert float(vol).is_integer()
 
 
 # --- Concurrency cap -------------------------------------------------------- #

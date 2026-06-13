@@ -1233,8 +1233,20 @@ class MarketAnalyzer:
             kalshi_market = match_data.get('kalshi_market', {})
             polymarket_market = match_data.get('polymarket_market', {})
 
+            # strategy_type drives the PnL math (confirmed_pnl.py:115): a
+            # 'complementary' trade is two BUY legs that settle 1-(pa+pb), NOT
+            # sell-buy. Forward the opportunity's OWN strategy_type so the LIVE
+            # in-process tracker books it correctly — previously it was dropped,
+            # so complementary fills booked with same-outcome math (true +$8.95
+            # -> -$76.15); only the capture-replay path was fixed (2026-06-12
+            # review). The pilot emits strategy_type='complementary' explicitly
+            # (see make_opportunity); when absent, the tracker keeps its
+            # 'same_outcome' default — do NOT override it here, or legacy
+            # buy/sell receipts flip sign.
+            strategy_type = opportunity.get('strategy_type')
             metadata = {
                 'strategy': opportunity.get('strategy'),
+                'strategy_type': strategy_type,
                 'kalshi_market_id': kalshi_market.get('id'),
                 'polymarket_market_id': polymarket_market.get('id'),
                 'token_id': opportunity.get('polymarket_token'),
@@ -1242,6 +1254,7 @@ class MarketAnalyzer:
 
             return self.confirmed_pnl_tracker.record_execution_receipt(
                 opportunity_id=opportunity.get('opportunity_id', 'unknown'),
+                strategy_type=strategy_type,
                 buy_platform=opportunity.get('buy_platform', 'unknown'),
                 sell_platform=opportunity.get('sell_platform', 'unknown'),
                 buy_price=float(simulated_execution.get('avg_buy_price', 0.0)),

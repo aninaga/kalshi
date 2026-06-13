@@ -67,6 +67,11 @@ def tracker_from_capture(path: str, allow_simulated: bool = False) -> ConfirmedP
             buy_trade_id=r.get("buy_trade_id"), sell_trade_id=r.get("sell_trade_id"),
             settlement_id=r.get("settlement_id"),
             source="exchange",
+            # The strategy decides the PnL accounting: a complementary receipt
+            # (both legs BUY, $1 settlement payout) must NOT be booked with
+            # same-outcome sell-buy math. Old rows without the field fall back
+            # to legacy same-outcome accounting.
+            strategy_type=r.get("strategy_type"),
             # Stash per-venue resolution ids so reconcile_settlement can check
             # each venue separately (the tracker's single market_id/token_id
             # can't carry both the Kalshi ticker and the Polymarket token).
@@ -130,8 +135,7 @@ class Reconciler:
 
     async def _venue_resolved(self, platform: str, execution) -> bool:
         client = self.kalshi if platform == "kalshi" else self.poly
-        checker = getattr(client, "is_resolved", None)
-        if client is None or checker is None:
+        if client is None:
             return False
         # Per-venue id: Kalshi ticker vs Polymarket token. Prefer the metadata
         # ids (populated from the capture row); fall back to the fill's own
@@ -141,7 +145,19 @@ class Reconciler:
         if not mkt:
             fills = execution.buy_fills + execution.sell_fills
             mkt = next((f.market_id or f.token_id for f in fills if f.platform == platform), None)
-        return bool(await self._safe(checker(mkt))) if mkt else False
+        if not mkt:
+            return False
+        # Prefer the client's own resolution probe (KalshiOrderClient implements
+        # is_resolved; test fakes inject one). The live PolymarketOrderClient
+        # exposes NO resolution API, which used to make this return False
+        # forever — "0 newly settled" for the life of the desk. Fall back to
+        # the public Gamma catalog for Polymarket resolution status.
+        checker = getattr(client, "is_resolved", None)
+        if checker is not None:
+            return bool(await self._safe(checker(mkt)))
+        if platform == "polymarket":
+            return bool(await self._safe(_poly_resolved_via_gamma(mkt)))
+        return False
 
     async def reconcile_all(self, mode: str = "all") -> Dict[str, Any]:
         fills_updated = settled = 0
@@ -153,6 +169,56 @@ class Reconciler:
                 if await self.reconcile_settlement(execution):
                     settled += 1
         return {"fills_updated": fills_updated, "settled": settled}
+
+
+def _gamma_market_resolved(payload: Any) -> bool:
+    """True only when a Gamma /markets payload POSITIVELY reports resolution.
+
+    Polymarket resolution is final when UMA has resolved the market
+    (``umaResolutionStatus == "resolved"``). ``closed`` alone is NOT enough —
+    a market is closed between its end date and UMA resolution, when the
+    payout is not yet final. Anything ambiguous returns False (fail closed:
+    the receipt stays locked-in rather than being settled on a guess).
+    """
+    if isinstance(payload, dict):
+        payload = payload.get("markets") or payload.get("data") or [payload]
+    if not isinstance(payload, list):
+        return False
+    for m in payload:
+        if not isinstance(m, dict):
+            continue
+        uma = str(m.get("umaResolutionStatus") or m.get("uma_resolution_status") or "")
+        if uma.lower() == "resolved":
+            return True
+    return False
+
+
+async def _poly_resolved_via_gamma(token_id: str) -> bool:
+    """Resolution status for a Polymarket CLOB token via the public Gamma API.
+
+    The live ``PolymarketOrderClient`` (CLOB SDK) has no settlement endpoint,
+    so settlement reconciliation queries the Gamma catalog (no creds needed).
+    Network/HTTP errors return False — fail closed, retry next reconcile run.
+    """
+    import aiohttp
+
+    from .config import Config
+
+    # ``&closed=true`` is LOAD-BEARING: the Gamma /markets endpoint excludes
+    # closed (i.e. resolved) markets by default, so without it a genuinely
+    # UMA-resolved token returns [] (HTTP 200) and settlement would stay "0
+    # newly settled" FOREVER — the non-functional-fix the 2026-06-12 review
+    # caught and live-verified. Keep both query flags.
+    url = (f"{Config.POLYMARKET_GAMMA_BASE}/markets"
+           f"?clob_token_ids={token_id}&closed=true")
+    timeout = aiohttp.ClientTimeout(total=15)
+    async with aiohttp.ClientSession(headers=Config.default_headers()) as sess:
+        async with sess.get(url, timeout=timeout) as resp:
+            if resp.status != 200:
+                logger.warning("Gamma resolution probe for %s -> HTTP %s", token_id, resp.status)
+                return False
+            data = await resp.json(content_type=None)
+    return _gamma_market_resolved(data)
 
 
 def _apply_kalshi_fill(fill_record, venue_fills: Optional[List[Dict]]) -> bool:

@@ -106,15 +106,57 @@ def check_allowlist(path: Optional[str] = None) -> CheckResult:
 
 
 def check_kill_switch(kill_switch: Optional[KillSwitch] = None) -> CheckResult:
-    ks = kill_switch or KillSwitch.instance()
-    was_active = ks.is_active()[0]
-    ks.trip("readiness_probe")
-    tripped = ks.is_active()[0]
-    ks.reset()
-    # After reset, active iff EXECUTION_ENABLED is False — that's expected.
-    cleared = ks._tripped is False
+    """Verify trip→active→reset WITHOUT touching the production halt state.
+
+    The previous probe tripped and then unconditionally ``reset()`` the
+    PRODUCTION singleton — deleting a durable operator halt
+    (``DATA_DIR/EXECUTION_HALT``) as a side effect of merely *checking
+    readiness*. Now:
+
+      * a currently-active halt FAILS the check and is left exactly as found
+        (you are not live-ready while halted; clearing it is an explicit
+        operator action, never a readiness side effect);
+      * the functional trip/reset probe runs on a THROWAWAY ``KillSwitch``
+        instance with ``Config.DATA_DIR`` temporarily pointed at a fresh temp
+        dir, so the production sentinel can be neither created nor deleted.
+
+    An injected ``kill_switch`` (tests) is probed directly, as before.
+    """
+    # 1) Never clear a real halt — an active halt blocks readiness.
+    current = kill_switch or KillSwitch.instance()
+    active, why = current.is_active()
+    if active:
+        return CheckResult(
+            "kill_switch", False,
+            f"operator halt ACTIVE ({why}) — left in place; clear it explicitly "
+            f"before any go-live")
+
+    if kill_switch is not None:
+        ks = kill_switch
+        ks.trip("readiness_probe")
+        tripped = ks.is_active()[0]
+        ks.reset()
+        cleared = ks._tripped is False
+        return CheckResult("kill_switch", tripped and cleared,
+                           "trip/reset functional" if (tripped and cleared) else "malfunction")
+
+    # 2) Functional probe on a throwaway instance in an isolated DATA_DIR.
+    import tempfile
+    original_data_dir = Config.DATA_DIR
+    try:
+        with tempfile.TemporaryDirectory(prefix="kill_switch_probe_") as tmp:
+            Config.DATA_DIR = tmp
+            probe = KillSwitch()  # NOT the singleton
+            probe.trip("readiness_probe")
+            tripped = probe.is_active()[0]
+            probe.reset()
+            cleared = (probe._tripped is False
+                       and not os.path.exists(probe.sentinel_path))
+    finally:
+        Config.DATA_DIR = original_data_dir
     return CheckResult("kill_switch", tripped and cleared,
-                       "trip/reset functional" if (tripped and cleared) else "malfunction")
+                       "trip/reset functional (probed in isolated temp dir)"
+                       if (tripped and cleared) else "malfunction")
 
 
 def _default_labeled_path() -> str:

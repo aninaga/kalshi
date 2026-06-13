@@ -13,6 +13,7 @@ Arb-specific concerns only live here; all the reusable machinery is in
 
 import asyncio
 import logging
+import math
 import time
 import uuid
 from typing import Dict, Optional, Tuple
@@ -122,24 +123,35 @@ class ArbitrageExecutor:
             return self._skipped_result(opp_id, opportunity, 'unbuildable_legs', t0), None
         buy_req, sell_req = legs
 
+        # Run the legs as tasks under asyncio.wait — NEVER asyncio.wait_for
+        # around a gather: a timeout there cancels both legs mid-flight and
+        # discards any leg that already FILLED, leaving an unrecorded,
+        # unhedged position. On timeout we keep every completed leg's outcome
+        # (and its order id) so the normal hedge/record path runs on it.
         self._live_in_flight += 1
+        timed_out = False
+        buy_task = asyncio.ensure_future(
+            self.engine.execute(buy_req, stable_key=f"{opp_id}:buy"))
+        sell_task = asyncio.ensure_future(
+            self.engine.execute(sell_req, stable_key=f"{opp_id}:sell"))
         try:
-            buy_out, sell_out = await asyncio.wait_for(
-                asyncio.gather(
-                    self.engine.execute(buy_req, stable_key=f"{opp_id}:buy"),
-                    self.engine.execute(sell_req, stable_key=f"{opp_id}:sell"),
-                    return_exceptions=True,
-                ),
+            done, pending = await asyncio.wait(
+                {buy_task, sell_task},
                 timeout=Config.EXECUTION_TIMEOUT_SECONDS + Config.FILL_POLL_BUDGET_SECONDS,
             )
-        except asyncio.TimeoutError:
-            logger.error("Execution timeout for %s", opp_id)
-            return self._skipped_result(opp_id, opportunity, 'execution_timeout', t0), None
+            if pending:
+                timed_out = True
+                logger.error(
+                    "Execution timeout for %s — capturing completed legs "
+                    "before reporting", opp_id)
+                for task in pending:
+                    task.cancel()
+                await asyncio.gather(*pending, return_exceptions=True)
         finally:
             self._live_in_flight -= 1
 
-        buy_out = self._coerce_outcome(buy_out, buy_req)
-        sell_out = self._coerce_outcome(sell_out, sell_req)
+        buy_out = self._coerce_outcome(self._task_result(buy_task), buy_req)
+        sell_out = self._coerce_outcome(self._task_result(sell_task), sell_req)
 
         matched = min(buy_out.filled_size, sell_out.filled_size)
         imbalance = abs(buy_out.filled_size - sell_out.filled_size)
@@ -154,7 +166,10 @@ class ArbitrageExecutor:
                                         matched, t0, hedge_info)
             return result, hedge_info
 
-        reason = 'partial_fill_hedged' if imbalance > _EPS else 'no_fill'
+        if imbalance > _EPS:
+            reason = 'partial_fill_hedged'
+        else:
+            reason = 'execution_timeout' if timed_out else 'no_fill'
         return self._skipped_result(opp_id, opportunity, reason, t0), hedge_info
 
     # ------------------------------------------------------------------ #
@@ -206,8 +221,24 @@ class ArbitrageExecutor:
         return None
 
     async def _risk_gate(self, opp: Dict) -> Optional[str]:
+        # ABSTAIN when no orderbooks are attached. Nothing in the current
+        # pipeline populates opp['risk_orderbooks'] (the analyzer/scanner does
+        # not yet wire normalized books), so a bookless opportunity scores
+        # ~73-93 on a depth-less heuristic and would reject 100% of opps —
+        # darkening even the PAPER desk and starving the readiness/paper
+        # evidence the pilot needs (2026-06-12 review, all four lenses). Until
+        # books are wired at the call site, abstain WITH a loud warning rather
+        # than reject; the lock + allowlist + kill switch still gate every
+        # real order, so abstaining here cannot cause a live trade.
+        books = opp.get('risk_orderbooks')
+        if not books or books == (None, None):
+            logger.warning(
+                "Risk gate ABSTAINS for %s: no orderbooks attached "
+                "(risk unassessed — wire normalized books at the scanner to "
+                "re-enable scoring). Lock/allowlist/kill-switch still apply.",
+                opp.get('opportunity_id'))
+            return None
         try:
-            books = opp.get('risk_orderbooks') or (None, None)
             kalshi_nob, poly_nob = books
             assessment = await self.risk_engine.assess_opportunity(opp, kalshi_nob, poly_nob)
             if float(assessment.total_risk_score) > Config.MAX_RISK_SCORE:
@@ -216,8 +247,10 @@ class ArbitrageExecutor:
                 return 'risk_too_high'
             if float(assessment.confidence) < Config.MIN_RISK_CONFIDENCE:
                 return 'low_risk_confidence'
-        except Exception as exc:  # never let the risk model crash execution
-            logger.error("Risk gate error (proceeding): %s", exc)
+        except Exception as exc:  # a broken risk model must FAIL CLOSED
+            logger.error("Risk gate error for %s — failing closed: %s",
+                         opp.get('opportunity_id'), exc)
+            return 'risk_gate_error'
         return None
 
     async def _balance_gate(self, opp: Dict) -> Optional[str]:
@@ -305,10 +338,22 @@ class ArbitrageExecutor:
         return buy_req, sell_req
 
     @staticmethod
+    def _task_result(task: "asyncio.Task"):
+        """A leg task's result without raising: cancelled/raised → the exception."""
+        try:
+            return task.result()
+        except BaseException as exc:  # CancelledError is BaseException
+            return exc
+
+    @staticmethod
     def _coerce_outcome(result, req: OrderRequest) -> OrderOutcome:
         if isinstance(result, OrderOutcome):
             return result
-        if isinstance(result, Exception):
+        if isinstance(result, asyncio.CancelledError):
+            # Leg cancelled by the execution timeout — it never confirmed a
+            # fill. (Any leg that DID complete keeps its real outcome.)
+            return OrderOutcome.failed(req.venue, req.size, "execution_timeout")
+        if isinstance(result, BaseException):
             logger.error("Leg %s raised: %s", req.venue, result)
         return OrderOutcome.failed(req.venue, req.size, "leg_exception")
 
@@ -331,6 +376,22 @@ class ArbitrageExecutor:
         qty = abs(imbalance)
         if qty <= _EPS:
             return {'hedged': True, 'residual': 0.0}
+
+        # Sub-contract DUST is unhedgeable on real venues (min order = 1 whole
+        # contract) and arises from the 2-decimal pUSD rounding on PM
+        # marketable buys at sub-10c prices. Unwinding < 1 contract would post
+        # an order that can NEVER fill, then trip the kill switch on the
+        # guaranteed-incomplete unwind — a false halt on essentially every
+        # clamped extreme-price trade (2026-06-12 review). Record it as residual
+        # dust and move on; do NOT trip the halt for a fractional remainder.
+        if qty < 1.0:
+            logger.warning(
+                "Imbalance %.4f < 1 contract is unhedgeable dust on %s — "
+                "recording as residual, NOT tripping the kill switch.",
+                qty, (buy_req if imbalance > 0 else sell_req).venue)
+            over_req, over_out = (buy_req, buy_out) if imbalance > 0 else (sell_req, sell_out)
+            self._record_residual_exposure(over_req, qty, over_out.avg_price)
+            return {'hedged': True, 'residual': qty, 'dust': True}
 
         # The over-filled leg is the one we must unwind back toward neutral.
         over_req, over_out = (buy_req, buy_out) if imbalance > 0 else (sell_req, sell_out)
@@ -371,6 +432,10 @@ class ArbitrageExecutor:
             ticker=req.ticker, outcome_side=req.outcome_side, token_id=req.token_id,
             tif='FOK' if req.venue == POLYMARKET else 'IOC',
             ttl_seconds=Config.HEDGE_TIMEOUT_SECONDS,
+            # The unwind strictly REDUCES exposure: it must run even when the
+            # kill switch is tripped (e.g. by the circuit breaker on the other
+            # leg) — otherwise a one-leg failure blocks its own hedge.
+            risk_reducing=True,
             meta={**req.meta, 'hedge': True},
         )
 
@@ -401,7 +466,13 @@ class ArbitrageExecutor:
         # Live pilot: an even tighter staged notional clamp on real money.
         if Config.EXECUTION_MODE == 'live':
             notional_cap = min(notional_cap, Config.LIVE_MAX_NOTIONAL_USD)
-        return min(volume, notional_cap / avg_price)
+        raw = min(volume, notional_cap / avg_price)
+        # WHOLE contracts only, floored ONCE here and shared by BOTH legs
+        # (_build_legs computes this a single time). A fractional size (e.g.
+        # $5 / 0.40 = 12.5) gets silently truncated by the Kalshi gateway but
+        # not by Polymarket → a permanent sub-share leg imbalance. If the
+        # floor is 0, the caller aborts the opportunity (no partial leg).
+        return float(math.floor(raw + 1e-9))
 
     def _build_result(self, opp_id: str, opp: Dict, buy: OrderOutcome,
                       sell: OrderOutcome, filled: float, t0: float,

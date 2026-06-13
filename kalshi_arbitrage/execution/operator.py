@@ -20,6 +20,7 @@ from typing import Dict, List, Optional
 from ..config import Config
 from .kill_switch import KillSwitch
 from .order_types import KALSHI, POLYMARKET, OrderRequest
+from .single_leg import ExecutionEngine
 from .venue_gateway import KalshiGateway, PolymarketGateway, VenueGateway
 
 logger = logging.getLogger(__name__)
@@ -31,12 +32,19 @@ class OperatorControls:
         gateways: Optional[Dict[str, VenueGateway]] = None,
         kill_switch: Optional[KillSwitch] = None,
         alert_manager=None,
+        engine: Optional[ExecutionEngine] = None,
     ):
         if gateways is None:
             gateways = {KALSHI: KalshiGateway(), POLYMARKET: PolymarketGateway()}
         self.gateways = gateways
         self.kill_switch = kill_switch or KillSwitch.instance()
         self.alert_manager = alert_manager
+        # Flatten orders route through the ExecutionEngine's RISK-REDUCING
+        # path: they pass a tripped kill switch and an open circuit breaker
+        # (a flatten strictly reduces exposure, never opens it) while keeping
+        # the engine's retries and lineage.
+        self.engine = engine or ExecutionEngine(dict(self.gateways),
+                                                kill_switch=self.kill_switch)
 
     # --- Halt / resume ----------------------------------------------------- #
 
@@ -76,11 +84,14 @@ class OperatorControls:
                 req = self._unwind_request(venue, pos)
                 if req is None:
                     continue
-                # NOTE: flatten bypasses the kill switch deliberately — it calls
-                # the gateway directly because the whole point is to exit while
-                # halted.
+                # Flatten orders are RISK-REDUCING: the engine lets them
+                # through the (deliberately) tripped kill switch and any open
+                # breaker, while still providing retries.
                 try:
-                    outcome = await gateway.place(req)
+                    outcome = await self.engine.execute(
+                        req,
+                        stable_key=f"flatten:{venue}:{req.ticker or req.token_id}",
+                    )
                     entries.append({
                         "position": pos, "unwind_filled": outcome.filled_size,
                         "status": outcome.status,
@@ -107,7 +118,7 @@ class OperatorControls:
             price = 0.01 if action == "sell" else 0.99  # cross hard to exit
             return OrderRequest(venue=KALSHI, action=action, size=abs(float(qty)),
                                 limit_price=price, ticker=ticker, outcome_side="yes",
-                                tif="IOC", meta={"flatten": True})
+                                tif="IOC", risk_reducing=True, meta={"flatten": True})
         token = pos.get("asset") or pos.get("token_id") or pos.get("tokenID")
         qty = pos.get("size") or pos.get("net_size") or 0
         if not token or not qty:
@@ -116,7 +127,7 @@ class OperatorControls:
         price = 0.01 if action == "sell" else 0.99
         return OrderRequest(venue=POLYMARKET, action=action, size=abs(float(qty)),
                             limit_price=price, token_id=token, tif="FOK",
-                            meta={"flatten": True})
+                            risk_reducing=True, meta={"flatten": True})
 
     # --- Health ------------------------------------------------------------ #
 

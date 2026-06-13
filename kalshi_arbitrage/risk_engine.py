@@ -476,9 +476,42 @@ class RiskEngine:
                                polymarket_orderbook: Optional[NormalizedOrderBook]) -> RiskAssessment:
         """
         Perform comprehensive risk assessment of an arbitrage opportunity.
+
+        FAIL CLOSED: this method never raises. Any exception during scoring
+        returns a maximal-risk assessment (score 100, confidence 0) so the
+        executor's gate REJECTS the opportunity. The previous behavior let a
+        scoring exception bubble up to a caller that logged it and PROCEEDED —
+        a broken risk model silently green-lit every trade.
         """
-        opportunity_id = opportunity.get('opportunity_id', 'unknown')
-        
+        try:
+            opportunity_id = (opportunity or {}).get('opportunity_id', 'unknown')
+        except AttributeError:
+            opportunity_id = 'unknown'
+        try:
+            return await self._assess_unsafe(
+                opportunity, kalshi_orderbook, polymarket_orderbook, opportunity_id)
+        except Exception as exc:
+            logger.error(
+                "Risk scoring failed for %s — FAILING CLOSED with maximal risk: %s",
+                opportunity_id, exc)
+            return RiskAssessment(
+                opportunity_id=opportunity_id,
+                total_risk_score=Decimal("100"),
+                execution_risk=Decimal("50"),
+                market_risk=Decimal("30"),
+                platform_risk=Decimal("20"),
+                profit_after_risk=Decimal("0"),
+                confidence=Decimal("0"),
+                recommendations=[f"risk scoring error — failing closed: {exc}"],
+                risk_breakdown={"scoring_error": str(exc)},
+            )
+
+    async def _assess_unsafe(self,
+                             opportunity: Dict[str, Any],
+                             kalshi_orderbook: Optional[NormalizedOrderBook],
+                             polymarket_orderbook: Optional[NormalizedOrderBook],
+                             opportunity_id: str) -> RiskAssessment:
+
         # Extract trade details
         trade_size = Decimal(str(opportunity.get('max_tradeable_volume', 100)))
         profit_margin = Decimal(str(opportunity.get('profit_margin', 0)))
@@ -505,11 +538,16 @@ class RiskEngine:
         # Calculate platform risk (operational risks)
         platform_risk = self._calculate_platform_risk(buy_platform, sell_platform)
         
-        # Total risk score (weighted average)
-        total_risk_score = (
-            execution_risk * Decimal("0.5") +
-            market_risk * Decimal("0.3") + 
-            platform_risk * Decimal("0.2")
+        # Total risk score: SUM of the capped component scores, a true 0..100
+        # (execution <=50, market <=30, platform <=20 — i.e. the intended
+        # 50/30/20 weighting). The old "weighted average" multiplied the
+        # already-capped components by 0.5/0.3/0.2 again, so the maximum
+        # achievable score was 38 — below Config.MAX_RISK_SCORE (60) — and the
+        # gate could never reject anything. Now a genuinely toxic opportunity
+        # (no orderbooks + thin margin + cross-venue) scores ~93 and is
+        # rejectable.
+        total_risk_score = min(
+            execution_risk + market_risk + platform_risk, Decimal("100")
         )
         
         # Calculate risk-adjusted profit
@@ -616,22 +654,32 @@ class RiskEngine:
     
     def _calculate_confidence(self, buy_orderbook: Optional[NormalizedOrderBook],
                             sell_orderbook: Optional[NormalizedOrderBook]) -> Decimal:
-        """Calculate confidence in risk assessment."""
+        """Calculate confidence in risk assessment.
+
+        With NO orderbook on either side there is no basis for any assessment:
+        confidence is 0 so the executor's MIN_RISK_CONFIDENCE gate rejects
+        (fail closed). The old floor was 0.3 — exactly the rejection bound —
+        so the confidence check could never fire.
+        """
+        if not buy_orderbook and not sell_orderbook:
+            return Decimal("0")
+
         confidence = Decimal("1.0")
-        
-        # Reduce for missing orderbooks
+
+        # Reduce for a missing orderbook on one side.
         if not buy_orderbook:
-            confidence *= Decimal("0.7")
+            confidence *= Decimal("0.5")
         if not sell_orderbook:
-            confidence *= Decimal("0.7")
-        
-        # Reduce for stale data
-        if buy_orderbook:
-            age = (datetime.now(timezone.utc) - buy_orderbook.timestamp).total_seconds()
-            if age > 30:
-                confidence *= Decimal("0.8")
-        
-        return max(confidence, Decimal("0.3"))
+            confidence *= Decimal("0.5")
+
+        # Reduce for stale data (either side).
+        for book in (buy_orderbook, sell_orderbook):
+            if book is not None:
+                age = (datetime.now(timezone.utc) - book.timestamp).total_seconds()
+                if age > 30:
+                    confidence *= Decimal("0.8")
+
+        return max(confidence, Decimal("0.05"))
     
     def _generate_recommendations(self, total_risk: Decimal, exec_risk: Decimal,
                                 market_risk: Decimal, platform_risk: Decimal,

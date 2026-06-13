@@ -33,7 +33,11 @@ class OrderRequest:
 
     venue: str                       # KALSHI | POLYMARKET
     action: str                      # "buy" | "sell"
-    size: float                      # contracts (Kalshi) or shares/USDC (PM)
+    size: float                      # ALWAYS shares/contracts — never dollars.
+                                     # (The shares→pUSD conversion for a marketable
+                                     # Polymarket BUY happens ONLY inside
+                                     # PolymarketGateway.place and is never
+                                     # written back here.)
     limit_price: float               # probability price 0..1
     # Kalshi addressing:
     ticker: Optional[str] = None
@@ -44,14 +48,22 @@ class OrderRequest:
     tif: str = "IOC"
     ttl_seconds: int = 0
     client_order_id: Optional[str] = None
+    # RISK-REDUCING orders (hedge unwinds, operator flatten) strictly reduce
+    # exposure, never open it. They are allowed through a tripped kill switch
+    # and an open circuit breaker — a halt must not block its own unwind.
+    # NEVER set this on an order that opens or grows a position.
+    risk_reducing: bool = False
     # Free-form context for logging / lineage (e.g. opportunity_id, leg).
     meta: Dict = field(default_factory=dict)
 
     def ensure_client_order_id(self, *parts: str) -> str:
         """Deterministically derive a client order id if one isn't set.
 
-        Deterministic so a retry reuses the SAME id and the venue de-dupes
-        rather than creating a duplicate order.
+        Deterministic so a retry reuses the SAME id. NOTE the venue scope:
+        only KALSHI de-dupes server-side on this id. Polymarket never receives
+        it (the V2 SDK salts every order), so for Polymarket it is lineage-only
+        and provides NO duplicate protection — ambiguous Polymarket failures
+        must therefore never be blindly retried.
         """
         if not self.client_order_id:
             seed = "|".join(
@@ -82,6 +94,10 @@ class OrderOutcome:
     attempts: int = 0
     error: Optional[str] = None
     raw: Optional[Dict] = None
+    # False ⇒ the engine must NOT retry this failure. Used for AMBIGUOUS
+    # failures (e.g. a timeout after a Polymarket POST, which has no server
+    # dedup): a blind retry could place a duplicate order. Fail CLOSED.
+    retryable: bool = True
     timestamp: float = field(default_factory=time.time)
 
     @property

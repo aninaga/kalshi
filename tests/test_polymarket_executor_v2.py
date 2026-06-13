@@ -158,6 +158,9 @@ async def test_market_metadata_cached_per_token(client):
 
 
 async def test_fok_and_fak_route_through_market_order_path(client):
+    # CLIENT-level contract: for FOK/FAK BUY the size param is ALREADY pUSD
+    # dollars (the gateway converts shares→dollars before calling here); the
+    # client must pass it through verbatim, never re-convert.
     c, record = client
     resp = await c.place_order("tok1", "BUY", 0.05, 25, order_type="FOK")
     assert resp["orderID"] == "0xmkt"
@@ -167,6 +170,189 @@ async def test_fok_and_fak_route_through_market_order_path(client):
 
     await c.place_order("tok1", "SELL", 0.05, 10, order_type="FAK")
     assert record["market"][2] == "FAK"
+
+
+# --- Gateway-level shares→dollars conversion (C1) --------------------------- #
+
+class _FakeFeeClient:
+    async def get_fee_rate_bps(self, token_id):
+        return 0
+
+    async def close(self):
+        pass
+
+
+def _gateway(c, monkeypatch):
+    from kalshi_arbitrage.execution.live_lock import LiveTradingLock
+    from kalshi_arbitrage.execution.venue_gateway import PolymarketGateway
+
+    # Bypass ONLY the live lock for this unit test — the client is the SDK stub.
+    monkeypatch.setattr(LiveTradingLock.instance(), "assert_or_warn",
+                        lambda venue: (True, None))
+    return PolymarketGateway(client=c, fee_client=_FakeFeeClient())
+
+
+async def test_gateway_fok_buy_sends_dollars_not_shares(client, monkeypatch):
+    """C1: a marketable BUY of N shares must reach the SDK as N*price pUSD.
+
+    Before the fix, a $5-clamped 12.5-share buy at 0.40 sent amount=12.5
+    (i.e. $12.50 of shares — 2.5x the clamp). req.size must stay shares.
+    """
+    from kalshi_arbitrage.execution.order_types import POLYMARKET, OrderRequest
+
+    c, record = client
+    gw = _gateway(c, monkeypatch)
+    req = OrderRequest(venue=POLYMARKET, action="buy", size=12.5,
+                       limit_price=0.40, token_id="tok1", tif="FOK")
+    out = await gw.place(req)
+    args, _options, order_type = record["market"]
+    assert args.amount == pytest.approx(5.0)   # 12.5 shares * $0.40 = $5 DOLLARS
+    assert order_type == "FOK"
+    assert req.size == 12.5                    # invariant: .size is shares, untouched
+    assert out.requested_size == 12.5
+    # FOK bare-success fallback derives SHARES from the notional actually sent.
+    assert out.filled_size == pytest.approx(12.5)
+    assert out.avg_price == pytest.approx(0.40)
+
+
+async def test_gateway_fok_sell_stays_shares(client, monkeypatch):
+    from kalshi_arbitrage.execution.order_types import POLYMARKET, OrderRequest
+
+    c, record = client
+    gw = _gateway(c, monkeypatch)
+    req = OrderRequest(venue=POLYMARKET, action="sell", size=10,
+                       limit_price=0.40, token_id="tok1", tif="FOK")
+    await gw.place(req)
+    args, _options, _order_type = record["market"]
+    assert args.amount == 10                   # marketable SELL is shares
+    assert args.side == "SELL"
+
+
+async def test_gateway_limit_order_stays_shares(client, monkeypatch):
+    from kalshi_arbitrage.execution.order_types import POLYMARKET, OrderRequest
+
+    c, record = client
+    gw = _gateway(c, monkeypatch)
+    req = OrderRequest(venue=POLYMARKET, action="buy", size=100,
+                       limit_price=0.05, token_id="tok1", tif="GTC")
+    await gw.place(req)
+    order_args, _options, _order_type = record["limit"]
+    assert order_args.size == 100              # limit orders are shares
+
+
+async def test_gateway_marketable_buy_without_price_fails_closed(client, monkeypatch):
+    # No limit price → cannot convert shares to dollars → must REFUSE, never
+    # fall back to sending shares as dollars.
+    from kalshi_arbitrage.execution.order_types import POLYMARKET, OrderRequest
+
+    c, record = client
+    gw = _gateway(c, monkeypatch)
+    req = OrderRequest(venue=POLYMARKET, action="buy", size=10,
+                       limit_price=0.0, token_id="tok1", tif="FOK")
+    out = await gw.place(req)
+    assert out.status == "failed"
+    assert out.error == "marketable_buy_requires_limit_price"
+    assert "market" not in record              # nothing reached the SDK
+
+
+# --- Gateway-level ambiguous-failure handling (no PM server dedup) ----------- #
+
+class _FakePMClient:
+    """Minimal PolymarketOrderClient stand-in for ambiguity tests."""
+
+    def __init__(self, place_resp, trades=None):
+        self.place_resp = place_resp
+        self.trades = trades or []
+        self.place_calls = 0
+
+    async def place_order(self, **kwargs):
+        self.place_calls += 1
+        return self.place_resp
+
+    async def get_trades(self, order_id=None):
+        return self.trades
+
+    async def get_order(self, order_id):
+        return {}
+
+    async def cancel_order(self, order_id):
+        return True
+
+    async def close(self):
+        pass
+
+
+async def test_ambiguous_timeout_is_not_retryable(monkeypatch):
+    """A timeout after POST may have placed the order; PM has no server dedup,
+    so the failure must come back NON-retryable (fail closed, no blind retry)."""
+    from kalshi_arbitrage.execution.live_lock import LiveTradingLock
+    from kalshi_arbitrage.execution.order_types import POLYMARKET, OrderRequest
+    from kalshi_arbitrage.execution.venue_gateway import PolymarketGateway
+
+    monkeypatch.setattr(LiveTradingLock.instance(), "assert_or_warn",
+                        lambda venue: (True, None))
+    c = _FakePMClient({"error": "HTTPSConnectionPool: Read timed out"})
+    gw = PolymarketGateway(client=c, fee_client=_FakeFeeClient())
+    req = OrderRequest(venue=POLYMARKET, action="buy", size=10,
+                       limit_price=0.40, token_id="tokX", tif="FOK")
+    out = await gw.place(req)
+    assert out.status == "failed"
+    assert out.retryable is False
+    assert out.error.startswith("ambiguous_post:")
+
+
+async def test_ambiguous_timeout_reconciles_real_fill(monkeypatch):
+    """If the timed-out POST actually filled, reconciliation must surface the
+    real fill (in SHARES) so it is recorded and hedged — not dropped."""
+    import time as _time
+
+    from kalshi_arbitrage.execution.live_lock import LiveTradingLock
+    from kalshi_arbitrage.execution.order_types import POLYMARKET, OrderRequest
+    from kalshi_arbitrage.execution.venue_gateway import PolymarketGateway
+
+    monkeypatch.setattr(LiveTradingLock.instance(), "assert_or_warn",
+                        lambda venue: (True, None))
+    trades = [
+        {"asset_id": "tokX", "side": "BUY", "size": "10", "price": "0.41",
+         "match_time": _time.time(), "taker_order_id": "0xreal", "id": "t-1"},
+        {"asset_id": "tokOTHER", "side": "BUY", "size": "99", "price": "0.5",
+         "match_time": _time.time(), "taker_order_id": "0xother", "id": "t-2"},
+    ]
+    c = _FakePMClient({"error": "Read timed out"}, trades=trades)
+    gw = PolymarketGateway(client=c, fee_client=_FakeFeeClient())
+    req = OrderRequest(venue=POLYMARKET, action="buy", size=10,
+                       limit_price=0.40, token_id="tokX", tif="FOK")
+    out = await gw.place(req)
+    assert out.status == "filled"
+    assert out.filled_size == pytest.approx(10)     # shares, from venue trades
+    assert out.avg_price == pytest.approx(0.41)
+    assert out.order_id == "0xreal"
+    assert out.error.startswith("ambiguous_post_reconciled:")
+
+
+async def test_engine_never_retries_ambiguous_pm_failure(monkeypatch):
+    """End-to-end: the engine must NOT re-POST an ambiguous PM failure."""
+    from kalshi_arbitrage.config import Config
+    from kalshi_arbitrage.execution.kill_switch import KillSwitch
+    from kalshi_arbitrage.execution.live_lock import LiveTradingLock
+    from kalshi_arbitrage.execution.order_types import POLYMARKET, OrderRequest
+    from kalshi_arbitrage.execution.single_leg import ExecutionEngine
+    from kalshi_arbitrage.execution.venue_gateway import PolymarketGateway
+
+    monkeypatch.setattr(Config, "EXECUTION_ENABLED", True, raising=False)
+    monkeypatch.setattr(Config, "EXECUTION_MAX_RETRIES", 3, raising=False)
+    monkeypatch.setattr(Config, "EXECUTION_RETRY_BASE_DELAY", 0.0, raising=False)
+    KillSwitch.instance().reset()
+    monkeypatch.setattr(LiveTradingLock.instance(), "assert_or_warn",
+                        lambda venue: (True, None))
+    c = _FakePMClient({"error": "Read timed out"})
+    gw = PolymarketGateway(client=c, fee_client=_FakeFeeClient())
+    engine = ExecutionEngine({POLYMARKET: gw})
+    req = OrderRequest(venue=POLYMARKET, action="buy", size=10,
+                       limit_price=0.40, token_id="tokX", tif="FOK")
+    out = await engine.execute(req, stable_key="opp:buy")
+    assert out.status == "failed"
+    assert c.place_calls == 1, "ambiguous PM failure must never be re-POSTed"
 
 
 async def test_gtd_sets_wire_level_expiration(client):

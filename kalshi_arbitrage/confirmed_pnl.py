@@ -81,8 +81,24 @@ class ExecutionRecord:
         all_fills = self.buy_fills + self.sell_fills
         return any((fill.source or "").lower() == "simulation" for fill in all_fills)
 
+    def strategy_type(self) -> str:
+        """Strategy this receipt was booked under (defaults to same_outcome)."""
+        return str((self.metadata or {}).get("strategy_type") or "same_outcome")
+
     def realized_pnl(self) -> float:
-        """Realized PnL on matched volume only, with pro-rated fees."""
+        """Realized PnL on matched volume only, with pro-rated fees.
+
+        The two-leg accounting depends on the strategy:
+
+        * ``same_outcome`` (true buy/sell pair, same outcome on two venues):
+          realized = sell_proceeds - buy_cost - fees.
+        * ``complementary``: BOTH legs are BUYS of complementary outcomes, so
+          each matched pair pays out exactly $1 at settlement. The second leg
+          is stored in ``sell_fills`` but its "price" is an ENTRY COST, not
+          sale proceeds: realized = $1*matched - leg_a_cost - leg_b_cost - fees.
+          Applying same-outcome math here booked a true +$8.95 complementary
+          trade as -$76.15 (the second leg's cost counted as revenue).
+        """
         matched = self.matched_size()
         if matched <= 0.0:
             return 0.0
@@ -96,6 +112,9 @@ class ExecutionRecord:
         sell_notional = self.total_sell_notional() * (matched / sell_size)
         buy_fees = self.total_buy_fees() * (matched / buy_size)
         sell_fees = self.total_sell_fees() * (matched / sell_size)
+        if self.strategy_type() == "complementary":
+            # $1 settlement payout per matched pair, minus both entry costs.
+            return matched * 1.0 - buy_notional - sell_notional - buy_fees - sell_fees
         return sell_notional - buy_notional - buy_fees - sell_fees
 
 
@@ -252,10 +271,17 @@ class ConfirmedPnLTracker:
         token_id: Optional[str] = None,
         source: str = "exchange",
         metadata: Optional[Dict[str, Any]] = None,
+        strategy_type: Optional[str] = None,
         mark_confirmed: bool = True,
         mark_settled: bool = True,
         timestamp: Optional[float] = None,
     ) -> str:
+        # Persist the strategy so realized_pnl() applies the right accounting
+        # (complementary $1-payout vs same-outcome sell-buy). Callers that
+        # don't pass it keep legacy same-outcome math.
+        if strategy_type:
+            metadata = dict(metadata or {})
+            metadata.setdefault("strategy_type", strategy_type)
         execution_id = self.register_execution(
             opportunity_id=opportunity_id,
             buy_platform=buy_platform,

@@ -27,8 +27,9 @@ class Config:
     # API Configuration
     KALSHI_API_BASE = "https://api.elections.kalshi.com/trade-api/v2"
     # Public REST market data needs no credentials. The live Kalshi WebSocket feed
-    # DOES require KALSHI_API_KEY + an RSA key (KALSHI_PRIVATE_KEY_PATH or a repo-root
-    # kalshi_private_key.pem); without them KalshiClient silently runs REST-only.
+    # DOES require KALSHI_API_KEY + an RSA key via KALSHI_PRIVATE_KEY_PATH (the
+    # implicit repo-root kalshi_private_key.pem fallback was removed — an explicit
+    # path is required); without creds KalshiClient silently runs REST-only.
     
     POLYMARKET_GAMMA_BASE = "https://gamma-api.polymarket.com"
     POLYMARKET_CLOB_BASE = "https://clob.polymarket.com"
@@ -305,7 +306,18 @@ class Config:
     # Hedge / unwind confirmation.
     HEDGE_TIMEOUT_SECONDS = 15
     HEDGE_PRICE_CONCESSION = 0.02      # cross this far through book for a fast unwind
-    # Pre-trade risk gate (RiskEngine total_risk_score is 0..100).
+    # Pre-trade risk gate. RiskEngine.total_risk_score is a TRUE 0..100 since the
+    # 2026-06 rescale: the score is the SUM of capped component scores
+    # (execution <=50, market <=30, platform <=20), so a genuinely toxic
+    # opportunity (no orderbooks to re-verify against + thin margin) scores ~93
+    # and CAN exceed this threshold. Before the rescale the weighted average
+    # maxed out at ~38, so the 60 threshold could never reject anything (a
+    # decorative gate). Scoring exceptions and assessments with NO orderbook
+    # data now fail CLOSED (score 100 / confidence 0 -> rejected), and the
+    # confidence floor sits below MIN_RISK_CONFIDENCE so the confidence check
+    # is actually reachable. NOTE: callers must attach 'risk_orderbooks' to the
+    # opportunity for the gate to pass — an opportunity the executor cannot
+    # re-verify is rejected by design.
     RISK_GATE_ENABLED = True
     MAX_RISK_SCORE = 60.0
     MIN_RISK_CONFIDENCE = 0.3
@@ -330,8 +342,17 @@ class Config:
     # Drift tolerance the paper run must clear before live (USD per trade).
     PAPER_MAX_EST_VS_REAL_DRIFT_USD = 0.25
 
-    # Data Storage
-    DATA_DIR = "market_data"
+    # Data Storage — ABSOLUTE, anchored to the repo (the package's parent dir),
+    # overridable via KALSHI_ARB_DATA_DIR. This was previously the cwd-relative
+    # string 'market_data', which made the kill-switch sentinel, the live-trading
+    # arm file, and the operator allowlist resolve relative to whatever directory
+    # the process happened to start in: an EXECUTION_HALT issued from the wrong
+    # cwd wrote a sentinel no running bot ever read (a silent no-op halt), and a
+    # bot started from the wrong cwd could not see a real halt. Safety state must
+    # resolve identically regardless of cwd.
+    DATA_DIR = os.environ.get("KALSHI_ARB_DATA_DIR") or os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "market_data"
+    )
     OPPORTUNITIES_FILE = "arbitrage_opportunities.json"
     MARKETS_CACHE_FILE = "markets_cache.json"
     

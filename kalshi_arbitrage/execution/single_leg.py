@@ -3,10 +3,17 @@
 This is the reusable core of the execution platform — it is **arb-agnostic**.
 Given an ``OrderRequest`` and a venue gateway it:
 
-  * checks the global kill switch,
-  * routes the placement through a per-venue circuit breaker,
+  * checks the global kill switch (risk-REDUCING orders — hedge unwinds,
+    operator flatten — are allowed through a tripped switch: a halt must not
+    block its own unwind),
+  * routes the placement through a per-venue circuit breaker; a gateway that
+    RETURNS a failed outcome counts as a breaker failure just like a raised
+    exception (returning failures is the dominant venue failure mode),
   * retries transient failures with backoff, reusing a stable
-    ``client_order_id`` so a retry never creates a duplicate order,
+    ``client_order_id``. NOTE: only KALSHI de-dupes server-side on that id;
+    Polymarket never receives it (the V2 SDK salts every order), so the
+    Polymarket gateway marks ambiguous failures non-retryable and the engine
+    honors that — it never blind-retries them,
   * returns a realized ``OrderOutcome``.
 
 Any strategy (arbitrage, market-making, manual order flow) can drive it.
@@ -31,6 +38,20 @@ from .venue_gateway import VenueGateway
 logger = logging.getLogger(__name__)
 
 
+class _VenueReturnedFailure(Exception):
+    """Internal: wraps a RETURNED failed OrderOutcome.
+
+    Gateways report venue failures by returning ``OrderOutcome.failed`` (they
+    do not raise), but the circuit breaker only counts raised exceptions.
+    Raising this inside ``breaker.call`` makes a returned failure increment
+    the breaker instead of resetting it; the engine unwraps it immediately.
+    """
+
+    def __init__(self, outcome: OrderOutcome):
+        super().__init__(outcome.error or "venue_failure")
+        self.outcome = outcome
+
+
 class ExecutionEngine:
     """Places a single order safely (kill switch + circuit breaker + retries)."""
 
@@ -51,11 +72,19 @@ class ExecutionEngine:
 
     async def execute(self, req: OrderRequest, stable_key: str = "") -> OrderOutcome:
         """Execute one order. ``stable_key`` (e.g. opportunity_id+leg) feeds the
-        idempotency id so retries of the same logical leg de-dupe."""
+        idempotency id so retries of the same logical leg reuse one id (server
+        de-dup on KALSHI only — Polymarket never receives it)."""
         active, reason = self.kill_switch.is_active()
         if active:
-            logger.warning("Order blocked by kill switch (%s): %s", reason, req.meta)
-            return OrderOutcome.halted(req.venue, req.size)
+            if not req.risk_reducing:
+                logger.warning("Order blocked by kill switch (%s): %s", reason, req.meta)
+                return OrderOutcome.halted(req.venue, req.size)
+            # A risk-REDUCING order (hedge unwind / flatten) strictly shrinks
+            # exposure — blocking it would lock in the very risk the halt is
+            # protecting against. Let it through, loudly.
+            logger.warning(
+                "Kill switch active (%s) but order is RISK-REDUCING "
+                "(flatten/unwind) — allowing through: %s", reason, req.meta)
 
         gateway = self.gateways.get(req.venue)
         if gateway is None:
@@ -65,11 +94,27 @@ class ExecutionEngine:
         req.ensure_client_order_id(stable_key)
         breaker = self._breaker(req.venue)
 
+        async def _place_counted() -> OrderOutcome:
+            out = await gateway.place(req)
+            if out.status == STATUS_FAILED:
+                # Venues RETURN failures; raise inside the breaker so it counts
+                # as a failure (not a success that resets the counter).
+                raise _VenueReturnedFailure(out)
+            return out
+
         last: Optional[OrderOutcome] = None
         for attempt in range(Config.EXECUTION_MAX_RETRIES + 1):
             req.meta["attempt"] = attempt
             try:
-                outcome = await breaker.call(gateway.place, req)
+                if req.risk_reducing:
+                    # Exposure-reducing orders must not be blocked by an OPEN
+                    # breaker either — call the gateway directly.
+                    outcome = await gateway.place(req)
+                else:
+                    outcome = await breaker.call(_place_counted)
+            except _VenueReturnedFailure as vf:
+                outcome = vf.outcome
+                last = outcome
             except CircuitOpenError:
                 logger.error("Circuit breaker OPEN for %s — halting placement", req.venue)
                 self.kill_switch.trip(f"circuit_open:{req.venue}")
@@ -84,6 +129,13 @@ class ExecutionEngine:
             if outcome.is_done:
                 return outcome
             last = outcome
+
+            if not getattr(outcome, "retryable", True):
+                # Ambiguous failure (e.g. timeout after a Polymarket POST — no
+                # server dedup there): a retry could double-order. Fail CLOSED.
+                logger.error("Non-retryable failure on %s (%s) — NOT retrying",
+                             req.venue, outcome.error)
+                return outcome
 
             # Transient failure — back off and retry with the SAME order id.
             if attempt < Config.EXECUTION_MAX_RETRIES:

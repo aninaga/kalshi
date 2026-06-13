@@ -156,6 +156,130 @@ def test_kalshi_fee_live_key_is_cents():
     assert abs(fr.fee - 0.07) < 1e-9   # 7 cents -> $0.07, not $7
 
 
+# --- venue resolution probes: the path that silently NEVER settled ---------- #
+#
+# The wired KalshiGateway().client / PolymarketGateway().client previously
+# defined no is_resolved at all (only test fakes did), so _venue_resolved
+# returned False forever -> "0 newly settled" for the life of the desk.
+# KalshiOrderClient now implements is_resolved; Polymarket resolution falls
+# back to the public Gamma catalog when the client lacks a resolution API.
+
+class _FakeUnresolvedPoly:
+    async def get_trades(self, order_id=None):
+        return []
+
+    async def is_resolved(self, market):
+        return False
+
+
+class _NoResolutionApiPoly:
+    """Mimics the REAL PolymarketOrderClient surface: no is_resolved at all."""
+
+    async def get_trades(self, order_id=None):
+        return []
+
+
+def _run(coro):
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        loop.close()
+
+
+def test_settlement_requires_both_venues_resolved():
+    # Kalshi resolved + Polymarket UNRESOLVED -> must NOT settle (fail closed).
+    t = ConfirmedPnLTracker(allow_simulated_confirmed=False)
+    eid = t.record_execution_receipt(
+        opportunity_id="o", buy_platform="kalshi", sell_platform="polymarket",
+        buy_price=0.11, buy_size=100, buy_fee=0.1,
+        sell_price=0.835, sell_size=100, sell_fee=0.0,
+        source="exchange", mark_confirmed=True, mark_settled=False,
+        metadata={"kalshi_ticker": "KXM-27", "polymarket_token": "0xtok"})
+    execution = t.executions[eid]
+    rec = Reconciler(t, kalshi=_FakeKalshi(), poly=_FakeUnresolvedPoly())
+    assert _run(rec.reconcile_settlement(execution)) is False
+    assert not execution.is_settled()
+    # Both resolved -> settles.
+    rec2 = Reconciler(t, kalshi=_FakeKalshi(), poly=_FakePoly())
+    assert _run(rec2.reconcile_settlement(execution)) is True
+    assert execution.is_settled()
+
+
+def test_kalshi_client_is_resolved_statuses(monkeypatch):
+    from kalshi_arbitrage.kalshi_executor import KalshiOrderClient
+
+    client = KalshiOrderClient()
+    payloads = {}
+
+    async def fake_request(method, endpoint, body=None):
+        assert method == "GET" and endpoint.startswith("/markets/")
+        return payloads["resp"]
+
+    monkeypatch.setattr(client, "_request", fake_request)
+
+    payloads["resp"] = {"market": {"status": "settled", "result": "yes"}}
+    assert _run(client.is_resolved("KX-RESOLVED")) is True
+
+    payloads["resp"] = {"market": {"status": "finalized", "result": "no"}}
+    assert _run(client.is_resolved("KX-FINAL")) is True
+
+    # Open / not-yet-determined market: NOT resolved.
+    payloads["resp"] = {"market": {"status": "active", "result": ""}}
+    assert _run(client.is_resolved("KX-OPEN")) is False
+
+    # Closed but awaiting determination: NOT resolved.
+    payloads["resp"] = {"market": {"status": "closed", "result": ""}}
+    assert _run(client.is_resolved("KX-CLOSED")) is False
+
+    # Venue error (e.g. missing credentials): fail closed.
+    payloads["resp"] = {"error": "missing_credentials"}
+    assert _run(client.is_resolved("KX-ERR")) is False
+
+    # No ticker: fail closed.
+    assert _run(client.is_resolved(None)) is False
+    assert _run(client.is_resolved("")) is False
+
+
+def test_gamma_resolution_parsing():
+    from kalshi_arbitrage.reconcile import _gamma_market_resolved
+
+    assert _gamma_market_resolved([{"umaResolutionStatus": "resolved", "closed": True}])
+    # closed-but-not-UMA-resolved is NOT settled (payout not final yet).
+    assert not _gamma_market_resolved([{"umaResolutionStatus": "proposed", "closed": True}])
+    assert not _gamma_market_resolved([{"closed": True}])
+    assert not _gamma_market_resolved([])
+    assert not _gamma_market_resolved(None)
+    assert not _gamma_market_resolved("garbage")
+    assert _gamma_market_resolved({"umaResolutionStatus": "RESOLVED"})  # dict + case
+
+
+def test_poly_without_resolution_api_uses_gamma_fallback(monkeypatch):
+    # A client shaped like the REAL PolymarketOrderClient (no is_resolved)
+    # must route to the Gamma probe instead of silently never settling.
+    import kalshi_arbitrage.reconcile as rec_mod
+
+    probed = []
+
+    async def fake_gamma(token_id):
+        probed.append(token_id)
+        return True
+
+    monkeypatch.setattr(rec_mod, "_poly_resolved_via_gamma", fake_gamma)
+
+    t = ConfirmedPnLTracker(allow_simulated_confirmed=False)
+    eid = t.record_execution_receipt(
+        opportunity_id="o", buy_platform="kalshi", sell_platform="polymarket",
+        buy_price=0.11, buy_size=100, buy_fee=0.1,
+        sell_price=0.835, sell_size=100, sell_fee=0.0,
+        source="exchange", mark_confirmed=True, mark_settled=False,
+        metadata={"kalshi_ticker": "KXM-27", "polymarket_token": "0xtok"})
+    execution = t.executions[eid]
+    rec = Reconciler(t, kalshi=_FakeKalshi(), poly=_NoResolutionApiPoly())
+    assert _run(rec.reconcile_settlement(execution)) is True
+    assert probed == ["0xtok"]
+
+
 def test_capture_to_settlement_roundtrip(tmp_path):
     # Write a live row -> rebuild via tracker_from_capture -> reconcile_settlement
     # must SETTLE using the per-venue ids carried in metadata. This is the path
