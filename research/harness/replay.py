@@ -129,12 +129,13 @@ def synthesize_orderbook_from_mid(
     spread_bps: int | None = None,
     depth_per_level: float | None = None,
 ) -> OrderbookSnapshot:
-    """Build a synthetic orderbook with a ``spread_bps`` half-spread around ``mid``.
+    """Build a synthetic orderbook with a ``spread_bps`` FULL spread around ``mid``.
 
     When ``spread_bps`` is None (the default), read from the active
-    ``CostProfile``. ``PESSIMISTIC`` profile uses 100 (1¢ half-spread, 2¢
-    round-trip), preserving the pre-2026-05-28 behavior. ``LIVE_PM`` uses 50
-    (0.5¢ half-spread). ``ZERO_COST`` uses 0.
+    ``CostProfile``. ``PESSIMISTIC`` uses 100 (1¢ full spread: ±0.5¢ around
+    the mid, 1¢ round-trip when crossing both ways), preserving the
+    pre-2026-05-28 behavior. ``LIVE_PM`` uses 50 (0.5¢ full spread).
+    ``ZERO_COST`` uses 0.
 
     ``depth_per_level`` similarly defaults to the active profile's value.
     ``CALIBRATED_PM`` sets it from real executed-trade data (~median clip);
@@ -148,8 +149,9 @@ def synthesize_orderbook_from_mid(
         getattr(profile, "depth_per_level", 1000.0)
         if depth_per_level is None else depth_per_level
     )
-    # ``spread_bps`` is a flat probability-points half-spread:
-    # 100 bps -> 1¢ (i.e. ±0.005 around the mid); 50 bps -> 0.5¢; 0 -> mid.
+    # ``spread_bps`` is the FULL bid-ask spread in probability bps; each side
+    # gets half: 100 bps -> 1¢ full spread (±0.005 around the mid, 1¢
+    # round-trip); 50 bps -> 0.5¢ full spread; 0 -> book at the mid.
     half_spread = effective_spread_bps / 20_000.0
     bid_top = max(0.001, mid - half_spread)
     ask_top = min(0.999, mid + half_spread)

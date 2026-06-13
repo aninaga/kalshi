@@ -339,6 +339,260 @@ class TestUnlockBudgetExhausted(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------- #
+# 5b. Exactly ONE burn row per sanctioned run + spec_hash dedup
+# --------------------------------------------------------------------------- #
+
+
+def _unlock_rows(path: Path) -> list[list[str]]:
+    """Parsed data rows of the unlock log: [iso_ts, spec_hash, kind, *reason]."""
+    if not path.exists():
+        return []
+    return [
+        line.split()
+        for line in path.read_text().splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    ]
+
+
+class TestSingleBurnRowAndDedup(unittest.TestCase):
+    """One sanctioned test run must consume exactly ONE burn row, and a re-run
+    of an already-burned spec_hash must record a non-burn 'attempt' row.
+
+    Uses --dry-run: the test-split guard (token check, budget check, burn
+    write) executes BEFORE the dry-run short-circuit, so these tests exercise
+    the bookkeeping without needing the lake.
+    """
+
+    def test_sanctioned_run_writes_exactly_one_burn_row(self) -> None:
+        spec = _make_valid_spec()
+        env = _TmpEnv(spec)
+        try:
+            argv = env.base_argv(spec, "test", "manual:burn_once") + [
+                "--unlock-test-token", _token_for(spec),
+                "--dry-run",
+            ]
+            with _StdoutCapture() as cap:
+                exit_code = cli_run(argv)
+            self.assertEqual(exit_code, 0, f"stdout: {cap.text}")
+            rows = _unlock_rows(env.unlock_path)
+            burn_rows = [r for r in rows if r[2] == "burn"]
+            self.assertEqual(
+                len(burn_rows), 1,
+                f"exactly one burn row expected, log rows: {rows}",
+            )
+            self.assertEqual(burn_rows[0][1], spec.spec_hash())
+        finally:
+            env.cleanup()
+
+    def test_rerun_of_burned_spec_records_attempt_not_second_burn(self) -> None:
+        spec = _make_valid_spec()
+        env = _TmpEnv(spec)
+        try:
+            # Pre-populate: this spec's burn already happened UNDER THE SAME
+            # run fingerprint (profile + seed) — only an exact configuration
+            # repeat is a free rerun (2026-06-12 loophole closure).
+            with env.unlock_path.open("w") as fh:
+                fh.write("# format: <iso_ts> <spec_hash> <attempt|burn> <reason>\n")
+                fh.write(
+                    f"2026-06-11T00:00:00Z {spec.spec_hash()} burn "
+                    f"run_backtest_cli profile=pessimistic seed=0\n"
+                )
+            argv = env.base_argv(spec, "test", "manual:rerun") + [
+                "--unlock-test-token", _token_for(spec),
+                "--dry-run",
+            ]
+            with _StdoutCapture() as cap:
+                exit_code = cli_run(argv)
+            self.assertEqual(exit_code, 0, f"stdout: {cap.text}")
+            rows = _unlock_rows(env.unlock_path)
+            burn_rows = [r for r in rows if r[2] == "burn"]
+            attempt_rows = [r for r in rows if r[2] == "attempt"]
+            self.assertEqual(len(burn_rows), 1, "rerun must not add a second burn")
+            self.assertEqual(len(attempt_rows), 1, "rerun must record an attempt row")
+            self.assertEqual(attempt_rows[0][1], spec.spec_hash())
+        finally:
+            env.cleanup()
+
+    def test_rerun_of_burned_spec_allowed_when_budget_exhausted(self) -> None:
+        """A spec whose burn already exists reveals nothing new on re-run, so
+        the budget-exhausted refusal must not apply to it."""
+        spec = _make_valid_spec()
+        env = _TmpEnv(spec)
+        try:
+            with env.unlock_path.open("w") as fh:
+                fh.write("# format: <iso_ts> <spec_hash> <attempt|burn> <reason>\n")
+                for i in range(4):
+                    fh.write(f"2026-06-11T00:00:0{i}Z otherhash{i} burn pre_existing\n")
+                fh.write(
+                    f"2026-06-11T00:00:04Z {spec.spec_hash()} burn "
+                    f"run_backtest_cli profile=pessimistic seed=0\n"
+                )
+            argv = env.base_argv(spec, "test", "manual:rerun_full") + [
+                "--unlock-test-token", _token_for(spec),
+                "--dry-run",
+            ]
+            with _StdoutCapture() as cap:
+                exit_code = cli_run(argv)
+            self.assertEqual(exit_code, 0, f"stdout: {cap.text}")
+            rows = _unlock_rows(env.unlock_path)
+            self.assertEqual(sum(1 for r in rows if r[2] == "burn"), 5)
+            self.assertEqual(sum(1 for r in rows if r[2] == "attempt"), 1)
+        finally:
+            env.cleanup()
+
+    def test_rerun_under_different_profile_is_not_free(self) -> None:
+        """LOOPHOLE REGRESSION (2026-06-12 adversarial review): a burned spec
+        re-run under a DIFFERENT cost profile reveals NEW information (e.g.
+        zero-cost gross test edge) — it must hit the budget path, and with the
+        budget exhausted it must be REFUSED, not waved through as a free
+        'already burned' rerun."""
+        spec = _make_valid_spec()
+        env = _TmpEnv(spec)
+        try:
+            with env.unlock_path.open("w") as fh:
+                fh.write("# format: <iso_ts> <spec_hash> <attempt|burn> <reason>\n")
+                for i in range(4):
+                    fh.write(f"2026-06-11T00:00:0{i}Z otherhash{i} burn pre_existing\n")
+                fh.write(
+                    f"2026-06-11T00:00:04Z {spec.spec_hash()} burn "
+                    f"run_backtest_cli profile=pessimistic seed=0\n"
+                )
+            argv = env.base_argv(spec, "test", "manual:rerun_zero_cost") + [
+                "--unlock-test-token", _token_for(spec),
+                "--cost-profile", "zero",
+                "--dry-run",
+            ]
+            with _StdoutCapture() as cap:
+                exit_code = cli_run(argv)
+            self.assertNotEqual(
+                exit_code, 0,
+                "different-profile rerun with exhausted budget must be refused"
+                f" (stdout: {cap.text})")
+            self.assertIn("test_unlock_budget_exhausted", cap.text)
+            rows = _unlock_rows(env.unlock_path)
+            self.assertEqual(
+                sum(1 for r in rows if r[2] == "burn"), 5,
+                "refusal must not append a burn row")
+            self.assertEqual(
+                sum(1 for r in rows if r[2] == "attempt"), 0,
+                "different-profile rerun must not get a free attempt row")
+        finally:
+            env.cleanup()
+
+    def test_rerun_under_different_seed_consumes_budget(self) -> None:
+        """Different --rng-seed on a burned spec = new information = new burn."""
+        spec = _make_valid_spec()
+        env = _TmpEnv(spec)
+        try:
+            with env.unlock_path.open("w") as fh:
+                fh.write("# format: <iso_ts> <spec_hash> <attempt|burn> <reason>\n")
+                fh.write(
+                    f"2026-06-11T00:00:00Z {spec.spec_hash()} burn "
+                    f"run_backtest_cli profile=pessimistic seed=0\n"
+                )
+            argv = env.base_argv(spec, "test", "manual:rerun_seed7") + [
+                "--unlock-test-token", _token_for(spec),
+                "--rng-seed", "7",
+                "--dry-run",
+            ]
+            with _StdoutCapture() as cap:
+                exit_code = cli_run(argv)
+            self.assertEqual(exit_code, 0, f"stdout: {cap.text}")
+            rows = _unlock_rows(env.unlock_path)
+            burn_rows = [r for r in rows if r[2] == "burn"]
+            self.assertEqual(
+                len(burn_rows), 2,
+                "a new-seed rerun must consume a NEW burn (budget permitting)")
+            self.assertIn("seed=7", " ".join(burn_rows[-1]))
+        finally:
+            env.cleanup()
+
+
+class TestEndToEndSingleBurnWithRunBatch(unittest.TestCase):
+    """Full in-process sanctioned test run (replay faked, no lake needed):
+    run_backtest writes its ONE burn row and run_batch writes its non-burn
+    'attempt' row into the SAME injected unlock log — total burns == 1.
+    Regression for the triple-burn defect (run_backtest + run_batch +
+    review_cli each appending 'burn')."""
+
+    def test_full_test_run_one_burn_one_attempt(self) -> None:
+        import types
+
+        import research.harness.run_batch as rb_module
+
+        spec = _make_valid_spec()
+        env = _TmpEnv(spec)
+
+        def fake_replay_game(s, game_id, rng_seed=0, allow_test=False):
+            return types.SimpleNamespace(trades=[], skipped=[])
+
+        original_import_replay = rb_module._import_replay
+        rb_module._import_replay = lambda: (fake_replay_game, None)
+        try:
+            argv = env.base_argv(spec, "test", "manual:e2e_single_burn") + [
+                "--unlock-test-token", _token_for(spec),
+            ]
+            with _StdoutCapture() as cap:
+                exit_code = cli_run(argv)
+        finally:
+            rb_module._import_replay = original_import_replay
+
+        try:
+            self.assertEqual(exit_code, 0, f"stdout: {cap.text}")
+            rows = _unlock_rows(env.unlock_path)
+            burn_rows = [r for r in rows if r[2] == "burn"]
+            attempt_rows = [r for r in rows if r[2] == "attempt"]
+            self.assertEqual(
+                len(burn_rows), 1,
+                f"one sanctioned run must burn exactly once, rows: {rows}",
+            )
+            self.assertEqual(burn_rows[0][1], spec.spec_hash())
+            self.assertEqual(
+                len(attempt_rows), 1,
+                f"run_batch must add its attempt row to the same log, rows: {rows}",
+            )
+            self.assertEqual(attempt_rows[0][1], spec.spec_hash())
+            self.assertEqual(attempt_rows[0][3], "run_batch(split=test)")
+        finally:
+            env.cleanup()
+
+
+# --------------------------------------------------------------------------- #
+# 5c. Extended --cost-profile choices (calibrated_pm / official_2026)
+# --------------------------------------------------------------------------- #
+
+
+class TestCostProfileChoices(unittest.TestCase):
+    """The CLI must be able to select the realistic profiles — the promotion
+    burn path passes official_2026 by default."""
+
+    def setUp(self) -> None:
+        from research.harness.cost_profile import get_active_profile
+        self._saved_profile = get_active_profile()
+
+    def tearDown(self) -> None:
+        from research.harness.cost_profile import set_active_profile
+        set_active_profile(self._saved_profile)
+
+    def test_realistic_profiles_accepted(self) -> None:
+        from research.harness.cost_profile import get_active_profile
+
+        for profile in ("official_2026", "calibrated_pm"):
+            spec = _make_valid_spec()
+            env = _TmpEnv(spec)
+            try:
+                argv = env.base_argv(spec, "train", "manual:profile") + [
+                    "--dry-run", "--cost-profile", profile,
+                ]
+                with _StdoutCapture() as cap:
+                    exit_code = cli_run(argv)
+                self.assertEqual(exit_code, 0, f"stdout: {cap.text}")
+                self.assertEqual(get_active_profile().name, profile)
+            finally:
+                env.cleanup()
+
+
+# --------------------------------------------------------------------------- #
 # 6. Train split records a real trial
 # --------------------------------------------------------------------------- #
 

@@ -25,7 +25,10 @@ Defensive layers (in order, any failure → refuse + exit 1):
   4. Test-split guard: `--unlock-test-token` must equal the sha256 of the
      canonical spec JSON; project-lifetime budget of 5 burns enforced via
      `market_data/test_unlocks.log` (override path with `--unlock-log` for
-     testing).
+     testing). This script is the ONLY writer of `burn` rows, deduped by
+     spec_hash (a re-run of an already-burned spec records a non-burn
+     `attempt` row and consumes no budget); `run_batch` and the promotion
+     CLI record `attempt` rows so one sanctioned run costs exactly one burn.
   5. Run the batch via `research.harness.run_batch.run_batch`.
   6. Score with `research.scorer.promotion_gate.evaluate_trial` (skipped on
      dry-run).
@@ -134,30 +137,97 @@ def _expected_unlock_token(spec: StrategySpec) -> str:
     return hashlib.sha256(spec.to_json().encode("utf-8")).hexdigest()
 
 
-def _count_burns_in_unlock_log(path: Path) -> int:
-    """Count rows in the unlock log whose 3rd whitespace-separated token is
-    ``burn``. Lines starting with ``#`` (comments) are ignored. Missing file
-    is treated as zero burns."""
+def _iter_unlock_log_rows(path: Path):
+    """Yield ``(spec_hash, kind)`` for each data row of the unlock log.
+
+    Expected row format: ``<iso_ts> <spec_hash> <attempt|burn> <reason...>``.
+    Comment lines (``#``) and blanks are skipped. Missing file yields nothing.
+    """
     if not path.exists():
-        return 0
-    n = 0
+        return
     with path.open() as fh:
         for line in fh:
             stripped = line.strip()
             if not stripped or stripped.startswith("#"):
                 continue
             parts = stripped.split()
-            # Expected format: "<iso_ts> <spec_hash> <attempt|burn> <reason...>"
-            if len(parts) >= 3 and parts[2].lower() == "burn":
-                n += 1
-    return n
+            if len(parts) >= 3:
+                yield parts[1], parts[2].lower()
 
 
-def _append_burn_to_unlock_log(path: Path, spec_hash: str) -> None:
-    """Append a burn row to the unlock log. Append-only; no truncation."""
+def _count_burns_in_unlock_log(path: Path) -> int:
+    """Count rows in the unlock log whose 3rd whitespace-separated token is
+    ``burn``. Lines starting with ``#`` (comments) are ignored. Missing file
+    is treated as zero burns."""
+    return sum(1 for _, kind in _iter_unlock_log_rows(path) if kind == "burn")
+
+
+def _burn_fingerprint(profile: str, seed: int) -> str:
+    """The run-parameter fingerprint recorded on (and matched against) burn rows.
+
+    A burn discloses the test result OF A SPECIFIC RUN CONFIGURATION. Re-running
+    the same spec under a different cost profile or seed reveals NEW information
+    (e.g. ``--cost-profile zero`` discloses the gross test edge a fee-charged
+    burn never showed), so the free-rerun dedup matches on the FULL fingerprint,
+    not the spec hash alone (2026-06-12 adversarial-review loophole closure).
+    """
+    return f"profile={profile} seed={int(seed)}"
+
+
+def _spec_hash_has_burn(path: Path, spec_hash: str,
+                        fingerprint: Optional[str] = None) -> bool:
+    """True if the unlock log holds a ``burn`` row for spec_hash (and, when
+    ``fingerprint`` is given, with EXACTLY that run fingerprint in its reason).
+
+    Fingerprint-less legacy burn rows match only when ``fingerprint`` is None —
+    a fingerprinted lookup treats them conservatively as NOT matching, so a
+    rerun of a legacy-burned spec requires a fresh sanction + budget rather
+    than a free pass under arbitrary parameters.
+    """
+    for row_hash, kind, reason in _iter_unlock_log_rows_with_reason(path):
+        if kind != "burn" or row_hash != spec_hash:
+            continue
+        if fingerprint is None or fingerprint in reason:
+            return True
+    return False
+
+
+def _iter_unlock_log_rows_with_reason(path: Path):
+    """Yield ``(spec_hash, kind, reason)`` from the unlock log; skip comments."""
+    if not path.exists():
+        return
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split(None, 3)
+        if len(parts) < 3:
+            continue
+        yield parts[1], parts[2], (parts[3] if len(parts) > 3 else "")
+
+
+def _append_burn_to_unlock_log(path: Path, spec_hash: str, *,
+                               fingerprint: str = "") -> None:
+    """Append THE burn row to the unlock log. Append-only; no truncation.
+
+    This is the single canonical burn-writer for the whole pipeline. The other
+    participants in a sanctioned test run (``review_cli``, ``run_batch``)
+    record non-burn ``attempt`` rows — one sanctioned run must consume exactly
+    ONE unit of the 5-lifetime budget, not three. The row carries the run
+    fingerprint (cost profile + seed) so the free-rerun dedup can require an
+    exact configuration match.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    suffix = f" {fingerprint}" if fingerprint else ""
+    with path.open("a") as fh:
+        fh.write(f"{_iso_now()} {spec_hash} burn run_backtest_cli{suffix}\n")
+
+
+def _append_attempt_to_unlock_log(path: Path, spec_hash: str, reason: str) -> None:
+    """Append a non-burn ``attempt`` row (does not count against the budget)."""
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a") as fh:
-        fh.write(f"{_iso_now()} {spec_hash} burn run_backtest_cli\n")
+        fh.write(f"{_iso_now()} {spec_hash} attempt {reason}\n")
 
 
 def _parse_game_id(game_id: str) -> tuple[str, str, str]:
@@ -321,9 +391,15 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--cost-profile",
         default=None,
-        choices=("pessimistic", "live_pm", "zero"),
+        choices=("pessimistic", "live_pm", "zero", "calibrated_pm", "official_2026"),
         help="Override the active fill cost profile. If omitted, reads "
-        "$RESEARCH_COST_PROFILE; if that is also unset, uses pessimistic.",
+        "$RESEARCH_COST_PROFILE; if that is also unset, uses pessimistic. "
+        "'official_2026' is the official venue fee schedules (venue_fees "
+        "rates: parabolic per-category PM taker fee, no flat piece, full "
+        "Kalshi curve) — the promotion CLI passes it by default for the "
+        "sanctioned test-set burn. 'calibrated_pm' adds the real-trade-"
+        "calibrated book depth. 'pessimistic' charges a fictional 2%% flat "
+        "PM fee and exists only for comparability with pre-2026-05-28 trials.",
     )
     return p
 
@@ -526,25 +602,41 @@ def run(argv: Optional[List[str]] = None) -> int:
                 split=args.split,
                 argv=command_argv,
             )
-        # Lifetime budget check — don't increment on refusal.
-        burns = _count_burns_in_unlock_log(unlock_log)
-        if burns >= TEST_UNLOCK_BUDGET:
-            return _refuse(
-                error="test_unlock_budget_exhausted",
-                reason=(
-                    f"test-set unlock budget exhausted "
-                    f"({burns}/{TEST_UNLOCK_BUDGET} burned)"
-                ),
-                audit_path=audit_path,
-                agent_id=args.agent_id,
-                spec_hash=spec_hash,
-                split=args.split,
-                argv=command_argv,
+        # Dedup by FULL run fingerprint (spec_hash + cost profile + seed): only
+        # an exact repeat of an already-burned configuration discloses nothing
+        # new and records a free non-burn 'attempt' row. A different profile or
+        # seed on a burned spec reveals NEW information (e.g. zero-cost gross
+        # edge) and therefore consumes budget like any first burn
+        # (2026-06-12 review: closes the unlimited-free-rerun loophole).
+        from research.harness.cost_profile import get_active_profile
+        fingerprint = _burn_fingerprint(
+            get_active_profile().name, int(args.rng_seed))
+        if _spec_hash_has_burn(unlock_log, spec_hash, fingerprint=fingerprint):
+            _append_attempt_to_unlock_log(
+                unlock_log, spec_hash,
+                reason=f"run_backtest_cli(rerun:already_burned {fingerprint})",
             )
-        # Append the burn BEFORE the backtest runs so an exception during
-        # the run still consumes the unlock budget — preventing retry-loops
-        # from probing the test set.
-        _append_burn_to_unlock_log(unlock_log, spec_hash)
+        else:
+            # Lifetime budget check — don't increment on refusal.
+            burns = _count_burns_in_unlock_log(unlock_log)
+            if burns >= TEST_UNLOCK_BUDGET:
+                return _refuse(
+                    error="test_unlock_budget_exhausted",
+                    reason=(
+                        f"test-set unlock budget exhausted "
+                        f"({burns}/{TEST_UNLOCK_BUDGET} burned)"
+                    ),
+                    audit_path=audit_path,
+                    agent_id=args.agent_id,
+                    spec_hash=spec_hash,
+                    split=args.split,
+                    argv=command_argv,
+                )
+            # Append the burn BEFORE the backtest runs so an exception during
+            # the run still consumes the unlock budget — preventing retry-loops
+            # from probing the test set.
+            _append_burn_to_unlock_log(unlock_log, spec_hash,
+                                       fingerprint=fingerprint)
 
     # ---- Mechanistic writeup (optional) ----
     mech_text: Optional[str] = None
@@ -598,6 +690,9 @@ def run(argv: Optional[List[str]] = None) -> int:
             args.split,
             rng_seed=int(args.rng_seed),
             unlock_test_token=unlock_token,
+            # Same log this boundary wrote its burn row to — run_batch records
+            # a non-burn 'attempt' row there (never a second burn).
+            unlock_log_path=unlock_log,
         )
     except Exception as exc:  # noqa: BLE001
         return _refuse(

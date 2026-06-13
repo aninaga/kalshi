@@ -42,6 +42,18 @@ _TEST_UNLOCKS_LOG = Path("market_data/test_unlocks.log")
 # Total lifetime test-set unlock budget.
 _MAX_UNLOCKS = 5
 
+# Cost profiles run_backtest accepts (see research/harness/cost_profile.py).
+_COST_PROFILE_CHOICES = (
+    "pessimistic", "live_pm", "zero", "calibrated_pm", "official_2026",
+)
+
+# Default profile for the sanctioned test-set burn: 'official_2026' is the
+# profile wired to the official venue fee schedules (venue_fees rates —
+# parabolic per-category PM taker fee, NO flat piece, full Kalshi curve).
+# The legacy 'pessimistic' profile charges a fictional 2% flat PM fee; burning
+# one of the 5 lifetime unlocks under fictional costs would waste it.
+_DEFAULT_BURN_COST_PROFILE = "official_2026"
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -78,15 +90,22 @@ def _remaining_unlocks(log_path: Path = _TEST_UNLOCKS_LOG) -> int:
     return _MAX_UNLOCKS - _count_burns(log_path)
 
 
-def _append_burn_row(
+def _append_attempt_row(
     spec_hash: str,
     log_path: Path = _TEST_UNLOCKS_LOG,
 ) -> None:
-    """Append a burn row to the unlock log."""
+    """Append a non-burn ``attempt`` row recording that this CLI initiated
+    a sanctioned test run.
+
+    Deliberately NOT a ``burn`` row: the single canonical burn is written by
+    ``research.agents.tools.run_backtest`` (the security boundary) into the
+    same log (we pass ``--unlock-log``). Writing ``burn`` here too would
+    double-count one sanctioned run against the 5-lifetime budget.
+    """
     log_path.parent.mkdir(parents=True, exist_ok=True)
     ts = datetime.datetime.now(tz=datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     with log_path.open("a", encoding="utf-8") as fh:
-        fh.write(f"{ts} {spec_hash} burn promotion_cli\n")
+        fh.write(f"{ts} {spec_hash} attempt promotion_cli\n")
 
 
 def _find_trial_by_hash(spec_hash: str, db_path: Path | str | None = None) -> TrialRow | None:
@@ -292,8 +311,15 @@ def cmd_burn_unlock(
     yes: bool = False,
     log_path: Path = _TEST_UNLOCKS_LOG,
     db_path: Path | str | None = None,
+    cost_profile: str = _DEFAULT_BURN_COST_PROFILE,
 ) -> int:
-    """Interactive: review and burn one test-set unlock."""
+    """Interactive: review and burn one test-set unlock.
+
+    The burn row itself is written by the ``run_backtest`` subprocess (the
+    single canonical burn-writer); this command records an ``attempt`` row.
+    The backtest runs under ``cost_profile`` (default ``official_2026`` —
+    the official venue_fees rates), not the fictional ``pessimistic`` default.
+    """
 
     # 1. Budget check.
     remaining = _remaining_unlocks(log_path)
@@ -331,6 +357,7 @@ def cmd_burn_unlock(
     print(f"  Spec name:          {trial.spec_name}")
     print(f"  Spec hash:          {spec_hash}")
     print(f"  Reviewer said:      {rec_line}")
+    print(f"  Cost profile:       {cost_profile}")
     print(f"  Unlocks remaining:  {remaining} / {_MAX_UNLOCKS}")
     print()
     print("This will run run_backtest on the TEST split. This action is IRREVERSIBLE.")
@@ -372,8 +399,14 @@ def cmd_burn_unlock(
         tf.write(spec_json_str)
         spec_file = tf.name
 
-    # 6. Shell out to run_backtest.
-    print(f"Running backtest on test split (token={unlock_token[:16]}...)...")
+    # 6. Shell out to run_backtest. We pass --unlock-log so the subprocess —
+    # the single canonical burn-writer — appends its ONE burn row to the same
+    # log this CLI counts; and --cost-profile so the burn does not execute
+    # under the fictional 'pessimistic' default.
+    print(
+        f"Running backtest on test split "
+        f"(token={unlock_token[:16]}..., cost_profile={cost_profile})..."
+    )
     cmd = [
         sys.executable,
         "-m", "research.agents.tools.run_backtest",
@@ -381,7 +414,11 @@ def cmd_burn_unlock(
         "--split", "test",
         "--unlock-test-token", unlock_token,
         "--agent-id", "promotion_cli",
+        "--unlock-log", str(log_path),
+        "--cost-profile", cost_profile,
     ]
+    if db_path is not None:
+        cmd += ["--registry-db", str(db_path)]
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, check=True)
     except subprocess.CalledProcessError as exc:
@@ -410,8 +447,11 @@ def cmd_burn_unlock(
         print("(run_backtest stdout was not parseable JSON; raw output follows)")
         print(stdout_text)
 
-    # 8. Append burn row to log.
-    _append_burn_row(spec_hash, log_path=log_path)
+    # 8. Append the promotion-CLI *attempt* row. The burn row was already
+    # written by the run_backtest subprocess (the single canonical burn-writer)
+    # into the same log, so the remaining-count below reflects exactly one
+    # burned unlock for this sanctioned run.
+    _append_attempt_row(spec_hash, log_path=log_path)
     new_remaining = _remaining_unlocks(log_path)
 
     # 9. Print test result summary.
@@ -487,6 +527,18 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Override the test_unlocks.log path (default: market_data/test_unlocks.log).",
     )
+    p.add_argument(
+        "--cost-profile",
+        default=_DEFAULT_BURN_COST_PROFILE,
+        choices=_COST_PROFILE_CHOICES,
+        help="Cost profile for the sanctioned --burn-unlock backtest. "
+        f"Default: {_DEFAULT_BURN_COST_PROFILE!r} — the official venue fee "
+        "schedules (venue_fees rates: parabolic per-category Polymarket "
+        "taker fee, no flat piece, full Kalshi curve), i.e. the most "
+        "realistic built-in profile. 'calibrated_pm' additionally uses "
+        "real-trade-calibrated book depth. 'pessimistic' charges a "
+        "fictional 2%% flat PM fee — do not burn an unlock under it.",
+    )
     return p
 
 
@@ -507,6 +559,7 @@ def main(argv: list[str] | None = None) -> int:
             yes=args.yes,
             log_path=log_path,
             db_path=db_path,
+            cost_profile=args.cost_profile,
         )
     if args.cmd_unlock_budget:
         return cmd_unlock_budget(log_path=log_path)

@@ -8,9 +8,8 @@ Design constraints
   present in the lake at test time.  They derive the expected ``n_games`` from
   ``load_split()`` intersected with ``list_games()``, not from a hard-coded
   count.
-- All test-set unlock tests monkey-patch ``run_batch._burn_test_unlock`` to
-  write to a temp file so the real ``market_data/test_unlocks.log`` is not
-  polluted.
+- All test-set unlock tests inject a temp path via ``unlock_log_path`` so the
+  real ``market_data/test_unlocks.log`` is not polluted.
 """
 
 from __future__ import annotations
@@ -167,13 +166,13 @@ class TestTestSetGuard(unittest.TestCase):
         self.assertIn("mismatch", msg.lower())
 
     def test_run_batch_test_accepted_with_correct_token(self):
-        """Correct token is accepted; burn is appended to (temp) log file."""
-        # Import lazily
-        try:
-            from research.harness.replay import replay_game  # noqa: F401
-        except ImportError:
-            self.skipTest("research.harness.replay not yet available")
+        """Correct token is accepted; a non-burn 'attempt' row is appended to
+        the injected temp log.
 
+        run_batch must NOT write a 'burn' row — the single canonical burn per
+        sanctioned run is written by research.agents.tools.run_backtest; a
+        second burn here would double-count the 5-lifetime budget.
+        """
         import research.harness.run_batch as rb_module
 
         spec = _make_spec()
@@ -184,29 +183,34 @@ class TestTestSetGuard(unittest.TestCase):
         ) as tmp:
             tmp_path = Path(tmp.name)
 
+        # Patch _import_replay with a fake so this test needs no lake and
+        # exercises only the guard + unlock-log bookkeeping.
+        def fake_replay_game(s, game_id, rng_seed=0, allow_test=False):
+            return types.SimpleNamespace(trades=[], skipped=[])
+
+        original_import_replay = rb_module._import_replay
+        rb_module._import_replay = lambda: (fake_replay_game, None)
         try:
-            # Monkey-patch _burn_test_unlock to write to tmp_path
-            original_burn = rb_module._burn_test_unlock
+            result = rb_module.run_batch(
+                spec, "test", unlock_test_token=token, unlock_log_path=tmp_path
+            )
+        finally:
+            rb_module._import_replay = original_import_replay
 
-            def fake_burn(s):
-                from datetime import datetime, timezone
-                tmp_path.parent.mkdir(parents=True, exist_ok=True)
-                with tmp_path.open("a") as fh:
-                    ts = datetime.now(tz=timezone.utc).isoformat()
-                    fh.write(f"{ts} {s.spec_hash()} burn run_batch(split=test)\n")
-
-            rb_module._burn_test_unlock = fake_burn
-            try:
-                result = rb_module.run_batch(
-                    spec, "test", unlock_test_token=token
-                )
-            finally:
-                rb_module._burn_test_unlock = original_burn
-
-            # Burn record must exist
+        try:
             content = tmp_path.read_text()
             self.assertIn(spec.spec_hash(), content)
-            self.assertIn("burn", content)
+            rows = [
+                line.split()
+                for line in content.splitlines()
+                if line.strip() and not line.strip().startswith("#")
+            ]
+            kinds = [r[2] for r in rows]
+            self.assertIn("attempt", kinds, "an attempt row must be recorded")
+            self.assertNotIn(
+                "burn", kinds,
+                "run_batch must not write burn rows (run_backtest owns the burn)",
+            )
 
             # Result must be a BatchResult
             from research.harness.run_batch import BatchResult
@@ -225,13 +229,21 @@ class TestBatchResultAggregation(unittest.TestCase):
     """Build fake TrialResult-like objects and verify _aggregate output."""
 
     def _fake_trade(self, gross: float, net: float, holding_sec: float, notional: float):
-        t = types.SimpleNamespace(
+        # Shaped like the REAL replay.Trade rows: entry/exit game-second
+        # timestamps and contracts/entry-price — NOT 'holding_sec'/'notional'
+        # attributes. The old aggregation read those nonexistent attributes,
+        # so BatchResult.avg_holding_sec / notional_traded were always 0.0
+        # on real runs; building fakes the real shape makes this a regression
+        # test for that defect.
+        entry_price = 0.5
+        return types.SimpleNamespace(
             pnl_gross=gross,
             pnl_net=net,
-            holding_sec=holding_sec,
-            notional=notional,
+            entry_ts_game_sec=300.0,
+            exit_ts_game_sec=300.0 + holding_sec,
+            contracts_filled=notional / entry_price,
+            entry_price=entry_price,
         )
-        return t
 
     def _fake_trial(self, trades, skipped=None):
         return types.SimpleNamespace(
@@ -310,6 +322,19 @@ class TestBatchResultAggregation(unittest.TestCase):
         std = math.sqrt(var)
         expected_sharpe = mu / std
         self.assertAlmostEqual(result.sharpe_per_trade_net, expected_sharpe, places=6)
+
+    def test_aggregation_legacy_duck_typed_fields(self):
+        """Duck-typed trades carrying literal holding_sec/notional attributes
+        (no entry/exit fields) still aggregate via the fallback reads."""
+        from research.harness.run_batch import _aggregate
+
+        spec = _make_spec()
+        t = types.SimpleNamespace(
+            pnl_gross=0.10, pnl_net=0.05, holding_sec=30.0, notional=2.5
+        )
+        result = _aggregate(spec, "train", [self._fake_trial([t])], rng_seed=0)
+        self.assertAlmostEqual(result.avg_holding_sec, 30.0, places=9)
+        self.assertAlmostEqual(result.notional_traded, 2.5, places=9)
 
     def test_aggregation_no_trades(self):
         """Zero-trade batch yields NaN sharpe, NaN win_rate, zero pnl."""

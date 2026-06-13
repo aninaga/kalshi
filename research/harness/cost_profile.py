@@ -9,10 +9,11 @@ scripts switch profiles via :func:`use_profile` (context manager) or
 
 Three pre-defined profiles are exposed:
 
-  - ``PESSIMISTIC`` — current pre-2026-05-28 defaults (1¢ half-spread, full PM
-    fee curve + 2% flat taker). Mirrors what every prior trial was charged.
+  - ``PESSIMISTIC`` — current pre-2026-05-28 defaults (1¢ full spread =
+    ±0.5¢ around mid, full PM fee curve + 2% flat taker). Mirrors what every
+    prior trial was charged.
   - ``LIVE_PM``     — empirically more realistic PM moneyline costs (0.5¢
-    half-spread, 0.5% flat + smaller curve). Best-guess of what live PM
+    full spread, 0.5% flat + smaller curve). Best-guess of what live PM
     actually charges for liquid NBA moneyline binaries.
   - ``ZERO_COST``   — no spread, no fees. The edge-discovery diagnostic; if a
     strategy is negative even here, it has negative *underlying* expected
@@ -38,9 +39,14 @@ class CostProfile:
     name : str
         Human-readable label used in audit logs / reports.
     spread_bps : int
-        Half-spread in basis points used by ``synthesize_orderbook_from_mid``
-        (100 = 1¢ half-spread = 2¢ round-trip). Applies on top of the mid
-        when synthesizing a book from a single mid price.
+        FULL bid-ask spread in probability basis points used by
+        ``synthesize_orderbook_from_mid`` (100 = 1¢ full spread = ±0.5¢
+        each side of the mid = 1¢ round-trip when crossing the spread both
+        ways). Applies when synthesizing a book from a single mid price.
+        NOTE: earlier docs called this a "half-spread (2¢ round-trip)" —
+        that was wrong. The code has always placed bid/ask at
+        ``mid ∓ spread_bps/20000``, and every recorded trial was charged
+        that way, so the doc (not the code) was corrected (2026-06-12).
     pm_curve_fee_rate_bps : int
         ``fee_rate_bps`` parameter to the PM curve fee piece.
     pm_flat_taker_rate : float
@@ -69,7 +75,7 @@ class CostProfile:
 
 PESSIMISTIC = CostProfile(
     name="pessimistic",
-    spread_bps=100,                  # 1¢ half-spread (2¢ round-trip)
+    spread_bps=100,                  # 1¢ full spread (±0.5¢; 1¢ round-trip)
     pm_curve_fee_rate_bps=1000,      # the pre-2026-05-28 hardcoded default
     pm_flat_taker_rate=0.02,         # 2% of notional, taker side
     kalshi_taker_multiplier=1.0,
@@ -77,7 +83,7 @@ PESSIMISTIC = CostProfile(
 
 LIVE_PM = CostProfile(
     name="live_pm",
-    spread_bps=50,                   # 0.5¢ half-spread (1¢ round-trip)
+    spread_bps=50,                   # 0.5¢ full spread (±0.25¢; 0.5¢ round-trip)
     pm_curve_fee_rate_bps=200,       # smaller curve piece
     pm_flat_taker_rate=0.005,        # 0.5% flat (realistic for liquid NBA binaries)
     kalshi_taker_multiplier=1.0,
@@ -115,7 +121,7 @@ def _load_calibrated_depth(default: float = 28.26) -> float:
 # evaluations and the promotion screen should use.
 CALIBRATED_PM = CostProfile(
     name="calibrated_pm",
-    spread_bps=100,                 # 1¢ half-spread (2¢ round-trip)
+    spread_bps=100,                 # 1¢ full spread (±0.5¢; 1¢ round-trip)
     pm_curve_fee_rate_bps=200,
     pm_flat_taker_rate=0.005,
     depth_per_level=_load_calibrated_depth(),
@@ -128,7 +134,7 @@ CALIBRATED_PM = CostProfile(
 # actually charge" profile.
 OFFICIAL_2026 = CostProfile(
     name="official_2026",
-    spread_bps=100,                 # 1¢ half-spread (2¢ round-trip)
+    spread_bps=100,                 # 1¢ full spread (±0.5¢; 1¢ round-trip)
     pm_curve_fee_rate_bps=500,
     pm_flat_taker_rate=0.0,         # official schedule has no flat piece
     kalshi_taker_multiplier=1.0,
@@ -161,7 +167,8 @@ def set_active_profile(profile: "CostProfile | str") -> CostProfile:
     """Set the active cost profile; return the previous one.
 
     Accepts a :class:`CostProfile` instance or one of the built-in name
-    strings (``"pessimistic"`` | ``"live_pm"`` | ``"zero"``).
+    strings (``"pessimistic"`` | ``"live_pm"`` | ``"zero"`` |
+    ``"calibrated_pm"`` | ``"official_2026"``).
     """
     global _active_profile
     previous = _active_profile

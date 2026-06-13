@@ -364,7 +364,12 @@ class TestBurnUnlockWithYesProceeds(unittest.TestCase):
     """test_burn_unlock_with_yes_proceeds:
     --yes bypasses confirmation, mocks run_backtest subprocess, verifies:
     - unlock token == sha256(spec_json).hexdigest()
-    - burn row appended to log
+    - the subprocess is pointed at the SAME unlock log (--unlock-log) and the
+      overridden registry DB (--registry-db)
+    - the burn defaults to the realistic official_2026 cost profile
+    - EXACTLY ONE burn row total (written by the run_backtest subprocess) plus
+      a non-burn promotion_cli 'attempt' row. The pre-fix behavior appended a
+      second 'burn' row here, so one sanctioned run cost 2-3 budget units.
     """
 
     def setUp(self) -> None:
@@ -383,20 +388,32 @@ class TestBurnUnlockWithYesProceeds(unittest.TestCase):
             _MINIMAL_SPEC_JSON.encode("utf-8")
         ).hexdigest()
 
-    def test_proceeds_with_yes(self) -> None:
+    def _fake_subprocess(self, captured_cmd: list[list[str]]):
+        """Return a subprocess.run stand-in that mimics the real run_backtest
+        boundary: it appends THE single burn row to the log given via
+        --unlock-log, then reports metrics on stdout."""
         mock_result = MagicMock()
         mock_result.stdout = json.dumps(
             {"test_pnl_net": 0.0312, "test_sharpe_net": 0.412, "test_n_trades": 201}
         )
         mock_result.stderr = ""
 
-        captured_cmd: list[list[str]] = []
-
         def fake_run(cmd: list[str], **kwargs: object) -> MagicMock:
             captured_cmd.append(cmd)
+            log = Path(cmd[cmd.index("--unlock-log") + 1])
+            token_spec_hash = _MINIMAL_SPEC_HASH
+            with log.open("a", encoding="utf-8") as fh:
+                fh.write(
+                    f"2026-06-12T00:00:00Z {token_spec_hash} burn run_backtest_cli\n"
+                )
             return mock_result
 
-        with patch("subprocess.run", side_effect=fake_run):
+        return fake_run
+
+    def test_proceeds_with_yes(self) -> None:
+        captured_cmd: list[list[str]] = []
+
+        with patch("subprocess.run", side_effect=self._fake_subprocess(captured_cmd)):
             rc = cmd_burn_unlock(
                 _MINIMAL_SPEC_HASH,
                 yes=True,
@@ -413,8 +430,58 @@ class TestBurnUnlockWithYesProceeds(unittest.TestCase):
         token_idx = cmd_args.index("--unlock-test-token") + 1
         self.assertEqual(cmd_args[token_idx], self.expected_token)
 
-        # Verify burn row appended.
+        # The subprocess must write its burn into the SAME log we count.
+        self.assertIn("--unlock-log", cmd_args)
+        self.assertEqual(
+            cmd_args[cmd_args.index("--unlock-log") + 1], str(self.log_path)
+        )
+
+        # The overridden registry DB must be plumbed through too.
+        self.assertIn("--registry-db", cmd_args)
+        self.assertEqual(
+            cmd_args[cmd_args.index("--registry-db") + 1], str(self.db_path)
+        )
+
+        # The burn must default to the realistic official-venue-fees profile,
+        # NOT the fictional 'pessimistic' default.
+        self.assertIn("--cost-profile", cmd_args)
+        self.assertEqual(
+            cmd_args[cmd_args.index("--cost-profile") + 1], "official_2026"
+        )
+
+        # EXACTLY one burn row (the subprocess's) — not a second one from the
+        # promotion CLI.
         self.assertEqual(_count_burns(self.log_path), 1)
+
+        # And one non-burn attempt row attributed to promotion_cli.
+        attempt_rows = [
+            line.split()
+            for line in self.log_path.read_text().splitlines()
+            if line.strip()
+            and not line.startswith("#")
+            and line.split()[2] == "attempt"
+        ]
+        self.assertEqual(len(attempt_rows), 1)
+        self.assertEqual(attempt_rows[0][1], _MINIMAL_SPEC_HASH)
+        self.assertEqual(attempt_rows[0][3], "promotion_cli")
+
+    def test_custom_cost_profile_passed_through(self) -> None:
+        captured_cmd: list[list[str]] = []
+
+        with patch("subprocess.run", side_effect=self._fake_subprocess(captured_cmd)):
+            rc = cmd_burn_unlock(
+                _MINIMAL_SPEC_HASH,
+                yes=True,
+                log_path=self.log_path,
+                db_path=self.db_path,
+                cost_profile="calibrated_pm",
+            )
+
+        self.assertEqual(rc, 0)
+        cmd_args = captured_cmd[0]
+        self.assertEqual(
+            cmd_args[cmd_args.index("--cost-profile") + 1], "calibrated_pm"
+        )
 
     def tearDown(self) -> None:
         self.log_path.unlink(missing_ok=True)

@@ -9,9 +9,13 @@ Public API
 Test-set safety
 ---------------
 If ``split == "test"``, ``run_batch`` requires a non-None ``unlock_test_token``
-equal to ``sha256(spec.to_json())``.  On acceptance it appends a burn record to
-``market_data/test_unlocks.log``.  There is no remaining-budget check here; that
-is Wave 3's job.
+equal to ``sha256(spec.to_json())``.  On acceptance it appends a non-burn
+``attempt`` record to ``market_data/test_unlocks.log`` (or ``unlock_log_path``
+when given).  The single canonical ``burn`` row — the one that counts against
+the 5-lifetime unlock budget — is written by
+``research.agents.tools.run_backtest`` (the security boundary), which also
+enforces the remaining-budget check.  Writing ``burn`` here too would
+double-count one sanctioned run.
 """
 
 from __future__ import annotations
@@ -116,13 +120,30 @@ def _check_test_guard(
         )
 
 
-def _burn_test_unlock(spec: StrategySpec) -> None:
-    """Append a burn record to market_data/test_unlocks.log."""
-    log_path = _REPO_ROOT / "market_data" / "test_unlocks.log"
+def _record_test_attempt(
+    spec: StrategySpec,
+    unlock_log_path: str | Path | None = None,
+) -> None:
+    """Append a non-burn ``attempt`` record to the unlock log.
+
+    Deliberately NOT a ``burn`` row: the single canonical burn per sanctioned
+    spec is written by ``research.agents.tools.run_backtest``. One sanctioned
+    test run must consume exactly one unit of the 5-lifetime budget, so every
+    other participant (this function, the promotion CLI) records ``attempt``.
+
+    ``unlock_log_path`` lets callers (run_backtest, tests) point this at the
+    same overridden log they use; default is the canonical
+    ``market_data/test_unlocks.log``.
+    """
+    log_path = (
+        Path(unlock_log_path)
+        if unlock_log_path is not None
+        else _REPO_ROOT / "market_data" / "test_unlocks.log"
+    )
     log_path.parent.mkdir(parents=True, exist_ok=True)
     with log_path.open("a") as fh:
         ts = datetime.now(tz=timezone.utc).isoformat()
-        fh.write(f"{ts} {spec.spec_hash()} burn run_batch(split=test)\n")
+        fh.write(f"{ts} {spec.spec_hash()} attempt run_batch(split=test)\n")
 
 
 # ---------------------------------------------------------------------------
@@ -167,6 +188,38 @@ class BatchResult:
 # Aggregation helpers
 # ---------------------------------------------------------------------------
 
+def _trade_holding_sec(t: object) -> float:
+    """Holding time of one trade in game-seconds.
+
+    Computed from the real ``Trade`` fields (``exit_ts_game_sec`` −
+    ``entry_ts_game_sec``) — matching ``replay.py``'s per-game
+    ``avg_holding_sec``. The previous read of a nonexistent ``holding_sec``
+    attribute silently made ``BatchResult.avg_holding_sec`` always 0.0.
+    Falls back to a literal ``holding_sec`` attribute for duck-typed callers.
+    """
+    entry = getattr(t, "entry_ts_game_sec", None)
+    exit_ = getattr(t, "exit_ts_game_sec", None)
+    if entry is not None and exit_ is not None:
+        return float(exit_) - float(entry)
+    return float(getattr(t, "holding_sec", 0.0))
+
+
+def _trade_notional(t: object) -> float:
+    """Entry notional of one trade in dollars.
+
+    Computed as ``abs(contracts_filled * entry_price)`` — matching
+    ``replay.py``'s per-game ``notional_traded``. The previous read of a
+    nonexistent ``notional`` attribute silently made
+    ``BatchResult.notional_traded`` always 0.0. Falls back to a literal
+    ``notional`` attribute for duck-typed callers.
+    """
+    contracts = getattr(t, "contracts_filled", None)
+    price = getattr(t, "entry_price", None)
+    if contracts is not None and price is not None:
+        return abs(float(contracts) * float(price))
+    return float(getattr(t, "notional", 0.0))
+
+
 def _aggregate(
     spec: StrategySpec,
     split: Literal["train", "val", "test"],
@@ -209,8 +262,8 @@ def _aggregate(
             for t in trades:
                 all_trades_gross.append(float(getattr(t, "pnl_gross", 0.0)))
                 all_trades_net.append(float(getattr(t, "pnl_net", 0.0)))
-                all_holding_secs.append(float(getattr(t, "holding_sec", 0.0)))
-                all_notional.append(float(getattr(t, "notional", 0.0)))
+                all_holding_secs.append(_trade_holding_sec(t))
+                all_notional.append(_trade_notional(t))
         elif len(skipped) > 0:
             # Had entry attempts but couldn't trade
             n_games_skipped += 1
@@ -324,6 +377,7 @@ def run_batch(
     rng_seed: int = 0,
     parallel: int = 1,
     unlock_test_token: str | None = None,
+    unlock_log_path: str | Path | None = None,
 ) -> BatchResult:
     """Run the spec across all games in the specified split.
 
@@ -340,6 +394,10 @@ def run_batch(
     unlock_test_token:
         Required when ``split == "test"``; must equal
         ``sha256(spec.to_json()).hexdigest()``.
+    unlock_log_path:
+        Where the non-burn ``attempt`` row is appended on a test run.
+        Defaults to the canonical ``market_data/test_unlocks.log``; tests and
+        ``run_backtest`` inject their own path.
 
     Returns
     -------
@@ -360,7 +418,7 @@ def run_batch(
     # Test-set guard
     if split == "test":
         _check_test_guard(spec, unlock_test_token)
-        _burn_test_unlock(spec)
+        _record_test_attempt(spec, unlock_log_path)
 
     # Load game IDs for this split
     game_ids = load_split(split)
